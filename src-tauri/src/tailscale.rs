@@ -181,7 +181,11 @@ mod platform {
 #[cfg(windows)]
 mod platform {
     use super::*;
+    use std::os::windows::process::CommandExt;
     use std::process::Command;
+
+    /// CREATE_NO_WINDOW flag — prevents console window flash when spawning CLI
+    const CREATE_NO_WINDOW: u32 = 0x08000000;
 
     /// Find the tailscale CLI — check common install paths then PATH
     fn tailscale_cmd() -> Command {
@@ -191,11 +195,15 @@ mod platform {
         ];
         for path in &candidates {
             if std::path::Path::new(path).exists() {
-                return Command::new(path);
+                let mut cmd = Command::new(path);
+                cmd.creation_flags(CREATE_NO_WINDOW);
+                return cmd;
             }
         }
         // Fall back to PATH
-        Command::new("tailscale")
+        let mut cmd = Command::new("tailscale");
+        cmd.creation_flags(CREATE_NO_WINDOW);
+        cmd
     }
 
     pub async fn fetch_status_json() -> Result<Vec<u8>, String> {
