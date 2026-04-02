@@ -31,4 +31,5 @@ export interface AppSettings {
   saveDirectory: string;
   autoAccept: boolean;
   showOfflineNodes: boolean;
+  showExitNodes: boolean;
 }

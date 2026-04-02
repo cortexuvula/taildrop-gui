@@ -61,6 +61,17 @@ export function Settings({ settings, allPeers, onUpdate, onClose }: SettingsProp
         </div>
 
         <div className="settings-section">
+          <label className="settings-label toggle-row">
+            <span>Show Mullvad/exit nodes</span>
+            <input
+              type="checkbox"
+              checked={settings.showExitNodes ?? false}
+              onChange={(e) => onUpdate({ showExitNodes: e.target.checked })}
+            />
+          </label>
+        </div>
+
+        <div className="settings-section">
           <label className="settings-label">Node Visibility</label>
           <div className="node-visibility-list">
             {nonSelfPeers.map((peer) => (

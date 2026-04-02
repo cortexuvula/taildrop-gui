@@ -7,6 +7,7 @@ const DEFAULT_SETTINGS: AppSettings = {
   saveDirectory: "",
   autoAccept: false,
   showOfflineNodes: false,
+  showExitNodes: false,
 };
 
 export function useTailscale() {
@@ -154,12 +155,21 @@ export function useTailscale() {
     [settings.saveDirectory, refreshIncoming]
   );
 
-  // Visible peers (excluding hidden + self + optionally offline)
+  // Detect own tailnet domain from self node (e.g. "tail161478.ts.net")
+  const selfNode = peers.find((p) => p.is_self);
+  const tailnetDomain = selfNode
+    ? selfNode.dns_name.split(".").slice(1).join(".")
+    : null;
+
+  // Visible peers: same tailnet only, excluding self + hidden + optionally offline
+  // This filters out Mullvad/exit-node peers (mullvad.ts.net) that appear via
+  // the Mullvad-Tailscale integration.
   const visiblePeers = peers.filter(
     (p) =>
       !p.is_self &&
       !settings.hiddenNodes.includes(p.id) &&
-      (settings.showOfflineNodes || p.online)
+      (settings.showOfflineNodes || p.online) &&
+      (!tailnetDomain || p.dns_name.endsWith(tailnetDomain) || settings.showExitNodes)
   );
 
   return {
