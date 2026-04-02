@@ -99,20 +99,17 @@ jobs:
         run: npm ci
 
       # macOS universal binary (arm64 + x86_64)
+      # Unsigned build — users will see "unidentified developer" warning.
+      # Right-click → Open to bypass, or add APPLE_CERTIFICATE secrets to enable signing.
       - name: Build and upload (macOS universal)
         if: matrix.os == 'macos-latest'
         uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
-          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
-          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
-          APPLE_ID: ${{ secrets.APPLE_ID }}
-          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
-          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
         with:
           releaseId: ${{ needs.create-release.outputs.release_id }}
-          args: --target universal-apple-darwin
+          # Disable codesigning via config override — no certs configured
+          args: --target universal-apple-darwin --config '{"bundle":{"macOS":{"signingIdentity":null}}}'
 
       # Windows x64
       - name: Build and upload (Windows)
