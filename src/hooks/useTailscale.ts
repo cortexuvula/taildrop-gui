@@ -100,7 +100,7 @@ export function useTailscale() {
         const arrayBuffer = await file.arrayBuffer();
         const data = Array.from(new Uint8Array(arrayBuffer));
         await invoke("send_file", {
-          peerId: peer.id,
+          peerId: peer.hostname,
           filename: file.name,
           data,
         });
