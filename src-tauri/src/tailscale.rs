@@ -65,6 +65,9 @@ mod platform {
     use hyper_util::client::legacy::Client;
     use hyper_util::rt::TokioExecutor;
 
+    #[cfg(target_os = "macos")]
+    const SOCKET_PATH: &str = "/var/run/tailscaled/tailscaled.sock";
+    #[cfg(not(target_os = "macos"))]
     const SOCKET_PATH: &str = "/var/run/tailscale/tailscaled.sock";
 
     fn make_client() -> Client<hyperlocal::UnixConnector, Full<Bytes>> {
