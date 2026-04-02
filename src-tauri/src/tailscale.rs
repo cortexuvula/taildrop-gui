@@ -182,10 +182,10 @@ mod platform {
     use super::*;
     use std::process::Command;
 
-    fn tailscale_cmd() -> Command {
+    fn find_tailscale() -> Option<&'static str> {
         // NOTE: Tailscale.app ships two binaries:
-        //   Tailscale  (capital T) = the GUI app — do NOT use for CLI
-        //   tailscale  (lower t)   = the CLI tool — use this
+        //   Tailscale  (capital T) = the GUI app — returns empty output
+        //   tailscale  (lower t)   = the CLI tool — returns JSON
         let candidates = [
             "/Applications/Tailscale.app/Contents/MacOS/tailscale",
             "/usr/local/bin/tailscale",
@@ -193,23 +193,44 @@ mod platform {
         ];
         for path in &candidates {
             if std::path::Path::new(path).exists() {
-                return Command::new(path);
+                return Some(path);
             }
         }
-        Command::new("tailscale")
+        None
     }
 
     pub async fn fetch_status_json() -> Result<Vec<u8>, String> {
-        let output = tailscale_cmd()
+        let binary = find_tailscale();
+        let binary_path = binary.unwrap_or("tailscale (from PATH)");
+
+        let mut cmd = if let Some(path) = binary {
+            Command::new(path)
+        } else {
+            Command::new("tailscale")
+        };
+
+        let output = cmd
             .args(["status", "--json"])
             .output()
             .map_err(|e| format!(
-                "Could not run tailscale CLI. Make sure Tailscale is installed: {}",
-                e
+                "Could not run tailscale CLI [tried: {}]: {}",
+                binary_path, e
             ))?;
+
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+
         if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            return Err(format!("tailscale status failed: {}", stderr));
+            return Err(format!(
+                "tailscale status failed [binary: {}] stderr: {} stdout: {}",
+                binary_path, stderr, stdout
+            ));
+        }
+        if output.stdout.is_empty() {
+            return Err(format!(
+                "tailscale returned empty output [binary: {}] stderr: {}",
+                binary_path, stderr
+            ));
         }
         Ok(output.stdout)
     }
