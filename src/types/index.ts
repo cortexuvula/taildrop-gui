@@ -30,4 +30,5 @@ export interface AppSettings {
   hiddenNodes: string[];
   saveDirectory: string;
   autoAccept: boolean;
+  showOfflineNodes: boolean;
 }

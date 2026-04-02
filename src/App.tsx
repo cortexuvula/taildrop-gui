@@ -3,6 +3,7 @@ import { Sidebar } from "./components/Sidebar";
 import { DropZone } from "./components/DropZone";
 import { TransferHistory } from "./components/TransferHistory";
 import { Settings } from "./components/Settings";
+import { DebugPanel } from "./components/DebugPanel";
 import { useTailscale } from "./hooks/useTailscale";
 import type { Peer } from "./types";
 import "./App.css";
@@ -23,6 +24,7 @@ function App() {
 
   const [selectedPeer, setSelectedPeer] = useState<Peer | null>(null);
   const [showSettings, setShowSettings] = useState(false);
+  const [showDebug, setShowDebug] = useState(false);
 
   return (
     <div className="app">
@@ -32,6 +34,7 @@ function App() {
         onSelectPeer={setSelectedPeer}
         incomingCount={incomingFiles.length}
         onShowSettings={() => setShowSettings(true)}
+        onShowDebug={() => setShowDebug(true)}
       />
 
       <div className="main">
@@ -71,6 +74,13 @@ function App() {
           allPeers={peers}
           onUpdate={updateSettings}
           onClose={() => setShowSettings(false)}
+        />
+      )}
+
+      {showDebug && (
+        <DebugPanel
+          peers={peers}
+          onClose={() => setShowDebug(false)}
         />
       )}
     </div>

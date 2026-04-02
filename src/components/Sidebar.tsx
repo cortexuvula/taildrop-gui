@@ -6,6 +6,7 @@ interface SidebarProps {
   onSelectPeer: (peer: Peer) => void;
   incomingCount: number;
   onShowSettings: () => void;
+  onShowDebug: () => void;
 }
 
 function getOsIcon(os: string): string {
@@ -23,6 +24,7 @@ export function Sidebar({
   onSelectPeer,
   incomingCount,
   onShowSettings,
+  onShowDebug,
 }: SidebarProps) {
   const onlinePeers = peers.filter((p) => p.online);
   const offlinePeers = peers.filter((p) => !p.online);
@@ -35,6 +37,9 @@ export function Sidebar({
           {incomingCount > 0 && (
             <span className="badge">{incomingCount}</span>
           )}
+          <button className="icon-btn" onClick={onShowDebug} title="Debug">
+            🔍
+          </button>
           <button className="icon-btn" onClick={onShowSettings} title="Settings">
             ⚙
           </button>

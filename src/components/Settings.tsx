@@ -50,6 +50,17 @@ export function Settings({ settings, allPeers, onUpdate, onClose }: SettingsProp
         </div>
 
         <div className="settings-section">
+          <label className="settings-label toggle-row">
+            <span>Show offline nodes</span>
+            <input
+              type="checkbox"
+              checked={settings.showOfflineNodes ?? false}
+              onChange={(e) => onUpdate({ showOfflineNodes: e.target.checked })}
+            />
+          </label>
+        </div>
+
+        <div className="settings-section">
           <label className="settings-label">Node Visibility</label>
           <div className="node-visibility-list">
             {nonSelfPeers.map((peer) => (

@@ -6,6 +6,7 @@ const DEFAULT_SETTINGS: AppSettings = {
   hiddenNodes: [],
   saveDirectory: "",
   autoAccept: false,
+  showOfflineNodes: false,
 };
 
 export function useTailscale() {
@@ -153,9 +154,12 @@ export function useTailscale() {
     [settings.saveDirectory, refreshIncoming]
   );
 
-  // Visible peers (excluding hidden + self)
+  // Visible peers (excluding hidden + self + optionally offline)
   const visiblePeers = peers.filter(
-    (p) => !p.is_self && !settings.hiddenNodes.includes(p.id)
+    (p) =>
+      !p.is_self &&
+      !settings.hiddenNodes.includes(p.id) &&
+      (settings.showOfflineNodes || p.online)
   );
 
   return {
