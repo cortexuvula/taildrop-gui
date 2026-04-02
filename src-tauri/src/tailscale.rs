@@ -52,10 +52,10 @@ pub struct IncomingFile {
 }
 
 // ============================================================
-// Unix implementation — hyperlocal (Unix socket)
+// Linux implementation — hyperlocal (Unix socket)
 // ============================================================
 
-#[cfg(unix)]
+#[cfg(all(unix, not(target_os = "macos")))]
 mod platform {
     use super::*;
     use bytes::Bytes;
@@ -65,9 +65,6 @@ mod platform {
     use hyper_util::client::legacy::Client;
     use hyper_util::rt::TokioExecutor;
 
-    #[cfg(target_os = "macos")]
-    const SOCKET_PATH: &str = "/var/run/tailscaled/tailscaled.sock";
-    #[cfg(not(target_os = "macos"))]
     const SOCKET_PATH: &str = "/var/run/tailscale/tailscaled.sock";
 
     fn make_client() -> Client<hyperlocal::UnixConnector, Full<Bytes>> {
@@ -173,6 +170,82 @@ mod platform {
 }
 
 // ============================================================
+// macOS implementation — CLI-based
+// ============================================================
+//
+// The Unix socket at /var/run/tailscaled/tailscaled.sock requires
+// elevated permissions that a signed .app bundle cannot easily obtain.
+// Using the tailscale CLI is simpler and more reliable on macOS.
+
+#[cfg(target_os = "macos")]
+mod platform {
+    use super::*;
+    use std::process::Command;
+
+    fn tailscale_cmd() -> Command {
+        // Tailscale.app installs CLI at this path
+        let candidates = [
+            "/Applications/Tailscale.app/Contents/MacOS/Tailscale",
+            "/usr/local/bin/tailscale",
+            "/opt/homebrew/bin/tailscale",
+        ];
+        for path in &candidates {
+            if std::path::Path::new(path).exists() {
+                return Command::new(path);
+            }
+        }
+        Command::new("tailscale")
+    }
+
+    pub async fn fetch_status_json() -> Result<Vec<u8>, String> {
+        let output = tailscale_cmd()
+            .args(["status", "--json"])
+            .output()
+            .map_err(|e| format!(
+                "Could not run tailscale CLI. Make sure Tailscale is installed: {}",
+                e
+            ))?;
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            return Err(format!("tailscale status failed: {}", stderr));
+        }
+        Ok(output.stdout)
+    }
+
+    pub async fn send_file(peer_id: &str, filename: &str, data: Vec<u8>) -> Result<String, String> {
+        let temp_path = std::env::temp_dir().join(filename);
+        std::fs::write(&temp_path, &data)
+            .map_err(|e| format!("Failed to write temp file: {}", e))?;
+        let output = tailscale_cmd()
+            .args(["file", "cp", &temp_path.to_string_lossy(), &format!("{}:", peer_id)])
+            .output()
+            .map_err(|e| format!("Failed to run tailscale file cp: {}", e))?;
+        let _ = std::fs::remove_file(&temp_path);
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            return Err(format!("tailscale file cp failed: {}", stderr));
+        }
+        Ok(format!("Sent {} to {}", filename, peer_id))
+    }
+
+    pub async fn get_incoming_files() -> Result<Vec<u8>, String> {
+        Ok(b"[]".to_vec())
+    }
+
+    pub async fn accept_file(_name: &str, save_dir: &str) -> Result<String, String> {
+        let output = tailscale_cmd()
+            .args(["file", "get", save_dir])
+            .output()
+            .map_err(|e| format!("Failed to run tailscale file get: {}", e))?;
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            return Err(format!("tailscale file get failed: {}", stderr));
+        }
+        Ok(format!("Files saved to {}", save_dir))
+    }
+}
+
+// ============================================================
 // Windows implementation — CLI-based
 // ============================================================
 //
@@ -203,7 +276,6 @@ mod platform {
                 return cmd;
             }
         }
-        // Fall back to PATH
         let mut cmd = Command::new("tailscale");
         cmd.creation_flags(CREATE_NO_WINDOW);
         cmd
@@ -217,7 +289,6 @@ mod platform {
                 "Could not run tailscale CLI. Make sure Tailscale is installed and in your PATH: {}",
                 e
             ))?;
-
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
             return Err(format!("tailscale status failed: {}", stderr));
@@ -226,23 +297,15 @@ mod platform {
     }
 
     pub async fn send_file(peer_id: &str, filename: &str, data: Vec<u8>) -> Result<String, String> {
-        // Write data to a temp file, then use `tailscale file cp`
         let temp_dir = std::env::temp_dir();
         let temp_path = temp_dir.join(filename);
         std::fs::write(&temp_path, &data)
             .map_err(|e| format!("Failed to write temp file: {}", e))?;
-
-        // `tailscale file cp <file> <target>:`
-        // The target can be a hostname or IP — peer_id from our API is the node key,
-        // so we need to resolve it to a hostname first via status
         let output = tailscale_cmd()
             .args(["file", "cp", &temp_path.to_string_lossy(), &format!("{}:", peer_id)])
             .output()
             .map_err(|e| format!("Failed to run tailscale file cp: {}", e))?;
-
-        // Clean up temp file
         let _ = std::fs::remove_file(&temp_path);
-
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
             return Err(format!("tailscale file cp failed: {}", stderr));
@@ -251,18 +314,14 @@ mod platform {
     }
 
     pub async fn get_incoming_files() -> Result<Vec<u8>, String> {
-        // `tailscale file get` downloads files; there's no list-only command.
-        // Return empty array — the UI will show files after they're accepted.
         Ok(b"[]".to_vec())
     }
 
     pub async fn accept_file(_name: &str, save_dir: &str) -> Result<String, String> {
-        // `tailscale file get <directory>` accepts all waiting files into the directory
         let output = tailscale_cmd()
             .args(["file", "get", save_dir])
             .output()
             .map_err(|e| format!("Failed to run tailscale file get: {}", e))?;
-
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
             return Err(format!("tailscale file get failed: {}", stderr));

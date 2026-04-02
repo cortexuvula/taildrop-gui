@@ -1,6 +1,6 @@
 [package]
 name = "taildrop-gui"
-version = "0.1.7"
+version = "0.1.8"
 description = "TailDrop — drag-and-drop file transfer for Tailscale"
 authors = ["you"]
 edition = "2021"
@@ -24,4 +24,5 @@ bytes = "1"
 dirs = "6"
 
 [target.'cfg(unix)'.dependencies]
+[target.'cfg(all(unix, not(target_os = "macos")))'.dependencies]
 hyperlocal = "0.9"
