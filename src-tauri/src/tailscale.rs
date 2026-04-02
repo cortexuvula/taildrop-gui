@@ -183,9 +183,11 @@ mod platform {
     use std::process::Command;
 
     fn tailscale_cmd() -> Command {
-        // Tailscale.app installs CLI at this path
+        // NOTE: Tailscale.app ships two binaries:
+        //   Tailscale  (capital T) = the GUI app — do NOT use for CLI
+        //   tailscale  (lower t)   = the CLI tool — use this
         let candidates = [
-            "/Applications/Tailscale.app/Contents/MacOS/Tailscale",
+            "/Applications/Tailscale.app/Contents/MacOS/tailscale",
             "/usr/local/bin/tailscale",
             "/opt/homebrew/bin/tailscale",
         ];
