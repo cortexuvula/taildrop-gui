@@ -239,7 +239,8 @@ mod platform {
         let temp_path = std::env::temp_dir().join(filename);
         std::fs::write(&temp_path, &data)
             .map_err(|e| format!("Failed to write temp file: {}", e))?;
-        let output = tailscale_cmd()
+        let binary = find_tailscale().unwrap_or("tailscale");
+        let output = Command::new(binary)
             .args(["file", "cp", &temp_path.to_string_lossy(), &format!("{}:", peer_id)])
             .output()
             .map_err(|e| format!("Failed to run tailscale file cp: {}", e))?;
@@ -256,7 +257,8 @@ mod platform {
     }
 
     pub async fn accept_file(_name: &str, save_dir: &str) -> Result<String, String> {
-        let output = tailscale_cmd()
+        let binary = find_tailscale().unwrap_or("tailscale");
+        let output = Command::new(binary)
             .args(["file", "get", save_dir])
             .output()
             .map_err(|e| format!("Failed to run tailscale file get: {}", e))?;
