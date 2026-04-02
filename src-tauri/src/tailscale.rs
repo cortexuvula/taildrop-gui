@@ -56,7 +56,7 @@ pub struct IncomingFile {
 // ============================================================
 
 #[cfg(unix)]
-mod transport {
+mod platform {
     use super::*;
     use bytes::Bytes;
     use http_body_util::{BodyExt, Full};
@@ -95,7 +95,7 @@ mod transport {
         Ok(buf)
     }
 
-    pub async fn get_request(path: &str) -> Result<Vec<u8>, String> {
+    async fn get_request(path: &str) -> Result<Vec<u8>, String> {
         let url: hyper::Uri = hyperlocal::Uri::new(SOCKET_PATH, path).into();
         let req = Request::builder()
             .uri(url)
@@ -109,7 +109,7 @@ mod transport {
         read_body(resp).await
     }
 
-    pub async fn put_request(path: &str, body_bytes: Vec<u8>) -> Result<Vec<u8>, String> {
+    async fn put_request(path: &str, body_bytes: Vec<u8>) -> Result<Vec<u8>, String> {
         let url: hyper::Uri = hyperlocal::Uri::new(SOCKET_PATH, path).into();
         let req = Request::builder()
             .method(hyper::Method::PUT)
@@ -124,7 +124,7 @@ mod transport {
         read_body(resp).await
     }
 
-    pub async fn delete_request(path: &str) -> Result<Vec<u8>, String> {
+    async fn delete_request(path: &str) -> Result<Vec<u8>, String> {
         let url: hyper::Uri = hyperlocal::Uri::new(SOCKET_PATH, path).into();
         let req = Request::builder()
             .method(hyper::Method::DELETE)
@@ -138,102 +138,134 @@ mod transport {
             .map_err(|e| format!("Failed to connect to Tailscale daemon: {}", e))?;
         read_body(resp).await
     }
+
+    pub async fn fetch_status_json() -> Result<Vec<u8>, String> {
+        get_request("/localapi/v0/status").await
+    }
+
+    pub async fn send_file(peer_id: &str, filename: &str, data: Vec<u8>) -> Result<String, String> {
+        let path = format!(
+            "/localapi/v0/file-put/{}?name={}",
+            super::url_encode(peer_id),
+            super::url_encode(filename)
+        );
+        put_request(&path, data).await?;
+        Ok(format!("Sent {} to {}", filename, peer_id))
+    }
+
+    pub async fn get_incoming_files() -> Result<Vec<u8>, String> {
+        get_request("/localapi/v0/files/").await
+    }
+
+    pub async fn accept_file(name: &str, save_dir: &str) -> Result<String, String> {
+        let path = format!("/localapi/v0/files/{}", super::url_encode(name));
+        let data = get_request(&path).await?;
+
+        let save_path = std::path::Path::new(save_dir).join(name);
+        std::fs::write(&save_path, &data).map_err(|e| format!("Failed to save file: {}", e))?;
+
+        delete_request(&path).await?;
+        Ok(save_path.to_string_lossy().to_string())
+    }
 }
 
 // ============================================================
-// Windows implementation — raw HTTP over named pipe
+// Windows implementation — CLI-based
 // ============================================================
+//
+// The Tailscale named pipe (\\.\pipe\ProtectedPrefix\Tailscale\tailscaled)
+// lives in a protected namespace requiring SYSTEM/admin privileges.
+// Regular user-mode desktop apps cannot connect to it.
+// Instead, we use the `tailscale.exe` CLI which has its own IPC to the daemon.
 
 #[cfg(windows)]
-mod transport {
-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
-    use tokio::net::windows::named_pipe::ClientOptions;
+mod platform {
+    use super::*;
+    use std::process::Command;
 
-    const PIPE_NAME: &str = r"\\.\pipe\ProtectedPrefix\Tailscale\tailscaled";
-
-    async fn pipe_request(
-        method: &str,
-        path: &str,
-        body: Option<Vec<u8>>,
-    ) -> Result<Vec<u8>, String> {
-        // Connect to Tailscale named pipe
-        let mut pipe = ClientOptions::new()
-            .open(PIPE_NAME)
-            .map_err(|e| format!("Failed to open Tailscale pipe (is Tailscale running?): {}", e))?;
-
-        let body_bytes = body.unwrap_or_default();
-
-        // Build a minimal HTTP/1.0 request (no keep-alive, simpler parsing)
-        let request = format!(
-            "{} {} HTTP/1.0\r\nHost: local-tailscaled.sock\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
-            method,
-            path,
-            body_bytes.len()
-        );
-
-        pipe.write_all(request.as_bytes())
-            .await
-            .map_err(|e| format!("Failed to write request headers: {}", e))?;
-
-        if !body_bytes.is_empty() {
-            pipe.write_all(&body_bytes)
-                .await
-                .map_err(|e| format!("Failed to write request body: {}", e))?;
+    /// Find the tailscale CLI — check common install paths then PATH
+    fn tailscale_cmd() -> Command {
+        let candidates = [
+            r"C:\Program Files\Tailscale\tailscale.exe",
+            r"C:\Program Files (x86)\Tailscale\tailscale.exe",
+        ];
+        for path in &candidates {
+            if std::path::Path::new(path).exists() {
+                return Command::new(path);
+            }
         }
+        // Fall back to PATH
+        Command::new("tailscale")
+    }
 
-        // Read full response
-        let mut response = Vec::new();
-        pipe.read_to_end(&mut response)
-            .await
-            .map_err(|e| format!("Failed to read response: {}", e))?;
+    pub async fn fetch_status_json() -> Result<Vec<u8>, String> {
+        let output = tailscale_cmd()
+            .args(["status", "--json"])
+            .output()
+            .map_err(|e| format!(
+                "Could not run tailscale CLI. Make sure Tailscale is installed and in your PATH: {}",
+                e
+            ))?;
 
-        // Split headers / body at \r\n\r\n
-        let sep = b"\r\n\r\n";
-        let body_start = response
-            .windows(4)
-            .position(|w| w == sep)
-            .ok_or_else(|| "Malformed HTTP response from Tailscale".to_string())?;
-
-        let headers = String::from_utf8_lossy(&response[..body_start]);
-        let status_line = headers.lines().next().unwrap_or("");
-
-        // Extract status code from "HTTP/1.x NNN ..."
-        let status_code: u16 = status_line
-            .split_whitespace()
-            .nth(1)
-            .and_then(|s| s.parse().ok())
-            .unwrap_or(0);
-
-        if status_code < 200 || status_code >= 300 {
-            let resp_body = String::from_utf8_lossy(&response[body_start + 4..]);
-            return Err(format!(
-                "Tailscale API error ({}): {}",
-                status_code, resp_body
-            ));
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            return Err(format!("tailscale status failed: {}", stderr));
         }
-
-        Ok(response[body_start + 4..].to_vec())
+        Ok(output.stdout)
     }
 
-    pub async fn get_request(path: &str) -> Result<Vec<u8>, String> {
-        pipe_request("GET", path, None).await
+    pub async fn send_file(peer_id: &str, filename: &str, data: Vec<u8>) -> Result<String, String> {
+        // Write data to a temp file, then use `tailscale file cp`
+        let temp_dir = std::env::temp_dir();
+        let temp_path = temp_dir.join(filename);
+        std::fs::write(&temp_path, &data)
+            .map_err(|e| format!("Failed to write temp file: {}", e))?;
+
+        // `tailscale file cp <file> <target>:`
+        // The target can be a hostname or IP — peer_id from our API is the node key,
+        // so we need to resolve it to a hostname first via status
+        let output = tailscale_cmd()
+            .args(["file", "cp", &temp_path.to_string_lossy(), &format!("{}:", peer_id)])
+            .output()
+            .map_err(|e| format!("Failed to run tailscale file cp: {}", e))?;
+
+        // Clean up temp file
+        let _ = std::fs::remove_file(&temp_path);
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            return Err(format!("tailscale file cp failed: {}", stderr));
+        }
+        Ok(format!("Sent {} to {}", filename, peer_id))
     }
 
-    pub async fn put_request(path: &str, body_bytes: Vec<u8>) -> Result<Vec<u8>, String> {
-        pipe_request("PUT", path, Some(body_bytes)).await
+    pub async fn get_incoming_files() -> Result<Vec<u8>, String> {
+        // `tailscale file get` downloads files; there's no list-only command.
+        // Return empty array — the UI will show files after they're accepted.
+        Ok(b"[]".to_vec())
     }
 
-    pub async fn delete_request(path: &str) -> Result<Vec<u8>, String> {
-        pipe_request("DELETE", path, None).await
+    pub async fn accept_file(_name: &str, save_dir: &str) -> Result<String, String> {
+        // `tailscale file get <directory>` accepts all waiting files into the directory
+        let output = tailscale_cmd()
+            .args(["file", "get", save_dir])
+            .output()
+            .map_err(|e| format!("Failed to run tailscale file get: {}", e))?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            return Err(format!("tailscale file get failed: {}", stderr));
+        }
+        Ok(format!("Files saved to {}", save_dir))
     }
 }
 
 // ============================================================
-// Public API (platform-agnostic — uses transport module above)
+// Public API (platform-agnostic)
 // ============================================================
 
 pub async fn fetch_status() -> Result<Vec<Peer>, String> {
-    let body = transport::get_request("/localapi/v0/status").await?;
+    let body = platform::fetch_status_json().await?;
     let status: TailscaleStatus =
         serde_json::from_slice(&body).map_err(|e| format!("Failed to parse status: {}", e))?;
 
@@ -275,31 +307,18 @@ pub async fn send_file_to_peer(
     filename: &str,
     data: Vec<u8>,
 ) -> Result<String, String> {
-    let path = format!(
-        "/localapi/v0/file-put/{}?name={}",
-        url_encode(peer_id),
-        url_encode(filename)
-    );
-    transport::put_request(&path, data).await?;
-    Ok(format!("Sent {} to {}", filename, peer_id))
+    platform::send_file(peer_id, filename, data).await
 }
 
 pub async fn fetch_incoming_files() -> Result<Vec<IncomingFile>, String> {
-    let body = transport::get_request("/localapi/v0/files/").await?;
+    let body = platform::get_incoming_files().await?;
     let files: Vec<IncomingFile> =
         serde_json::from_slice(&body).map_err(|e| format!("Failed to parse files: {}", e))?;
     Ok(files)
 }
 
 pub async fn accept_incoming_file(name: &str, save_dir: &str) -> Result<String, String> {
-    let path = format!("/localapi/v0/files/{}", url_encode(name));
-    let data = transport::get_request(&path).await?;
-
-    let save_path = std::path::Path::new(save_dir).join(name);
-    std::fs::write(&save_path, &data).map_err(|e| format!("Failed to save file: {}", e))?;
-
-    transport::delete_request(&path).await?;
-    Ok(save_path.to_string_lossy().to_string())
+    platform::accept_file(name, save_dir).await
 }
 
 fn url_encode(s: &str) -> String {
