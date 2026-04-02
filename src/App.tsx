@@ -1,11 +1,10 @@
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { Sidebar } from "./components/Sidebar";
 import { DropZone } from "./components/DropZone";
 import { TransferHistory } from "./components/TransferHistory";
 import { Settings } from "./components/Settings";
 import { DebugPanel } from "./components/DebugPanel";
 import { useTailscale } from "./hooks/useTailscale";
-import type { Peer } from "./types";
 import "./App.css";
 
 function App() {
@@ -22,7 +21,28 @@ function App() {
     updateSettings,
   } = useTailscale();
 
-  const [selectedPeer, setSelectedPeer] = useState<Peer | null>(null);
+  // Diagnostic: log state changes to console (visible in Safari Web Inspector)
+  useEffect(() => {
+    console.log("[taildrop] state:", {
+      loading,
+      error,
+      totalPeers: peers.length,
+      visiblePeers: visiblePeers.length,
+      selfNode: peers.find((p) => p.is_self)?.dns_name ?? "none",
+      samplePeer: peers.find((p) => !p.is_self),
+      hiddenNodes: settings.hiddenNodes.length,
+      showOffline: settings.showOfflineNodes,
+      showExit: settings.showExitNodes,
+    });
+  }, [loading, error, peers, visiblePeers, settings]);
+
+  // Bug #5: store only the ID, derive the peer object from current peers
+  // so it stays in sync when peers refresh (online/offline, IP changes, etc.)
+  const [selectedPeerId, setSelectedPeerId] = useState<string | null>(null);
+  const selectedPeer = selectedPeerId
+    ? visiblePeers.find((p) => p.id === selectedPeerId) ?? null
+    : null;
+
   const [showSettings, setShowSettings] = useState(false);
   const [showDebug, setShowDebug] = useState(false);
 
@@ -31,7 +51,7 @@ function App() {
       <Sidebar
         peers={visiblePeers}
         selectedPeer={selectedPeer}
-        onSelectPeer={setSelectedPeer}
+        onSelectPeer={(peer) => setSelectedPeerId(peer.id)}
         incomingCount={incomingFiles.length}
         onShowSettings={() => setShowSettings(true)}
         onShowDebug={() => setShowDebug(true)}
@@ -56,7 +76,7 @@ function App() {
         ) : (
           <DropZone
             selectedPeer={selectedPeer}
-            onSendFile={sendFile}
+            onSendFiles={sendFile}
             peers={visiblePeers}
           />
         )}

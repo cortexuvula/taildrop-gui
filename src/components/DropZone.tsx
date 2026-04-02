@@ -1,86 +1,75 @@
-import { useState, useCallback, useRef } from "react";
+import { useState, useEffect, useCallback, useRef } from "react";
+import { getCurrentWebview } from "@tauri-apps/api/webview";
+import { open } from "@tauri-apps/plugin-dialog";
 import type { Peer } from "../types";
 
 interface DropZoneProps {
   selectedPeer: Peer | null;
-  onSendFile: (peer: Peer, file: File) => void;
+  onSendFiles: (peer: Peer, filePaths: string[]) => void;
   peers: Peer[];
 }
 
-export function DropZone({ selectedPeer, onSendFile, peers }: DropZoneProps) {
+// Bug #2: Uses Tauri native drag-drop (file paths) instead of HTML5 DnD (File blobs)
+// This avoids the massive JSON serialization of file data over IPC.
+export function DropZone({ selectedPeer, onSendFiles, peers }: DropZoneProps) {
   const [isDragging, setIsDragging] = useState(false);
-  const [droppedFiles, setDroppedFiles] = useState<File[]>([]);
+  const [pendingPaths, setPendingPaths] = useState<string[]>([]);
   const [showPeerPicker, setShowPeerPicker] = useState(false);
-  const fileInputRef = useRef<HTMLInputElement>(null);
-  const dragCounter = useRef(0);
-
-  const handleDragEnter = useCallback((e: React.DragEvent) => {
-    e.preventDefault();
-    e.stopPropagation();
-    dragCounter.current++;
-    setIsDragging(true);
-  }, []);
-
-  const handleDragLeave = useCallback((e: React.DragEvent) => {
-    e.preventDefault();
-    e.stopPropagation();
-    dragCounter.current--;
-    if (dragCounter.current === 0) {
-      setIsDragging(false);
-    }
-  }, []);
-
-  const handleDragOver = useCallback((e: React.DragEvent) => {
-    e.preventDefault();
-    e.stopPropagation();
-  }, []);
+  const processRef = useRef<((paths: string[]) => void) | undefined>(undefined);
 
   const processFiles = useCallback(
-    (files: File[]) => {
+    (paths: string[]) => {
       if (selectedPeer && selectedPeer.online) {
-        files.forEach((f) => onSendFile(selectedPeer, f));
-        setDroppedFiles([]);
-        setShowPeerPicker(false);
+        onSendFiles(selectedPeer, paths);
       } else {
-        setDroppedFiles(files);
+        setPendingPaths(paths);
         setShowPeerPicker(true);
       }
     },
-    [selectedPeer, onSendFile]
+    [selectedPeer, onSendFiles]
   );
 
-  const handleDrop = useCallback(
-    (e: React.DragEvent) => {
-      e.preventDefault();
-      e.stopPropagation();
-      setIsDragging(false);
-      dragCounter.current = 0;
+  // Keep ref in sync for the Tauri event listener
+  processRef.current = processFiles;
 
-      const files = Array.from(e.dataTransfer.files);
-      if (files.length > 0) {
-        processFiles(files);
+  // Tauri native drag-and-drop — gives file paths directly
+  useEffect(() => {
+    const unlisten = getCurrentWebview().onDragDropEvent((event) => {
+      if (event.payload.type === "enter") {
+        setIsDragging(true);
+      } else if (event.payload.type === "leave") {
+        setIsDragging(false);
+      } else if (event.payload.type === "drop") {
+        setIsDragging(false);
+        const paths = event.payload.paths;
+        if (paths && paths.length > 0) {
+          processRef.current?.(paths);
+        }
       }
-    },
-    [processFiles]
-  );
+    });
+    return () => {
+      unlisten.then((fn) => fn());
+    };
+  }, []);
 
-  const handleFileSelect = useCallback(
-    (e: React.ChangeEvent<HTMLInputElement>) => {
-      const files = Array.from(e.target.files || []);
-      if (files.length > 0) {
-        processFiles(files);
+  // File picker using Tauri dialog plugin — returns file paths
+  const handleBrowse = useCallback(async () => {
+    const selected = await open({ multiple: true });
+    if (selected) {
+      const paths = Array.isArray(selected) ? selected : [selected];
+      if (paths.length > 0) {
+        processFiles(paths);
       }
-    },
-    [processFiles]
-  );
+    }
+  }, [processFiles]);
 
   const handlePeerSelect = useCallback(
     (peer: Peer) => {
-      droppedFiles.forEach((f) => onSendFile(peer, f));
-      setDroppedFiles([]);
+      onSendFiles(peer, pendingPaths);
+      setPendingPaths([]);
       setShowPeerPicker(false);
     },
-    [droppedFiles, onSendFile]
+    [pendingPaths, onSendFiles]
   );
 
   const onlinePeers = peers.filter((p) => p.online);
@@ -89,20 +78,8 @@ export function DropZone({ selectedPeer, onSendFile, peers }: DropZoneProps) {
     <div className="dropzone-container">
       <div
         className={`dropzone ${isDragging ? "dragging" : ""} ${selectedPeer ? "has-target" : ""}`}
-        onDragEnter={handleDragEnter}
-        onDragLeave={handleDragLeave}
-        onDragOver={handleDragOver}
-        onDrop={handleDrop}
-        onClick={() => fileInputRef.current?.click()}
+        onClick={handleBrowse}
       >
-        <input
-          ref={fileInputRef}
-          type="file"
-          multiple
-          onChange={handleFileSelect}
-          style={{ display: "none" }}
-        />
-
         <div className="dropzone-content">
           {isDragging ? (
             <>
@@ -131,10 +108,10 @@ export function DropZone({ selectedPeer, onSendFile, peers }: DropZoneProps) {
         </div>
       </div>
 
-      {showPeerPicker && droppedFiles.length > 0 && (
+      {showPeerPicker && pendingPaths.length > 0 && (
         <div className="peer-picker-overlay" onClick={() => setShowPeerPicker(false)}>
           <div className="peer-picker" onClick={(e) => e.stopPropagation()}>
-            <h3>Send {droppedFiles.length} file(s) to:</h3>
+            <h3>Send {pendingPaths.length} file(s) to:</h3>
             <div className="peer-picker-list">
               {onlinePeers.map((peer) => (
                 <button
@@ -155,7 +132,7 @@ export function DropZone({ selectedPeer, onSendFile, peers }: DropZoneProps) {
               className="btn-secondary"
               onClick={() => {
                 setShowPeerPicker(false);
-                setDroppedFiles([]);
+                setPendingPaths([]);
               }}
             >
               Cancel

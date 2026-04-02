@@ -10,6 +10,8 @@ const DEFAULT_SETTINGS: AppSettings = {
   showExitNodes: false,
 };
 
+const MAX_TRANSFER_HISTORY = 200;
+
 export function useTailscale() {
   const [peers, setPeers] = useState<Peer[]>([]);
   const [incomingFiles, setIncomingFiles] = useState<IncomingFile[]>([]);
@@ -18,15 +20,22 @@ export function useTailscale() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const settingsRef = useRef(settings);
+  settingsRef.current = settings;
 
-  // Load settings from localStorage
+  // Load settings from localStorage (with validation)
   useEffect(() => {
     const saved = localStorage.getItem("taildrop-settings");
     if (saved) {
       try {
-        setSettings({ ...DEFAULT_SETTINGS, ...JSON.parse(saved) });
+        const parsed = JSON.parse(saved);
+        // Validate critical fields to prevent crashes from corrupted data
+        if (parsed.hiddenNodes && !Array.isArray(parsed.hiddenNodes)) {
+          parsed.hiddenNodes = [];
+        }
+        setSettings({ ...DEFAULT_SETTINGS, ...parsed });
       } catch {
-        // ignore
+        localStorage.removeItem("taildrop-settings");
       }
     }
     // Get default download dir
@@ -60,15 +69,47 @@ export function useTailscale() {
     }
   }, []);
 
+  // Bug #4: auto-accept incoming files when enabled
+  const autoAcceptFiles = useCallback(async (files: IncomingFile[]) => {
+    for (const file of files) {
+      try {
+        await invoke<string>("accept_file", {
+          name: file.Name,
+          saveDir: settingsRef.current.saveDirectory,
+        });
+        const id = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+        setTransfers((prev) =>
+          [
+            {
+              id,
+              filename: file.Name,
+              peerName: "incoming",
+              direction: "received" as const,
+              timestamp: Date.now(),
+              status: "success" as const,
+            },
+            ...prev,
+          ].slice(0, MAX_TRANSFER_HISTORY)
+        );
+      } catch {
+        // silently fail individual auto-accepts
+      }
+    }
+  }, []);
+
   // Fetch incoming files
   const refreshIncoming = useCallback(async () => {
     try {
       const result = await invoke<IncomingFile[]>("get_incoming_files");
       setIncomingFiles(result);
+      // Bug #4: auto-accept if enabled
+      if (settingsRef.current.autoAccept && result.length > 0) {
+        autoAcceptFiles(result);
+      }
     } catch {
       // silently fail polling — daemon might be briefly unavailable
     }
-  }, []);
+  }, [autoAcceptFiles]);
 
   // Initial load + polling
   useEffect(() => {
@@ -82,37 +123,41 @@ export function useTailscale() {
     };
   }, [refreshPeers, refreshIncoming]);
 
-  // Send a file to a peer
+  // Bug #2: send file paths instead of file data
+  // Bug #3: send both peer.id (for localapi) and peer.hostname (for CLI)
+  // Bug #10: cap transfer history
   const sendFile = useCallback(
-    async (peer: Peer, file: File) => {
-      const id = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
-      const record: TransferRecord = {
-        id,
-        filename: file.name,
-        peerName: peer.hostname,
-        direction: "sent",
-        timestamp: Date.now(),
-        status: "sending",
-      };
-      setTransfers((prev) => [record, ...prev]);
+    async (peer: Peer, filePaths: string[]) => {
+      for (const filePath of filePaths) {
+        const filename =
+          filePath.split(/[\\/]/).pop() || "file";
+        const id = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+        const record: TransferRecord = {
+          id,
+          filename,
+          peerName: peer.hostname,
+          direction: "sent",
+          timestamp: Date.now(),
+          status: "sending",
+        };
+        setTransfers((prev) => [record, ...prev].slice(0, MAX_TRANSFER_HISTORY));
 
-      try {
-        const arrayBuffer = await file.arrayBuffer();
-        const data = Array.from(new Uint8Array(arrayBuffer));
-        await invoke("send_file", {
-          peerId: peer.hostname,
-          filename: file.name,
-          data,
-        });
-        setTransfers((prev) =>
-          prev.map((t) => (t.id === id ? { ...t, status: "success" } : t))
-        );
-      } catch (e) {
-        setTransfers((prev) =>
-          prev.map((t) =>
-            t.id === id ? { ...t, status: "error", error: String(e) } : t
-          )
-        );
+        try {
+          await invoke("send_file", {
+            peerId: peer.id,
+            peerName: peer.hostname,
+            filePath,
+          });
+          setTransfers((prev) =>
+            prev.map((t) => (t.id === id ? { ...t, status: "success" } : t))
+          );
+        } catch (e) {
+          setTransfers((prev) =>
+            prev.map((t) =>
+              t.id === id ? { ...t, status: "error", error: String(e) } : t
+            )
+          );
+        }
       }
     },
     []
@@ -130,7 +175,7 @@ export function useTailscale() {
         timestamp: Date.now(),
         status: "pending",
       };
-      setTransfers((prev) => [record, ...prev]);
+      setTransfers((prev) => [record, ...prev].slice(0, MAX_TRANSFER_HISTORY));
 
       try {
         const savedPath = await invoke<string>("accept_file", {
@@ -155,15 +200,13 @@ export function useTailscale() {
     [settings.saveDirectory, refreshIncoming]
   );
 
-  // Detect own tailnet domain from self node (e.g. "tail161478.ts.net")
+  // Detect own tailnet domain from self node
   const selfNode = peers.find((p) => p.is_self);
   const tailnetDomain = selfNode
     ? selfNode.dns_name.split(".").slice(1).join(".")
     : null;
 
   // Visible peers: same tailnet only, excluding self + hidden + optionally offline
-  // This filters out Mullvad/exit-node peers (mullvad.ts.net) that appear via
-  // the Mullvad-Tailscale integration.
   const visiblePeers = peers.filter(
     (p) =>
       !p.is_self &&

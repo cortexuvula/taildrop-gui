@@ -143,7 +143,15 @@ mod platform {
         get_request("/localapi/v0/status").await
     }
 
-    pub async fn send_file(peer_id: &str, filename: &str, data: Vec<u8>) -> Result<String, String> {
+    // Bug #2: accept file_path instead of data; Bug #3: use peer_id (stable ID) for localapi
+    pub async fn send_file(peer_id: &str, _peer_name: &str, file_path: &str) -> Result<String, String> {
+        let data = tokio::fs::read(file_path)
+            .await
+            .map_err(|e| format!("Failed to read file '{}': {}", file_path, e))?;
+        let filename = std::path::Path::new(file_path)
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("file");
         let path = format!(
             "/localapi/v0/file-put/{}?name={}",
             super::url_encode(peer_id),
@@ -157,12 +165,19 @@ mod platform {
         get_request("/localapi/v0/files/").await
     }
 
+    // Bug #1: sanitize filename to prevent path traversal
     pub async fn accept_file(name: &str, save_dir: &str) -> Result<String, String> {
         let path = format!("/localapi/v0/files/{}", super::url_encode(name));
         let data = get_request(&path).await?;
 
-        let save_path = std::path::Path::new(save_dir).join(name);
-        std::fs::write(&save_path, &data).map_err(|e| format!("Failed to save file: {}", e))?;
+        let safe_name = std::path::Path::new(name)
+            .file_name()
+            .and_then(|n| n.to_str())
+            .ok_or_else(|| "Invalid filename".to_string())?;
+        let save_path = std::path::Path::new(save_dir).join(safe_name);
+        tokio::fs::write(&save_path, &data)
+            .await
+            .map_err(|e| format!("Failed to save file: {}", e))?;
 
         delete_request(&path).await?;
         Ok(save_path.to_string_lossy().to_string())
@@ -172,10 +187,6 @@ mod platform {
 // ============================================================
 // macOS implementation — CLI-based
 // ============================================================
-//
-// The Unix socket at /var/run/tailscaled/tailscaled.sock requires
-// elevated permissions that a signed .app bundle cannot easily obtain.
-// Using the tailscale CLI is simpler and more reliable on macOS.
 
 #[cfg(target_os = "macos")]
 mod platform {
@@ -183,9 +194,6 @@ mod platform {
     use std::process::Command;
 
     fn find_tailscale() -> Option<&'static str> {
-        // NOTE: Tailscale.app ships two binaries:
-        //   Tailscale  (capital T) = the GUI app — returns empty output
-        //   tailscale  (lower t)   = the CLI tool — returns JSON
         let candidates = [
             "/Applications/Tailscale.app/Contents/MacOS/tailscale",
             "/usr/local/bin/tailscale",
@@ -199,85 +207,104 @@ mod platform {
         None
     }
 
+    // Bug #9: wrap blocking CLI calls in spawn_blocking
     pub async fn fetch_status_json() -> Result<Vec<u8>, String> {
-        let binary = find_tailscale();
-        let binary_path = binary.unwrap_or("tailscale (from PATH)");
+        tokio::task::spawn_blocking(|| {
+            let binary = find_tailscale();
+            let binary_path = binary.unwrap_or("tailscale (from PATH)");
+            eprintln!("[taildrop] macOS fetch_status_json: binary={}", binary_path);
 
-        let mut cmd = if let Some(path) = binary {
-            Command::new(path)
-        } else {
-            Command::new("tailscale")
-        };
+            let mut cmd = if let Some(path) = binary {
+                Command::new(path)
+            } else {
+                Command::new("tailscale")
+            };
 
-        let output = cmd
-            .args(["status", "--json"])
-            .output()
-            .map_err(|e| format!(
-                "Could not run tailscale CLI [tried: {}]: {}",
-                binary_path, e
-            ))?;
+            let output = cmd
+                .args(["status", "--json"])
+                .output()
+                .map_err(|e| format!(
+                    "Could not run tailscale CLI [tried: {}]: {}",
+                    binary_path, e
+                ))?;
 
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        let stderr = String::from_utf8_lossy(&output.stderr);
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            let stderr = String::from_utf8_lossy(&output.stderr);
 
-        if !output.status.success() {
-            return Err(format!(
-                "tailscale status failed [binary: {}] stderr: {} stdout: {}",
-                binary_path, stderr, stdout
-            ));
-        }
-        if output.stdout.is_empty() {
-            return Err(format!(
-                "tailscale returned empty output [binary: {}] stderr: {}",
-                binary_path, stderr
-            ));
-        }
-        Ok(output.stdout)
+            eprintln!(
+                "[taildrop] macOS CLI result: exit={} stdout_len={} stderr_len={}",
+                output.status,
+                output.stdout.len(),
+                output.stderr.len()
+            );
+
+            if !output.status.success() {
+                return Err(format!(
+                    "tailscale status failed [binary: {}] stderr: {} stdout: {}",
+                    binary_path, stderr, stdout
+                ));
+            }
+            if output.stdout.is_empty() {
+                return Err(format!(
+                    "tailscale returned empty output [binary: {}] stderr: {}",
+                    binary_path, stderr
+                ));
+            }
+            Ok(output.stdout)
+        })
+        .await
+        .map_err(|e| format!("Task panicked: {}", e))?
     }
 
-    pub async fn send_file(peer_id: &str, filename: &str, data: Vec<u8>) -> Result<String, String> {
-        let temp_path = std::env::temp_dir().join(filename);
-        std::fs::write(&temp_path, &data)
-            .map_err(|e| format!("Failed to write temp file: {}", e))?;
-        let binary = find_tailscale().unwrap_or("tailscale");
-        let output = Command::new(binary)
-            .args(["file", "cp", &temp_path.to_string_lossy(), &format!("{}:", peer_id)])
-            .output()
-            .map_err(|e| format!("Failed to run tailscale file cp: {}", e))?;
-        let _ = std::fs::remove_file(&temp_path);
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            return Err(format!("tailscale file cp failed: {}", stderr));
-        }
-        Ok(format!("Sent {} to {}", filename, peer_id))
+    // Bug #2: accept file_path (no more temp file dance)
+    // Bug #6: temp file collision eliminated — uses real file path
+    // Bug #9: non-blocking via spawn_blocking
+    pub async fn send_file(_peer_id: &str, peer_name: &str, file_path: &str) -> Result<String, String> {
+        let peer_name = peer_name.to_string();
+        let file_path = file_path.to_string();
+        tokio::task::spawn_blocking(move || {
+            let binary = find_tailscale().unwrap_or("tailscale");
+            let output = Command::new(binary)
+                .args(["file", "cp", &file_path, &format!("{}:", peer_name)])
+                .output()
+                .map_err(|e| format!("Failed to run tailscale file cp: {}", e))?;
+            if !output.status.success() {
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                return Err(format!("tailscale file cp failed: {}", stderr));
+            }
+            Ok(format!("Sent file to {}", peer_name))
+        })
+        .await
+        .map_err(|e| format!("Task panicked: {}", e))?
     }
 
     pub async fn get_incoming_files() -> Result<Vec<u8>, String> {
         Ok(b"[]".to_vec())
     }
 
+    // Bug #9: non-blocking via spawn_blocking
     pub async fn accept_file(_name: &str, save_dir: &str) -> Result<String, String> {
-        let binary = find_tailscale().unwrap_or("tailscale");
-        let output = Command::new(binary)
-            .args(["file", "get", save_dir])
-            .output()
-            .map_err(|e| format!("Failed to run tailscale file get: {}", e))?;
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            return Err(format!("tailscale file get failed: {}", stderr));
-        }
-        Ok(format!("Files saved to {}", save_dir))
+        let save_dir = save_dir.to_string();
+        tokio::task::spawn_blocking(move || {
+            let binary = find_tailscale().unwrap_or("tailscale");
+            let output = Command::new(binary)
+                .args(["file", "get", &save_dir])
+                .output()
+                .map_err(|e| format!("Failed to run tailscale file get: {}", e))?;
+            if !output.status.success() {
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                return Err(format!("tailscale file get failed: {}", stderr));
+            }
+            Ok(format!("Files saved to {}", save_dir))
+        })
+        .await
+        .map_err(|e| format!("Task panicked: {}", e))?
     }
 }
 
 // ============================================================
 // Windows implementation — CLI-based
 // ============================================================
-//
-// The Tailscale named pipe (\\.\pipe\ProtectedPrefix\Tailscale\tailscaled)
-// lives in a protected namespace requiring SYSTEM/admin privileges.
-// Regular user-mode desktop apps cannot connect to it.
-// Instead, we use the `tailscale.exe` CLI which has its own IPC to the daemon.
 
 #[cfg(windows)]
 mod platform {
@@ -285,10 +312,8 @@ mod platform {
     use std::os::windows::process::CommandExt;
     use std::process::Command;
 
-    /// CREATE_NO_WINDOW flag — prevents console window flash when spawning CLI
     const CREATE_NO_WINDOW: u32 = 0x08000000;
 
-    /// Find the tailscale CLI — check common install paths then PATH
     fn tailscale_cmd() -> Command {
         let candidates = [
             r"C:\Program Files\Tailscale\tailscale.exe",
@@ -306,52 +331,67 @@ mod platform {
         cmd
     }
 
+    // Bug #9: non-blocking via spawn_blocking
     pub async fn fetch_status_json() -> Result<Vec<u8>, String> {
-        let output = tailscale_cmd()
-            .args(["status", "--json"])
-            .output()
-            .map_err(|e| format!(
-                "Could not run tailscale CLI. Make sure Tailscale is installed and in your PATH: {}",
-                e
-            ))?;
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            return Err(format!("tailscale status failed: {}", stderr));
-        }
-        Ok(output.stdout)
+        tokio::task::spawn_blocking(|| {
+            let output = tailscale_cmd()
+                .args(["status", "--json"])
+                .output()
+                .map_err(|e| format!(
+                    "Could not run tailscale CLI. Make sure Tailscale is installed and in your PATH: {}",
+                    e
+                ))?;
+            if !output.status.success() {
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                return Err(format!("tailscale status failed: {}", stderr));
+            }
+            Ok(output.stdout)
+        })
+        .await
+        .map_err(|e| format!("Task panicked: {}", e))?
     }
 
-    pub async fn send_file(peer_id: &str, filename: &str, data: Vec<u8>) -> Result<String, String> {
-        let temp_dir = std::env::temp_dir();
-        let temp_path = temp_dir.join(filename);
-        std::fs::write(&temp_path, &data)
-            .map_err(|e| format!("Failed to write temp file: {}", e))?;
-        let output = tailscale_cmd()
-            .args(["file", "cp", &temp_path.to_string_lossy(), &format!("{}:", peer_id)])
-            .output()
-            .map_err(|e| format!("Failed to run tailscale file cp: {}", e))?;
-        let _ = std::fs::remove_file(&temp_path);
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            return Err(format!("tailscale file cp failed: {}", stderr));
-        }
-        Ok(format!("Sent {} to {}", filename, peer_id))
+    // Bug #2: accept file_path (no more temp file dance)
+    // Bug #6: temp file collision eliminated
+    // Bug #9: non-blocking via spawn_blocking
+    pub async fn send_file(_peer_id: &str, peer_name: &str, file_path: &str) -> Result<String, String> {
+        let peer_name = peer_name.to_string();
+        let file_path = file_path.to_string();
+        tokio::task::spawn_blocking(move || {
+            let output = tailscale_cmd()
+                .args(["file", "cp", &file_path, &format!("{}:", peer_name)])
+                .output()
+                .map_err(|e| format!("Failed to run tailscale file cp: {}", e))?;
+            if !output.status.success() {
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                return Err(format!("tailscale file cp failed: {}", stderr));
+            }
+            Ok(format!("Sent file to {}", peer_name))
+        })
+        .await
+        .map_err(|e| format!("Task panicked: {}", e))?
     }
 
     pub async fn get_incoming_files() -> Result<Vec<u8>, String> {
         Ok(b"[]".to_vec())
     }
 
+    // Bug #9: non-blocking via spawn_blocking
     pub async fn accept_file(_name: &str, save_dir: &str) -> Result<String, String> {
-        let output = tailscale_cmd()
-            .args(["file", "get", save_dir])
-            .output()
-            .map_err(|e| format!("Failed to run tailscale file get: {}", e))?;
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            return Err(format!("tailscale file get failed: {}", stderr));
-        }
-        Ok(format!("Files saved to {}", save_dir))
+        let save_dir = save_dir.to_string();
+        tokio::task::spawn_blocking(move || {
+            let output = tailscale_cmd()
+                .args(["file", "get", &save_dir])
+                .output()
+                .map_err(|e| format!("Failed to run tailscale file get: {}", e))?;
+            if !output.status.success() {
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                return Err(format!("tailscale file get failed: {}", stderr));
+            }
+            Ok(format!("Files saved to {}", save_dir))
+        })
+        .await
+        .map_err(|e| format!("Task panicked: {}", e))?
     }
 }
 
@@ -361,8 +401,15 @@ mod platform {
 
 pub async fn fetch_status() -> Result<Vec<Peer>, String> {
     let body = platform::fetch_status_json().await?;
+    eprintln!("[taildrop] fetch_status: got {} bytes of JSON", body.len());
     let status: TailscaleStatus =
-        serde_json::from_slice(&body).map_err(|e| format!("Failed to parse status: {}", e))?;
+        serde_json::from_slice(&body).map_err(|e| {
+            eprintln!("[taildrop] fetch_status: PARSE ERROR: {}", e);
+            // Log first 200 chars of body for diagnosis
+            let preview = String::from_utf8_lossy(&body[..body.len().min(200)]);
+            eprintln!("[taildrop] JSON preview: {}", preview);
+            format!("Failed to parse status: {}", e)
+        })?;
 
     let mut peers = Vec::new();
 
@@ -399,10 +446,10 @@ pub async fn fetch_status() -> Result<Vec<Peer>, String> {
 
 pub async fn send_file_to_peer(
     peer_id: &str,
-    filename: &str,
-    data: Vec<u8>,
+    peer_name: &str,
+    file_path: &str,
 ) -> Result<String, String> {
-    platform::send_file(peer_id, filename, data).await
+    platform::send_file(peer_id, peer_name, file_path).await
 }
 
 pub async fn fetch_incoming_files() -> Result<Vec<IncomingFile>, String> {
@@ -416,11 +463,18 @@ pub async fn accept_incoming_file(name: &str, save_dir: &str) -> Result<String, 
     platform::accept_file(name, save_dir).await
 }
 
+// Bug #8: proper RFC 3986 percent-encoding (encode all non-unreserved characters)
 fn url_encode(s: &str) -> String {
-    s.replace('%', "%25")
-        .replace(' ', "%20")
-        .replace('/', "%2F")
-        .replace('?', "%3F")
-        .replace('#', "%23")
-        .replace('&', "%26")
+    let mut encoded = String::with_capacity(s.len() * 3);
+    for byte in s.bytes() {
+        match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                encoded.push(byte as char);
+            }
+            _ => {
+                encoded.push_str(&format!("%{:02X}", byte));
+            }
+        }
+    }
+    encoded
 }
