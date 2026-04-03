@@ -33,6 +33,7 @@ pub struct Peer {
     pub public_key: String,
     pub hostname: String,
     pub dns_name: String,
+    pub display_name: String,
     pub os: String,
     pub ips: Vec<String>,
     pub online: bool,
@@ -45,10 +46,6 @@ pub struct IncomingFile {
     pub name: String,
     #[serde(rename = "Size")]
     pub size: i64,
-    #[serde(rename = "PartialPath")]
-    pub partial_path: Option<String>,
-    #[serde(rename = "Done")]
-    pub done: Option<bool>,
 }
 
 // ============================================================
@@ -57,7 +54,6 @@ pub struct IncomingFile {
 
 #[cfg(all(unix, not(target_os = "macos")))]
 mod platform {
-    use super::*;
     use bytes::Bytes;
     use http_body_util::{BodyExt, Full};
     use hyper::body::Buf;
@@ -153,7 +149,7 @@ mod platform {
             .and_then(|n| n.to_str())
             .unwrap_or("file");
         let path = format!(
-            "/localapi/v0/file-put/{}?name={}",
+            "/localapi/v0/file-put/{}/{}",
             super::url_encode(peer_id),
             super::url_encode(filename)
         );
@@ -399,6 +395,38 @@ mod platform {
 // Public API (platform-agnostic)
 // ============================================================
 
+/// Extract the machine name from a Tailscale DNS name and prettify it.
+/// e.g. "my-laptop.tail1234.ts.net." -> "My Laptop"
+///      "pixel-10-pro-xl.tail1234.ts.net." -> "Pixel 10 Pro XL"
+fn machine_name_from_dns(dns_name: &str) -> Option<String> {
+    let name = dns_name.split('.').next().filter(|s| !s.is_empty())?;
+    Some(prettify_name(name))
+}
+
+fn prettify_name(name: &str) -> String {
+    name.split(|c| c == '-' || c == '_')
+        .map(|word| {
+            if word.chars().all(|c| c.is_ascii_digit()) {
+                return word.to_string();
+            }
+            // Common abbreviations that should be uppercase
+            let upper = word.to_uppercase();
+            match upper.as_str() {
+                "XL" | "XS" | "SE" | "TV" | "PC" | "NAS" | "VM" | "VPN"
+                | "USB" | "NUC" | "AI" | "IO" | "UK" | "US" | "EU" => upper,
+                _ => {
+                    let mut chars = word.chars();
+                    match chars.next() {
+                        Some(c) => c.to_uppercase().to_string() + &chars.as_str().to_lowercase(),
+                        None => String::new(),
+                    }
+                }
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 pub async fn fetch_status() -> Result<Vec<Peer>, String> {
     let body = platform::fetch_status_json().await?;
     eprintln!("[taildrop] fetch_status: got {} bytes of JSON", body.len());
@@ -414,11 +442,15 @@ pub async fn fetch_status() -> Result<Vec<Peer>, String> {
     let mut peers = Vec::new();
 
     if let Some(self_node) = status.self_node {
+        let dns = self_node.dns_name.unwrap_or_default();
+        let display = machine_name_from_dns(&dns)
+            .unwrap_or_else(|| self_node.host_name.clone().unwrap_or_default());
         peers.push(Peer {
             id: self_node.id.unwrap_or_default(),
             public_key: self_node.public_key.unwrap_or_default(),
             hostname: self_node.host_name.unwrap_or_default(),
-            dns_name: self_node.dns_name.unwrap_or_default(),
+            dns_name: dns,
+            display_name: display,
             os: self_node.os.unwrap_or_default(),
             ips: self_node.tailscale_ips.unwrap_or_default(),
             online: true,
@@ -428,11 +460,15 @@ pub async fn fetch_status() -> Result<Vec<Peer>, String> {
 
     if let Some(peer_map) = status.peer {
         for (_key, p) in peer_map {
+            let dns = p.dns_name.unwrap_or_default();
+            let display = machine_name_from_dns(&dns)
+                .unwrap_or_else(|| p.host_name.clone().unwrap_or_default());
             peers.push(Peer {
                 id: p.id.unwrap_or_default(),
                 public_key: p.public_key.unwrap_or_default(),
                 hostname: p.host_name.unwrap_or_default(),
-                dns_name: p.dns_name.unwrap_or_default(),
+                dns_name: dns,
+                display_name: display,
                 os: p.os.unwrap_or_default(),
                 ips: p.tailscale_ips.unwrap_or_default(),
                 online: p.online.unwrap_or(false),
@@ -440,6 +476,8 @@ pub async fn fetch_status() -> Result<Vec<Peer>, String> {
             });
         }
     }
+
+    peers.sort_by(|a, b| a.display_name.to_lowercase().cmp(&b.display_name.to_lowercase()));
 
     Ok(peers)
 }

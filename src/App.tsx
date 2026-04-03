@@ -50,8 +50,9 @@ function App() {
     <div className="app">
       <Sidebar
         peers={visiblePeers}
+        totalPeerCount={peers.filter((p) => !p.is_self).length}
         selectedPeer={selectedPeer}
-        onSelectPeer={(peer) => setSelectedPeerId(peer.id)}
+        onSelectPeer={(peer) => setSelectedPeerId(prev => prev === peer.id ? null : peer.id)}
         incomingCount={incomingFiles.length}
         onShowSettings={() => setShowSettings(true)}
         onShowDebug={() => setShowDebug(true)}

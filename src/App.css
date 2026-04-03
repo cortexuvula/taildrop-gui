@@ -100,6 +100,56 @@ body {
   background: var(--bg-hover);
 }
 
+.sidebar-search {
+  padding: 8px 8px 0;
+  position: relative;
+}
+
+.search-wrap {
+  position: relative;
+}
+
+.search-clear {
+  position: absolute;
+  right: 6px;
+  top: 50%;
+  transform: translateY(-50%);
+  background: none;
+  border: none;
+  color: var(--text-muted);
+  cursor: pointer;
+  font-size: 12px;
+  padding: 2px 4px;
+  line-height: 1;
+  border-radius: 3px;
+}
+
+.search-clear:hover {
+  color: var(--text-primary);
+  background: var(--bg-hover);
+}
+
+.search-input {
+  width: 100%;
+  padding: 6px 10px;
+  background: var(--bg-tertiary);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  color: var(--text-primary);
+  font-family: inherit;
+  font-size: 12px;
+  outline: none;
+  transition: border-color 0.15s;
+}
+
+.search-input:focus {
+  border-color: var(--accent);
+}
+
+.search-input::placeholder {
+  color: var(--text-muted);
+}
+
 .peer-list {
   flex: 1;
   overflow-y: auto;
@@ -196,7 +246,7 @@ body {
 
 /* ===== Drop Zone ===== */
 .dropzone-container {
-  flex: 1;
+  flex: 6;
   display: flex;
   align-items: center;
   justify-content: center;
@@ -334,7 +384,7 @@ body {
 
 /* ===== Transfer Panel ===== */
 .transfer-panel {
-  height: 200px;
+  flex: 4;
   min-height: 120px;
   border-top: 1px solid var(--border);
   background: var(--bg-secondary);
@@ -360,6 +410,9 @@ body {
   padding: 8px 16px;
   border-bottom: 1px solid var(--border);
   background: rgba(79, 143, 247, 0.03);
+  max-height: 30%;
+  overflow-y: auto;
+  flex-shrink: 0;
 }
 
 .section-label {

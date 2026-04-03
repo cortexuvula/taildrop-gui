@@ -1,5 +1,10 @@
 import { useState, useEffect, useCallback, useRef } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import {
+  isPermissionGranted,
+  requestPermission,
+  sendNotification,
+} from "@tauri-apps/plugin-notification";
 import type { Peer, IncomingFile, TransferRecord, AppSettings } from "../types";
 
 const DEFAULT_SETTINGS: AppSettings = {
@@ -8,6 +13,7 @@ const DEFAULT_SETTINGS: AppSettings = {
   autoAccept: false,
   showOfflineNodes: false,
   showExitNodes: false,
+  notifications: false,
 };
 
 const MAX_TRANSFER_HISTORY = 200;
@@ -22,6 +28,8 @@ export function useTailscale() {
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const settingsRef = useRef(settings);
   settingsRef.current = settings;
+  const autoAcceptingRef = useRef(false);
+  const seenIncomingRef = useRef(new Set<string>());
 
   // Load settings from localStorage (with validation)
   useEffect(() => {
@@ -71,29 +79,69 @@ export function useTailscale() {
 
   // Bug #4: auto-accept incoming files when enabled
   const autoAcceptFiles = useCallback(async (files: IncomingFile[]) => {
-    for (const file of files) {
-      try {
-        await invoke<string>("accept_file", {
-          name: file.Name,
-          saveDir: settingsRef.current.saveDirectory,
-        });
-        const id = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
-        setTransfers((prev) =>
-          [
-            {
-              id,
-              filename: file.Name,
-              peerName: "incoming",
-              direction: "received" as const,
-              timestamp: Date.now(),
-              status: "success" as const,
-            },
-            ...prev,
-          ].slice(0, MAX_TRANSFER_HISTORY)
-        );
-      } catch {
-        // silently fail individual auto-accepts
+    if (autoAcceptingRef.current) return;
+    autoAcceptingRef.current = true;
+    try {
+      for (const file of files) {
+        try {
+          await invoke<string>("accept_file", {
+            name: file.Name,
+            saveDir: settingsRef.current.saveDirectory,
+          });
+          const id = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+          setTransfers((prev) =>
+            [
+              {
+                id,
+                filename: file.Name,
+                peerName: "incoming",
+                direction: "received" as const,
+                timestamp: Date.now(),
+                status: "success" as const,
+              },
+              ...prev,
+            ].slice(0, MAX_TRANSFER_HISTORY)
+          );
+        } catch {
+          // silently fail individual auto-accepts
+        }
       }
+    } finally {
+      autoAcceptingRef.current = false;
+    }
+  }, []);
+
+  // Send desktop notification for new incoming files
+  const notifyIncoming = useCallback(async (files: IncomingFile[]) => {
+    if (!settingsRef.current.notifications) return;
+    const newFiles = files.filter((f) => !seenIncomingRef.current.has(f.Name));
+    if (newFiles.length === 0) return;
+
+    for (const f of newFiles) {
+      seenIncomingRef.current.add(f.Name);
+    }
+
+    try {
+      let granted = await isPermissionGranted();
+      if (!granted) {
+        const perm = await requestPermission();
+        granted = perm === "granted";
+      }
+      if (!granted) return;
+
+      if (newFiles.length === 1) {
+        sendNotification({
+          title: "TailDrop — Incoming File",
+          body: newFiles[0].Name,
+        });
+      } else {
+        sendNotification({
+          title: "TailDrop — Incoming Files",
+          body: `${newFiles.length} files waiting to be accepted`,
+        });
+      }
+    } catch {
+      // notifications not supported or permission denied
     }
   }, []);
 
@@ -101,15 +149,21 @@ export function useTailscale() {
   const refreshIncoming = useCallback(async () => {
     try {
       const result = await invoke<IncomingFile[]>("get_incoming_files");
-      setIncomingFiles(result);
-      // Bug #4: auto-accept if enabled
+      if (result.length > 0) {
+        notifyIncoming(result);
+      } else {
+        seenIncomingRef.current.clear();
+      }
       if (settingsRef.current.autoAccept && result.length > 0) {
+        setIncomingFiles([]);
         autoAcceptFiles(result);
+      } else {
+        setIncomingFiles(result);
       }
     } catch {
       // silently fail polling — daemon might be briefly unavailable
     }
-  }, [autoAcceptFiles]);
+  }, [autoAcceptFiles, notifyIncoming]);
 
   // Initial load + polling
   useEffect(() => {
@@ -135,7 +189,7 @@ export function useTailscale() {
         const record: TransferRecord = {
           id,
           filename,
-          peerName: peer.hostname,
+          peerName: peer.display_name,
           direction: "sent",
           timestamp: Date.now(),
           status: "sending",
@@ -176,11 +230,12 @@ export function useTailscale() {
         status: "pending",
       };
       setTransfers((prev) => [record, ...prev].slice(0, MAX_TRANSFER_HISTORY));
+      setIncomingFiles((prev) => prev.filter((f) => f.Name !== name));
 
       try {
         const savedPath = await invoke<string>("accept_file", {
           name,
-          saveDir: settings.saveDirectory,
+          saveDir: settingsRef.current.saveDirectory,
         });
         setTransfers((prev) =>
           prev.map((t) => (t.id === id ? { ...t, status: "success" } : t))
@@ -194,10 +249,9 @@ export function useTailscale() {
             t.id === id ? { ...t, status: "error", error: String(e) } : t
           )
         );
-        throw e;
       }
     },
-    [settings.saveDirectory, refreshIncoming]
+    [refreshIncoming]
   );
 
   // Detect own tailnet domain from self node

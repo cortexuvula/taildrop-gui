@@ -1,7 +1,9 @@
+import { useState } from "react";
 import type { Peer } from "../types";
 
 interface SidebarProps {
   peers: Peer[];
+  totalPeerCount: number;
   selectedPeer: Peer | null;
   onSelectPeer: (peer: Peer) => void;
   incomingCount: number;
@@ -20,14 +22,30 @@ function getOsIcon(os: string): string {
 
 export function Sidebar({
   peers,
+  totalPeerCount,
   selectedPeer,
   onSelectPeer,
   incomingCount,
   onShowSettings,
   onShowDebug,
 }: SidebarProps) {
-  const onlinePeers = peers.filter((p) => p.online);
-  const offlinePeers = peers.filter((p) => !p.online);
+  const [search, setSearch] = useState("");
+
+  const filtered = search
+    ? peers.filter((p) => {
+        const q = search.toLowerCase();
+        return (
+          p.display_name.toLowerCase().includes(q) ||
+          p.hostname.toLowerCase().includes(q) ||
+          p.ips.some((ip) => ip.includes(q))
+        );
+      })
+    : peers;
+
+  const allOnlineCount = peers.filter((p) => p.online).length;
+  const allOfflineCount = peers.filter((p) => !p.online).length;
+  const onlinePeers = filtered.filter((p) => p.online);
+  const offlinePeers = filtered.filter((p) => !p.online);
 
   return (
     <div className="sidebar">
@@ -46,10 +64,29 @@ export function Sidebar({
         </div>
       </div>
 
+      <div className="sidebar-search">
+        <div className="search-wrap">
+          <input
+            type="text"
+            className="search-input"
+            value={search}
+            onChange={(e) => setSearch(e.target.value)}
+            placeholder="Search nodes..."
+          />
+          {search && (
+            <button className="search-clear" onClick={() => setSearch("")}>
+              ✕
+            </button>
+          )}
+        </div>
+      </div>
+
       <div className="peer-list">
         {onlinePeers.length > 0 && (
           <div className="peer-group">
-            <div className="peer-group-label">Online ({onlinePeers.length})</div>
+            <div className="peer-group-label">
+              Online ({search ? `${onlinePeers.length} of ${allOnlineCount}` : onlinePeers.length})
+            </div>
             {onlinePeers.map((peer) => (
               <button
                 key={peer.id || peer.public_key}
@@ -59,7 +96,7 @@ export function Sidebar({
                 <span className="status-dot online" />
                 <span className="peer-os">{getOsIcon(peer.os)}</span>
                 <div className="peer-info">
-                  <div className="peer-name">{peer.hostname}</div>
+                  <div className="peer-name">{peer.display_name}</div>
                   <div className="peer-ip">{peer.ips[0] || peer.dns_name}</div>
                 </div>
               </button>
@@ -69,7 +106,9 @@ export function Sidebar({
 
         {offlinePeers.length > 0 && (
           <div className="peer-group">
-            <div className="peer-group-label">Offline ({offlinePeers.length})</div>
+            <div className="peer-group-label">
+              Offline ({search ? `${offlinePeers.length} of ${allOfflineCount}` : offlinePeers.length})
+            </div>
             {offlinePeers.map((peer) => (
               <button
                 key={peer.id || peer.public_key}
@@ -79,7 +118,7 @@ export function Sidebar({
                 <span className="status-dot" />
                 <span className="peer-os">{getOsIcon(peer.os)}</span>
                 <div className="peer-info">
-                  <div className="peer-name">{peer.hostname}</div>
+                  <div className="peer-name">{peer.display_name}</div>
                   <div className="peer-ip">{peer.ips[0] || peer.dns_name}</div>
                 </div>
               </button>
@@ -88,7 +127,11 @@ export function Sidebar({
         )}
 
         {peers.length === 0 && (
-          <div className="empty-state">No nodes found. Is Tailscale running?</div>
+          <div className="empty-state">
+            {totalPeerCount > 0
+              ? "All nodes are hidden or offline. Check Settings."
+              : "No nodes found. Is Tailscale running?"}
+          </div>
         )}
       </div>
     </div>

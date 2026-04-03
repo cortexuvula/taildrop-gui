@@ -1,15 +1,15 @@
 # TailDrop
 
-A drag-and-drop file transfer desktop app for Tailscale Taildrop. Built with Tauri 2.0, React, and TypeScript.
+A drag-and-drop file transfer desktop app for Tailscale Taildrop. Built with Tauri 2.0, React 19, and TypeScript.
 
 ## Features
 
-- **Node Discovery** — auto-discovers all Tailscale peers with online/offline status
+- **Node Discovery** — auto-discovers all Tailscale peers with online/offline status, sorted alphabetically
 - **Drag & Drop Sending** — drop files onto a node card or the drop zone to send via Taildrop
 - **File Receiving** — polls for incoming files with accept/save workflow
+- **Auto-Accept** — optionally auto-accept incoming files to a configured directory
 - **Transfer History** — shows all sent/received files with timestamps and status
-- **Settings** — hide nodes, set default save directory, toggle auto-accept
-- **System Tray** — runs in the background with incoming file notifications
+- **Settings** — hide nodes, set default save directory, toggle offline/exit node visibility
 
 ## Prerequisites
 
@@ -52,21 +52,31 @@ The production build output will be in `src-tauri/target/release/bundle/`.
 ```
 taildrop-gui/
 ├── src/                    # React frontend
-│   ├── components/         # UI components (Sidebar, DropZone, TransferHistory, Settings)
+│   ├── components/         # UI components (Sidebar, DropZone, TransferHistory, Settings, DebugPanel)
 │   ├── hooks/              # useTailscale hook (state management + Tauri IPC)
 │   └── types/              # TypeScript interfaces
 ├── src-tauri/              # Rust backend
 │   └── src/
-│       ├── lib.rs          # Tauri commands (get_tailscale_status, send_file, etc.)
-│       ├── tailscale.rs    # Tailscale LocalAPI client (Unix socket / named pipe)
+│       ├── lib.rs          # Tauri commands (IPC bridge)
+│       ├── tailscale.rs    # Platform-specific Tailscale communication
 │       └── main.rs         # Entry point
 ```
 
-## Tailscale LocalAPI
+## Platform Backends
 
-The app communicates with the local Tailscale daemon over its Unix socket (`/var/run/tailscale/tailscaled.sock` on Linux/macOS) or named pipe (`\\.\pipe\ProtectedPrefix\Tailscale` on Windows).
+`tailscale.rs` contains three platform implementations behind `#[cfg]` gates:
 
-**Note:** You may need to run with elevated permissions or ensure your user has access to the Tailscale socket.
+| Platform | Method | Details |
+|----------|--------|---------|
+| **Linux** | LocalAPI (Unix socket) | Connects to `/var/run/tailscale/tailscaled.sock` via `hyperlocal` + `hyper`. Uses peer stable node ID for file transfers. |
+| **macOS** | CLI (`tailscale`) | Invokes the `tailscale` binary directly (avoids socket permission issues with signed .app bundles). Uses peer hostname for file transfers. |
+| **Windows** | CLI (`tailscale.exe`) | Invokes `tailscale.exe` with `CREATE_NO_WINDOW` flag. Uses peer hostname for file transfers. |
+
+**Linux note:** You may need elevated permissions or group membership to access the Tailscale socket.
+
+## CI
+
+GitHub Actions runs debug builds on Ubuntu 22.04, macOS latest, and Windows latest. The release workflow (`v*` tags) produces platform installers via `tauri-apps/tauri-action`.
 
 ## License
 

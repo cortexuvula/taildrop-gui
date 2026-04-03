@@ -1,3 +1,5 @@
+import { useState, useEffect } from "react";
+import { enable, disable, isEnabled } from "@tauri-apps/plugin-autostart";
 import type { Peer, AppSettings } from "../types";
 
 interface SettingsProps {
@@ -8,6 +10,35 @@ interface SettingsProps {
 }
 
 export function Settings({ settings, allPeers, onUpdate, onClose }: SettingsProps) {
+  const [nodeSearch, setNodeSearch] = useState("");
+  const [autoStart, setAutoStart] = useState(false);
+
+  useEffect(() => {
+    isEnabled().then(setAutoStart);
+  }, []);
+
+  useEffect(() => {
+    const handleKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") onClose();
+    };
+    document.addEventListener("keydown", handleKey);
+    return () => document.removeEventListener("keydown", handleKey);
+  }, [onClose]);
+
+  const toggleAutoStart = async (checked: boolean) => {
+    try {
+      if (checked) {
+        await enable();
+      } else {
+        await disable();
+      }
+      setAutoStart(checked);
+    } catch {
+      // Revert to actual state on failure
+      const actual = await isEnabled();
+      setAutoStart(actual);
+    }
+  };
   const nonSelfPeers = allPeers.filter((p) => !p.is_self);
 
   const toggleHidden = (id: string) => {
@@ -51,6 +82,28 @@ export function Settings({ settings, allPeers, onUpdate, onClose }: SettingsProp
 
         <div className="settings-section">
           <label className="settings-label toggle-row">
+            <span>Desktop notifications</span>
+            <input
+              type="checkbox"
+              checked={settings.notifications ?? false}
+              onChange={(e) => onUpdate({ notifications: e.target.checked })}
+            />
+          </label>
+        </div>
+
+        <div className="settings-section">
+          <label className="settings-label toggle-row">
+            <span>Start on boot</span>
+            <input
+              type="checkbox"
+              checked={autoStart}
+              onChange={(e) => toggleAutoStart(e.target.checked)}
+            />
+          </label>
+        </div>
+
+        <div className="settings-section">
+          <label className="settings-label toggle-row">
             <span>Show offline nodes</span>
             <input
               type="checkbox"
@@ -73,20 +126,45 @@ export function Settings({ settings, allPeers, onUpdate, onClose }: SettingsProp
 
         <div className="settings-section">
           <label className="settings-label">Node Visibility</label>
+          <div className="search-wrap" style={{ marginTop: 6 }}>
+            <input
+              type="text"
+              className="settings-input"
+              value={nodeSearch}
+              onChange={(e) => setNodeSearch(e.target.value)}
+              placeholder="Search nodes..."
+            />
+            {nodeSearch && (
+              <button className="search-clear" onClick={() => setNodeSearch("")}>
+                ✕
+              </button>
+            )}
+          </div>
           <div className="node-visibility-list">
-            {nonSelfPeers.map((peer) => (
-              <label key={peer.id || peer.public_key} className="toggle-row">
-                <span>
-                  {peer.hostname}
-                  <span className="peer-os-small">{peer.os}</span>
-                </span>
-                <input
-                  type="checkbox"
-                  checked={!settings.hiddenNodes.includes(peer.id)}
-                  onChange={() => toggleHidden(peer.id)}
-                />
-              </label>
-            ))}
+            {nonSelfPeers
+              .filter((p) => {
+                if (!nodeSearch) return true;
+                const q = nodeSearch.toLowerCase();
+                return (
+                  p.display_name.toLowerCase().includes(q) ||
+                  p.hostname.toLowerCase().includes(q) ||
+                  p.os.toLowerCase().includes(q) ||
+                  p.ips.some((ip) => ip.includes(q))
+                );
+              })
+              .map((peer) => (
+                <label key={peer.id || peer.public_key} className="toggle-row">
+                  <span>
+                    {peer.display_name}
+                    <span className="peer-os-small">{peer.os}</span>
+                  </span>
+                  <input
+                    type="checkbox"
+                    checked={!settings.hiddenNodes.includes(peer.id)}
+                    onChange={() => toggleHidden(peer.id)}
+                  />
+                </label>
+              ))}
             {nonSelfPeers.length === 0 && (
               <div className="empty-state">No peers discovered yet</div>
             )}

@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import type { Peer } from "../types";
 
 interface DebugPanelProps {
@@ -9,6 +9,14 @@ interface DebugPanelProps {
 export function DebugPanel({ peers, onClose }: DebugPanelProps) {
   const [copied, setCopied] = useState(false);
 
+  useEffect(() => {
+    const handleKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") onClose();
+    };
+    document.addEventListener("keydown", handleKey);
+    return () => document.removeEventListener("keydown", handleKey);
+  }, [onClose]);
+
   const debugData = {
     timestamp: new Date().toISOString(),
     totalPeers: peers.length,
@@ -16,6 +24,7 @@ export function DebugPanel({ peers, onClose }: DebugPanelProps) {
     offlinePeers: peers.filter((p) => !p.online).length,
     selfNode: peers.find((p) => p.is_self),
     peers: peers.map((p) => ({
+      display_name: p.display_name,
       hostname: p.hostname,
       dns_name: p.dns_name,
       os: p.os,
@@ -70,7 +79,7 @@ export function DebugPanel({ peers, onClose }: DebugPanelProps) {
           <table style={{ width: "100%", fontSize: 12, borderCollapse: "collapse" }}>
             <thead>
               <tr style={{ borderBottom: "1px solid #333", textAlign: "left" }}>
-                <th style={{ padding: "4px 8px" }}>Hostname</th>
+                <th style={{ padding: "4px 8px" }}>Name</th>
                 <th style={{ padding: "4px 8px" }}>OS</th>
                 <th style={{ padding: "4px 8px" }}>Online</th>
                 <th style={{ padding: "4px 8px" }}>Self</th>
@@ -87,7 +96,7 @@ export function DebugPanel({ peers, onClose }: DebugPanelProps) {
                   }}
                 >
                   <td style={{ padding: "4px 8px", fontWeight: p.is_self ? 700 : 400 }}>
-                    {p.hostname}
+                    {p.display_name}
                     {p.is_self && (
                       <span style={{ marginLeft: 4, fontSize: 10, color: "#888" }}>(you)</span>
                     )}

@@ -19,6 +19,15 @@ function formatSize(bytes: number): string {
   return parseFloat((bytes / Math.pow(k, i)).toFixed(1)) + " " + sizes[i];
 }
 
+function shortenError(err: string): string {
+  // Extract the useful part from verbose Tailscale API errors
+  const match = err.match(/Tailscale API error \([^)]+\): (.+)/);
+  if (match) return match[1];
+  const match2 = err.match(/tailscale file cp failed: (.+)/);
+  if (match2) return match2[1];
+  return err;
+}
+
 function statusIcon(status: TransferRecord["status"]): string {
   switch (status) {
     case "sending":
@@ -53,7 +62,7 @@ export function TransferHistory({
               </div>
               <button
                 className="btn-accept"
-                onClick={() => onAcceptFile(file.Name)}
+                onClick={() => { onAcceptFile(file.Name); }}
               >
                 Accept
               </button>
@@ -77,7 +86,7 @@ export function TransferHistory({
                 {t.direction === "sent" ? "→" : "←"} {t.peerName} ·{" "}
                 {formatTime(t.timestamp)}
               </div>
-              {t.error && <div className="transfer-error">{t.error}</div>}
+              {t.error && <div className="transfer-error" title={t.error}>{shortenError(t.error)}</div>}
             </div>
           </div>
         ))}

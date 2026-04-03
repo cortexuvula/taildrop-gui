@@ -32,6 +32,19 @@ export function DropZone({ selectedPeer, onSendFiles, peers }: DropZoneProps) {
   // Keep ref in sync for the Tauri event listener
   processRef.current = processFiles;
 
+  // Escape to close peer picker
+  useEffect(() => {
+    if (!showPeerPicker) return;
+    const handleKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") {
+        setShowPeerPicker(false);
+        setPendingPaths([]);
+      }
+    };
+    document.addEventListener("keydown", handleKey);
+    return () => document.removeEventListener("keydown", handleKey);
+  }, [showPeerPicker]);
+
   // Tauri native drag-and-drop — gives file paths directly
   useEffect(() => {
     const unlisten = getCurrentWebview().onDragDropEvent((event) => {
@@ -88,11 +101,17 @@ export function DropZone({ selectedPeer, onSendFiles, peers }: DropZoneProps) {
             </>
           ) : selectedPeer ? (
             <>
-              <div className="dropzone-icon">📤</div>
+              <div className="dropzone-icon">{selectedPeer.online ? "📤" : "⚠️"}</div>
               <div className="dropzone-text">
-                Drop files to send to <strong>{selectedPeer.hostname}</strong>
+                {selectedPeer.online ? (
+                  <>Drop files to send to <strong>{selectedPeer.display_name}</strong></>
+                ) : (
+                  <><strong>{selectedPeer.display_name}</strong> is offline</>
+                )}
               </div>
-              <div className="dropzone-hint">or click to browse</div>
+              <div className="dropzone-hint">
+                {selectedPeer.online ? "or click to browse" : "select an online node to send files"}
+              </div>
             </>
           ) : (
             <>
@@ -120,7 +139,7 @@ export function DropZone({ selectedPeer, onSendFiles, peers }: DropZoneProps) {
                   onClick={() => handlePeerSelect(peer)}
                 >
                   <span className="status-dot online" />
-                  {peer.hostname}
+                  {peer.display_name}
                   <span className="peer-picker-os">{peer.os}</span>
                 </button>
               ))}

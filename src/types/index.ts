@@ -3,6 +3,7 @@ export interface Peer {
   public_key: string;
   hostname: string;
   dns_name: string;
+  display_name: string;
   os: string;
   ips: string[];
   online: boolean;
@@ -12,8 +13,6 @@ export interface Peer {
 export interface IncomingFile {
   Name: string;
   Size: number;
-  PartialPath: string | null;
-  Done: boolean | null;
 }
 
 export interface TransferRecord {
@@ -32,4 +31,5 @@ export interface AppSettings {
   autoAccept: boolean;
   showOfflineNodes: boolean;
   showExitNodes: boolean;
+  notifications: boolean;
 }
