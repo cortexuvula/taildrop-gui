@@ -8,8 +8,11 @@ A drag-and-drop file transfer desktop app for Tailscale Taildrop. Built with Tau
 - **Drag & Drop Sending** — drop files onto a node card or the drop zone to send via Taildrop
 - **File Receiving** — polls for incoming files with accept/save workflow
 - **Auto-Accept** — optionally auto-accept incoming files to a configured directory
+- **Desktop Notifications** — opt-in native notifications when files arrive
 - **Transfer History** — shows all sent/received files with timestamps and status
-- **Settings** — hide nodes, set default save directory, toggle offline/exit node visibility
+- **Search** — filter nodes by name, hostname, or IP in the sidebar and settings
+- **Settings** — hide nodes, set default save directory, auto-accept, start on boot, toggle offline/exit node visibility
+- **Pretty Names** — displays Tailscale machine names with title case (e.g. `pixel-10-pro-xl` → `Pixel 10 Pro XL`)
 
 ## Prerequisites
 
