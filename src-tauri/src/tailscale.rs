@@ -34,6 +34,7 @@ pub struct Peer {
     pub hostname: String,
     pub dns_name: String,
     pub display_name: String,
+    pub machine_name: String,
     pub os: String,
     pub ips: Vec<String>,
     pub online: bool,
@@ -398,7 +399,15 @@ mod platform {
 /// Extract the machine name from a Tailscale DNS name and prettify it.
 /// e.g. "my-laptop.tail1234.ts.net." -> "My Laptop"
 ///      "pixel-10-pro-xl.tail1234.ts.net." -> "Pixel 10 Pro XL"
-fn machine_name_from_dns(dns_name: &str) -> Option<String> {
+/// Raw machine name from DNS (e.g. "pixel-10-pro-xl.tail1234.ts.net." -> "pixel-10-pro-xl").
+/// This is what the CLI expects for `tailscale file cp`.
+fn raw_machine_name(dns_name: &str) -> Option<String> {
+    let name = dns_name.split('.').next().filter(|s| !s.is_empty())?;
+    Some(name.to_string())
+}
+
+/// Prettified display name from DNS (e.g. "pixel-10-pro-xl" -> "Pixel 10 Pro XL").
+fn display_name_from_dns(dns_name: &str) -> Option<String> {
     let name = dns_name.split('.').next().filter(|s| !s.is_empty())?;
     Some(prettify_name(name))
 }
@@ -443,14 +452,16 @@ pub async fn fetch_status() -> Result<Vec<Peer>, String> {
 
     if let Some(self_node) = status.self_node {
         let dns = self_node.dns_name.unwrap_or_default();
-        let display = machine_name_from_dns(&dns)
-            .unwrap_or_else(|| self_node.host_name.clone().unwrap_or_default());
+        let host = self_node.host_name.unwrap_or_default();
+        let machine = raw_machine_name(&dns).unwrap_or_else(|| host.clone());
+        let display = display_name_from_dns(&dns).unwrap_or_else(|| host.clone());
         peers.push(Peer {
             id: self_node.id.unwrap_or_default(),
             public_key: self_node.public_key.unwrap_or_default(),
-            hostname: self_node.host_name.unwrap_or_default(),
+            hostname: host,
             dns_name: dns,
             display_name: display,
+            machine_name: machine,
             os: self_node.os.unwrap_or_default(),
             ips: self_node.tailscale_ips.unwrap_or_default(),
             online: true,
@@ -461,14 +472,16 @@ pub async fn fetch_status() -> Result<Vec<Peer>, String> {
     if let Some(peer_map) = status.peer {
         for (_key, p) in peer_map {
             let dns = p.dns_name.unwrap_or_default();
-            let display = machine_name_from_dns(&dns)
-                .unwrap_or_else(|| p.host_name.clone().unwrap_or_default());
+            let host = p.host_name.unwrap_or_default();
+            let machine = raw_machine_name(&dns).unwrap_or_else(|| host.clone());
+            let display = display_name_from_dns(&dns).unwrap_or_else(|| host.clone());
             peers.push(Peer {
                 id: p.id.unwrap_or_default(),
                 public_key: p.public_key.unwrap_or_default(),
-                hostname: p.host_name.unwrap_or_default(),
+                hostname: host,
                 dns_name: dns,
                 display_name: display,
+                machine_name: machine,
                 os: p.os.unwrap_or_default(),
                 ips: p.tailscale_ips.unwrap_or_default(),
                 online: p.online.unwrap_or(false),

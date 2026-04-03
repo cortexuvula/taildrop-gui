@@ -4,6 +4,7 @@ export interface Peer {
   hostname: string;
   dns_name: string;
   display_name: string;
+  machine_name: string;
   os: string;
   ips: string[];
   online: boolean;

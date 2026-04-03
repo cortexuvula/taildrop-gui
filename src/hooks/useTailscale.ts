@@ -199,7 +199,7 @@ export function useTailscale() {
         try {
           await invoke("send_file", {
             peerId: peer.id,
-            peerName: peer.hostname,
+            peerName: peer.machine_name,
             filePath,
           });
           setTransfers((prev) =>
