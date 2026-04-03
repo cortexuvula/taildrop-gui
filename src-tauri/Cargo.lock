@@ -3669,7 +3669,7 @@ dependencies = [
 
 [[package]]
 name = "taildrop-gui"
-version = "0.3.1"
+version = "0.3.3"
 dependencies = [
  "bytes",
  "dirs 6.0.0",

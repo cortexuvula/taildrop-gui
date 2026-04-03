@@ -204,22 +204,32 @@ mod platform {
         None
     }
 
+    /// Run the tailscale CLI via /bin/sh -c to ensure proper environment.
+    /// The macOS Tailscale CLI binary inside the .app bundle relies on XPC
+    /// and other macOS services that fail when the binary is exec'd directly
+    /// from a .app launched by launchd (minimal environment). Running through
+    /// a shell resolves this.
+    fn tailscale_cmd(args: &[&str]) -> std::io::Result<std::process::Output> {
+        let binary = find_tailscale().unwrap_or("tailscale");
+        let escaped_args: Vec<String> = args.iter().map(|a| {
+            // Single-quote each argument, escaping any embedded single quotes
+            format!("'{}'", a.replace('\'', "'\\''"))
+        }).collect();
+        let shell_cmd = format!("{} {}", binary, escaped_args.join(" "));
+        eprintln!("[taildrop] macOS shell cmd: /bin/sh -c {}", shell_cmd);
+        Command::new("/bin/sh")
+            .arg("-c")
+            .arg(&shell_cmd)
+            .output()
+    }
+
     // Bug #9: wrap blocking CLI calls in spawn_blocking
     pub async fn fetch_status_json() -> Result<Vec<u8>, String> {
         tokio::task::spawn_blocking(|| {
-            let binary = find_tailscale();
-            let binary_path = binary.unwrap_or("tailscale (from PATH)");
+            let binary_path = find_tailscale().unwrap_or("tailscale");
             eprintln!("[taildrop] macOS fetch_status_json: binary={}", binary_path);
 
-            let mut cmd = if let Some(path) = binary {
-                Command::new(path)
-            } else {
-                Command::new("tailscale")
-            };
-
-            let output = cmd
-                .args(["status", "--json"])
-                .output()
+            let output = tailscale_cmd(&["status", "--json"])
                 .map_err(|e| format!(
                     "Could not run tailscale CLI [tried: {}]: {}",
                     binary_path, e
@@ -260,10 +270,7 @@ mod platform {
         let peer_name = peer_name.to_string();
         let file_path = file_path.to_string();
         tokio::task::spawn_blocking(move || {
-            let binary = find_tailscale().unwrap_or("tailscale");
-            let output = Command::new(binary)
-                .args(["file", "cp", &file_path, &format!("{}:", peer_name)])
-                .output()
+            let output = tailscale_cmd(&["file", "cp", &file_path, &format!("{}:", peer_name)])
                 .map_err(|e| format!("Failed to run tailscale file cp: {}", e))?;
             if !output.status.success() {
                 let stderr = String::from_utf8_lossy(&output.stderr);
@@ -283,10 +290,7 @@ mod platform {
     pub async fn accept_file(_name: &str, save_dir: &str) -> Result<String, String> {
         let save_dir = save_dir.to_string();
         tokio::task::spawn_blocking(move || {
-            let binary = find_tailscale().unwrap_or("tailscale");
-            let output = Command::new(binary)
-                .args(["file", "get", &save_dir])
-                .output()
+            let output = tailscale_cmd(&["file", "get", &save_dir])
                 .map_err(|e| format!("Failed to run tailscale file get: {}", e))?;
             if !output.status.success() {
                 let stderr = String::from_utf8_lossy(&output.stderr);
