@@ -21,7 +21,23 @@ const MAX_TRANSFER_HISTORY = 200;
 export function useTailscale() {
   const [peers, setPeers] = useState<Peer[]>([]);
   const [incomingFiles, setIncomingFiles] = useState<IncomingFile[]>([]);
-  const [transfers, setTransfers] = useState<TransferRecord[]>([]);
+  const [transfers, setTransfers] = useState<TransferRecord[]>(() => {
+    const saved = localStorage.getItem("taildrop-transfers");
+    if (saved) {
+      try {
+        const parsed: TransferRecord[] = JSON.parse(saved);
+        // Mark stale in-progress transfers from previous session
+        return parsed.map((t) =>
+          t.status === "sending" || t.status === "pending"
+            ? { ...t, status: "error" as const, error: "Interrupted — app was closed" }
+            : t
+        );
+      } catch {
+        localStorage.removeItem("taildrop-transfers");
+      }
+    }
+    return [];
+  });
   const [settings, setSettings] = useState<AppSettings>(DEFAULT_SETTINGS);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -30,6 +46,7 @@ export function useTailscale() {
   settingsRef.current = settings;
   const autoAcceptingRef = useRef(false);
   const seenIncomingRef = useRef(new Set<string>());
+  const recentlyAcceptedRef = useRef(new Map<string, number>());
 
   // Load settings from localStorage (with validation)
   useEffect(() => {
@@ -47,13 +64,20 @@ export function useTailscale() {
       }
     }
     // Get default download dir
-    invoke<string>("get_default_download_dir").then((dir) => {
-      setSettings((prev) => ({
-        ...prev,
-        saveDirectory: prev.saveDirectory || dir,
-      }));
-    });
+    invoke<string>("get_default_download_dir")
+      .then((dir) => {
+        setSettings((prev) => ({
+          ...prev,
+          saveDirectory: prev.saveDirectory || dir,
+        }));
+      })
+      .catch(() => {});
   }, []);
+
+  // Persist transfer history
+  useEffect(() => {
+    localStorage.setItem("taildrop-transfers", JSON.stringify(transfers));
+  }, [transfers]);
 
   // Save settings to localStorage
   const updateSettings = useCallback((update: Partial<AppSettings>) => {
@@ -83,6 +107,7 @@ export function useTailscale() {
     autoAcceptingRef.current = true;
     try {
       for (const file of files) {
+        recentlyAcceptedRef.current.set(file.Name, Date.now());
         try {
           await invoke<string>("accept_file", {
             name: file.Name,
@@ -114,11 +139,17 @@ export function useTailscale() {
   // Send desktop notification for new incoming files
   const notifyIncoming = useCallback(async (files: IncomingFile[]) => {
     if (!settingsRef.current.notifications) return;
-    const newFiles = files.filter((f) => !seenIncomingRef.current.has(f.Name));
+    const fileKey = (f: IncomingFile) => `${f.Name}:${f.Size}`;
+    const newFiles = files.filter((f) => !seenIncomingRef.current.has(fileKey(f)));
     if (newFiles.length === 0) return;
 
     for (const f of newFiles) {
-      seenIncomingRef.current.add(f.Name);
+      seenIncomingRef.current.add(fileKey(f));
+    }
+    // Prune keys that are no longer in the incoming list
+    const currentKeys = new Set(files.map(fileKey));
+    for (const key of seenIncomingRef.current) {
+      if (!currentKeys.has(key)) seenIncomingRef.current.delete(key);
     }
 
     try {
@@ -149,16 +180,26 @@ export function useTailscale() {
   const refreshIncoming = useCallback(async () => {
     try {
       const result = await invoke<IncomingFile[]>("get_incoming_files");
-      if (result.length > 0) {
-        notifyIncoming(result);
+      // Filter out files that were recently accepted (poll race prevention)
+      const now = Date.now();
+      const filtered = result.filter((f) => {
+        const acceptedAt = recentlyAcceptedRef.current.get(f.Name);
+        return !(acceptedAt && now - acceptedAt < 30000);
+      });
+      // Clean up stale entries
+      for (const [name, time] of recentlyAcceptedRef.current) {
+        if (now - time > 30000) recentlyAcceptedRef.current.delete(name);
+      }
+      if (filtered.length > 0) {
+        notifyIncoming(filtered);
       } else {
         seenIncomingRef.current.clear();
       }
-      if (settingsRef.current.autoAccept && result.length > 0) {
+      if (settingsRef.current.autoAccept && filtered.length > 0) {
         setIncomingFiles([]);
-        autoAcceptFiles(result);
+        autoAcceptFiles(filtered);
       } else {
-        setIncomingFiles(result);
+        setIncomingFiles(filtered);
       }
     } catch {
       // silently fail polling — daemon might be briefly unavailable
@@ -231,6 +272,7 @@ export function useTailscale() {
       };
       setTransfers((prev) => [record, ...prev].slice(0, MAX_TRANSFER_HISTORY));
       setIncomingFiles((prev) => prev.filter((f) => f.Name !== name));
+      recentlyAcceptedRef.current.set(name, Date.now());
 
       try {
         const savedPath = await invoke<string>("accept_file", {
@@ -260,13 +302,18 @@ export function useTailscale() {
     ? selfNode.dns_name.split(".").slice(1).join(".")
     : null;
 
-  // Visible peers: same tailnet only, excluding self + hidden + optionally offline
+  // Visible peers: exclude self + hidden + optionally offline.
+  // Exit nodes (Mullvad, etc.) from other tailnets hidden unless toggle is on.
+  // Non-exit shared peers from other tailnets always visible.
   const visiblePeers = peers.filter(
     (p) =>
       !p.is_self &&
       !settings.hiddenNodes.includes(p.id) &&
       (settings.showOfflineNodes || p.online) &&
-      (!tailnetDomain || p.dns_name.endsWith(tailnetDomain) || settings.showExitNodes)
+      (!tailnetDomain ||
+        p.dns_name.endsWith(tailnetDomain) ||
+        !p.is_exit_node ||
+        settings.showExitNodes)
   );
 
   return {

@@ -9,6 +9,7 @@ export interface Peer {
   ips: string[];
   online: boolean;
   is_self: boolean;
+  is_exit_node: boolean;
 }
 
 export interface IncomingFile {

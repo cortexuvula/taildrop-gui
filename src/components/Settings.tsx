@@ -1,5 +1,6 @@
 import { useState, useEffect } from "react";
 import { enable, disable, isEnabled } from "@tauri-apps/plugin-autostart";
+import { open } from "@tauri-apps/plugin-dialog";
 import type { Peer, AppSettings } from "../types";
 
 interface SettingsProps {
@@ -60,13 +61,27 @@ export function Settings({ settings, allPeers, onUpdate, onClose }: SettingsProp
 
         <div className="settings-section">
           <label className="settings-label">Save Directory</label>
-          <input
-            type="text"
-            className="settings-input"
-            value={settings.saveDirectory}
-            onChange={(e) => onUpdate({ saveDirectory: e.target.value })}
-            placeholder="Downloads folder"
-          />
+          <div style={{ display: "flex", gap: 8 }}>
+            <input
+              type="text"
+              className="settings-input"
+              value={settings.saveDirectory}
+              onChange={(e) => onUpdate({ saveDirectory: e.target.value })}
+              placeholder="Downloads folder"
+              style={{ flex: 1 }}
+            />
+            <button
+              className="btn-secondary"
+              onClick={async () => {
+                const selected = await open({ directory: true });
+                if (selected) {
+                  onUpdate({ saveDirectory: selected as string });
+                }
+              }}
+            >
+              Browse
+            </button>
+          </div>
         </div>
 
         <div className="settings-section">

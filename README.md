@@ -6,13 +6,15 @@ A drag-and-drop file transfer desktop app for Tailscale Taildrop. Built with Tau
 
 - **Node Discovery** — auto-discovers all Tailscale peers with online/offline status, sorted alphabetically
 - **Drag & Drop Sending** — drop files onto a node card or the drop zone to send via Taildrop
-- **File Receiving** — polls for incoming files with accept/save workflow
+- **File Receiving** — polls for incoming files with accept/save workflow (Linux; macOS when socket is accessible)
 - **Auto-Accept** — optionally auto-accept incoming files to a configured directory
 - **Desktop Notifications** — opt-in native notifications when files arrive
-- **Transfer History** — shows all sent/received files with timestamps and status
+- **Transfer History** — persistent history of sent/received files with timestamps and status (survives app restarts)
 - **Search** — filter nodes by name, hostname, or IP in the sidebar and settings
-- **Settings** — hide nodes, set default save directory, auto-accept, start on boot, toggle offline/exit node visibility
+- **Settings** — hide nodes, browse for save directory, auto-accept, start on boot, toggle offline/exit node visibility
 - **Pretty Names** — displays Tailscale machine names with title case (e.g. `pixel-10-pro-xl` → `Pixel 10 Pro XL`)
+- **Exit Node Filtering** — Mullvad and other exit nodes from external tailnets are hidden by default, togglable in settings
+- **File Safety** — overwrite protection (auto-renames duplicates), path traversal prevention, Content Security Policy enabled
 
 ## Prerequisites
 
@@ -71,11 +73,13 @@ taildrop-gui/
 
 | Platform | Method | Details |
 |----------|--------|---------|
-| **Linux** | LocalAPI (Unix socket) | Connects to `/var/run/tailscale/tailscaled.sock` via `hyperlocal` + `hyper`. Uses peer stable node ID for file transfers. |
-| **macOS** | CLI (`tailscale`) | Invokes the `tailscale` binary directly (avoids socket permission issues with signed .app bundles). Uses peer hostname for file transfers. |
-| **Windows** | CLI (`tailscale.exe`) | Invokes `tailscale.exe` with `CREATE_NO_WINDOW` flag. Uses peer hostname for file transfers. |
+| **Linux** | LocalAPI (Unix socket) | Connects to `/var/run/tailscale/tailscaled.sock` via `hyperlocal` + `hyper`. Uses peer stable node ID for file transfers. Full incoming file support. |
+| **macOS** | CLI + socket fallback | Sends files via `tailscale` CLI (avoids socket permission issues with signed .app bundles). Attempts Unix socket for incoming file listing; falls back gracefully if inaccessible. |
+| **Windows** | CLI (`tailscale.exe`) | Invokes `tailscale.exe` with `CREATE_NO_WINDOW` flag. Uses peer hostname for file transfers. Incoming file listing not yet supported (CLI limitation). |
 
 **Linux note:** You may need elevated permissions or group membership to access the Tailscale socket.
+
+**macOS note:** Incoming file detection works when the Tailscale Unix socket is accessible (e.g., Homebrew installs). App Store installs with restricted socket permissions will not detect incoming files.
 
 ## CI
 

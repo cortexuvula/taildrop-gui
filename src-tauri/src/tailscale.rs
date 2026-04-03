@@ -25,6 +25,7 @@ pub struct PeerStatus {
     #[serde(rename = "TailscaleIPs")]
     pub tailscale_ips: Option<Vec<String>>,
     pub online: Option<bool>,
+    pub exit_node_option: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -39,6 +40,7 @@ pub struct Peer {
     pub ips: Vec<String>,
     pub online: bool,
     pub is_self: bool,
+    pub is_exit_node: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -171,7 +173,7 @@ mod platform {
             .file_name()
             .and_then(|n| n.to_str())
             .ok_or_else(|| "Invalid filename".to_string())?;
-        let save_path = std::path::Path::new(save_dir).join(safe_name);
+        let save_path = super::unique_save_path(std::path::Path::new(save_dir), safe_name);
         tokio::fs::write(&save_path, &data)
             .await
             .map_err(|e| format!("Failed to save file: {}", e))?;
@@ -187,7 +189,6 @@ mod platform {
 
 #[cfg(target_os = "macos")]
 mod platform {
-    use super::*;
     use std::process::Command;
 
     fn find_tailscale() -> Option<&'static str> {
@@ -211,16 +212,60 @@ mod platform {
     /// a shell resolves this.
     fn tailscale_cmd(args: &[&str]) -> std::io::Result<std::process::Output> {
         let binary = find_tailscale().unwrap_or("tailscale");
+        // Quote binary path and each argument to handle spaces/special chars
+        let escaped_binary = format!("'{}'", binary.replace('\'', "'\\''"));
         let escaped_args: Vec<String> = args.iter().map(|a| {
-            // Single-quote each argument, escaping any embedded single quotes
             format!("'{}'", a.replace('\'', "'\\''"))
         }).collect();
-        let shell_cmd = format!("{} {}", binary, escaped_args.join(" "));
+        let shell_cmd = format!("{} {}", escaped_binary, escaped_args.join(" "));
         eprintln!("[taildrop] macOS shell cmd: /bin/sh -c {}", shell_cmd);
         Command::new("/bin/sh")
             .arg("-c")
             .arg(&shell_cmd)
             .output()
+    }
+
+    const SOCKET_PATH: &str = "/var/run/tailscale/tailscaled.sock";
+
+    /// Try an HTTP/1.0 GET via the Tailscale Unix socket.
+    /// Works when the socket is accessible (Homebrew/open-source installs).
+    /// Fails gracefully for App Store installs with restricted permissions.
+    fn try_socket_get(path: &str) -> Result<Vec<u8>, String> {
+        use std::os::unix::net::UnixStream;
+        use std::io::{Read, Write};
+
+        let mut stream = UnixStream::connect(SOCKET_PATH)
+            .map_err(|e| format!("connect: {}", e))?;
+        stream
+            .set_read_timeout(Some(std::time::Duration::from_secs(3)))
+            .map_err(|e| format!("timeout: {}", e))?;
+
+        // Use HTTP/1.0 to guarantee non-chunked response and connection close
+        let req = format!(
+            "GET {} HTTP/1.0\r\nHost: local-tailscaled.sock\r\n\r\n",
+            path
+        );
+        stream
+            .write_all(req.as_bytes())
+            .map_err(|e| format!("write: {}", e))?;
+
+        let mut response = Vec::new();
+        stream
+            .read_to_end(&mut response)
+            .map_err(|e| format!("read: {}", e))?;
+
+        let header_end = response
+            .windows(4)
+            .position(|w| w == b"\r\n\r\n")
+            .ok_or_else(|| "Invalid HTTP response".to_string())?;
+
+        let headers = String::from_utf8_lossy(&response[..header_end]);
+        let status_line = headers.lines().next().unwrap_or("");
+        if !status_line.contains(" 200 ") {
+            return Err(format!("HTTP error: {}", status_line));
+        }
+
+        Ok(response[header_end + 4..].to_vec())
     }
 
     // Bug #9: wrap blocking CLI calls in spawn_blocking
@@ -283,20 +328,40 @@ mod platform {
     }
 
     pub async fn get_incoming_files() -> Result<Vec<u8>, String> {
-        Ok(b"[]".to_vec())
+        tokio::task::spawn_blocking(|| {
+            match try_socket_get("/localapi/v0/files/") {
+                Ok(data) => Ok(data),
+                Err(e) => {
+                    use std::sync::Once;
+                    static LOG_ONCE: Once = Once::new();
+                    LOG_ONCE.call_once(|| {
+                        eprintln!(
+                            "[taildrop] macOS: socket file listing unavailable ({}), incoming files won't be detected",
+                            e
+                        );
+                    });
+                    Ok(b"[]".to_vec())
+                }
+            }
+        })
+        .await
+        .map_err(|e| format!("Task panicked: {}", e))?
     }
 
-    // Bug #9: non-blocking via spawn_blocking
-    pub async fn accept_file(_name: &str, save_dir: &str) -> Result<String, String> {
+    pub async fn accept_file(name: &str, save_dir: &str) -> Result<String, String> {
+        let name = name.to_string();
         let save_dir = save_dir.to_string();
         tokio::task::spawn_blocking(move || {
-            let output = tailscale_cmd(&["file", "get", &save_dir])
+            // --wait=5s prevents indefinite hang if files were already consumed
+            let output = tailscale_cmd(&["file", "get", "--wait=5s", &save_dir])
                 .map_err(|e| format!("Failed to run tailscale file get: {}", e))?;
             if !output.status.success() {
                 let stderr = String::from_utf8_lossy(&output.stderr);
                 return Err(format!("tailscale file get failed: {}", stderr));
             }
-            Ok(format!("Files saved to {}", save_dir))
+            // Return path to the specific requested file
+            let save_path = std::path::Path::new(&save_dir).join(&name);
+            Ok(save_path.to_string_lossy().to_string())
         })
         .await
         .map_err(|e| format!("Task panicked: {}", e))?
@@ -309,7 +374,6 @@ mod platform {
 
 #[cfg(windows)]
 mod platform {
-    use super::*;
     use std::os::windows::process::CommandExt;
     use std::process::Command;
 
@@ -377,19 +441,22 @@ mod platform {
         Ok(b"[]".to_vec())
     }
 
-    // Bug #9: non-blocking via spawn_blocking
-    pub async fn accept_file(_name: &str, save_dir: &str) -> Result<String, String> {
+    pub async fn accept_file(name: &str, save_dir: &str) -> Result<String, String> {
+        let name = name.to_string();
         let save_dir = save_dir.to_string();
         tokio::task::spawn_blocking(move || {
+            // --wait=5s prevents indefinite hang if files were already consumed
             let output = tailscale_cmd()
-                .args(["file", "get", &save_dir])
+                .args(["file", "get", "--wait=5s", &save_dir])
                 .output()
                 .map_err(|e| format!("Failed to run tailscale file get: {}", e))?;
             if !output.status.success() {
                 let stderr = String::from_utf8_lossy(&output.stderr);
                 return Err(format!("tailscale file get failed: {}", stderr));
             }
-            Ok(format!("Files saved to {}", save_dir))
+            // Return path to the specific requested file
+            let save_path = std::path::Path::new(&save_dir).join(&name);
+            Ok(save_path.to_string_lossy().to_string())
         })
         .await
         .map_err(|e| format!("Task panicked: {}", e))?
@@ -470,6 +537,7 @@ pub async fn fetch_status() -> Result<Vec<Peer>, String> {
             ips: self_node.tailscale_ips.unwrap_or_default(),
             online: true,
             is_self: true,
+            is_exit_node: self_node.exit_node_option.unwrap_or(false),
         });
     }
 
@@ -490,6 +558,7 @@ pub async fn fetch_status() -> Result<Vec<Peer>, String> {
                 ips: p.tailscale_ips.unwrap_or_default(),
                 online: p.online.unwrap_or(false),
                 is_self: false,
+                is_exit_node: p.exit_node_option.unwrap_or(false),
             });
         }
     }
@@ -518,7 +587,37 @@ pub async fn accept_incoming_file(name: &str, save_dir: &str) -> Result<String, 
     platform::accept_file(name, save_dir).await
 }
 
+/// Generate a unique save path to avoid overwriting existing files.
+/// e.g. "file.txt" -> "file (1).txt" -> "file (2).txt"
+#[allow(dead_code)] // Used by Linux platform module
+fn unique_save_path(dir: &std::path::Path, name: &str) -> std::path::PathBuf {
+    let base = dir.join(name);
+    if !base.exists() {
+        return base;
+    }
+    let stem = std::path::Path::new(name)
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or(name);
+    let ext = std::path::Path::new(name)
+        .extension()
+        .and_then(|s| s.to_str());
+
+    for i in 1..1000 {
+        let new_name = match ext {
+            Some(e) => format!("{} ({}).{}", stem, i, e),
+            None => format!("{} ({})", stem, i),
+        };
+        let path = dir.join(&new_name);
+        if !path.exists() {
+            return path;
+        }
+    }
+    base
+}
+
 // Bug #8: proper RFC 3986 percent-encoding (encode all non-unreserved characters)
+#[allow(dead_code)] // Used by Linux platform module
 fn url_encode(s: &str) -> String {
     let mut encoded = String::with_capacity(s.len() * 3);
     for byte in s.bytes() {

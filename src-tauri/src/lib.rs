@@ -36,6 +36,7 @@ async fn get_incoming_files() -> Result<Vec<tailscale::IncomingFile>, String> {
 
 #[tauri::command]
 async fn accept_file(name: String, save_dir: String) -> Result<String, String> {
+    let save_dir = save_dir.trim().to_string();
     let dir = if save_dir.is_empty() {
         dirs::download_dir()
             .unwrap_or_else(|| dirs::home_dir().unwrap_or_else(|| std::path::PathBuf::from(".")))
