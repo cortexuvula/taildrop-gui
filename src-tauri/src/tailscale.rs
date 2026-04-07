@@ -437,8 +437,63 @@ mod platform {
         .map_err(|e| format!("Task panicked: {}", e))?
     }
 
+    /// Named pipe path for the Tailscale daemon's local API on Windows.
+    const PIPE_PATH: &str = r"\\.\pipe\ProtectedPrefix\Administrators\Tailscale\tailscaled";
+
+    fn try_pipe_get(path: &str) -> Result<Vec<u8>, String> {
+        use std::fs::OpenOptions;
+        use std::io::{Read, Write};
+
+        let mut pipe = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(PIPE_PATH)
+            .map_err(|e| format!("open pipe: {}", e))?;
+
+        let req = format!(
+            "GET {} HTTP/1.0\r\nHost: local-tailscaled.sock\r\n\r\n",
+            path
+        );
+        pipe.write_all(req.as_bytes())
+            .map_err(|e| format!("write: {}", e))?;
+
+        let mut response = Vec::new();
+        pipe.read_to_end(&mut response)
+            .map_err(|e| format!("read: {}", e))?;
+
+        let header_end = response
+            .windows(4)
+            .position(|w| w == b"\r\n\r\n")
+            .ok_or_else(|| "Invalid HTTP response".to_string())?;
+
+        let headers = String::from_utf8_lossy(&response[..header_end]);
+        let status_line = headers.lines().next().unwrap_or("");
+        if !status_line.contains(" 200 ") {
+            return Err(format!("HTTP error: {}", status_line));
+        }
+
+        Ok(response[header_end + 4..].to_vec())
+    }
+
     pub async fn get_incoming_files() -> Result<Vec<u8>, String> {
-        Ok(b"[]".to_vec())
+        tokio::task::spawn_blocking(|| {
+            match try_pipe_get("/localapi/v0/files/") {
+                Ok(data) => Ok(data),
+                Err(e) => {
+                    use std::sync::Once;
+                    static LOG_ONCE: Once = Once::new();
+                    LOG_ONCE.call_once(|| {
+                        eprintln!(
+                            "[taildrop] Windows: pipe file listing unavailable ({}), incoming files won't be detected",
+                            e
+                        );
+                    });
+                    Ok(b"[]".to_vec())
+                }
+            }
+        })
+        .await
+        .map_err(|e| format!("Task panicked: {}", e))?
     }
 
     pub async fn accept_file(name: &str, save_dir: &str) -> Result<String, String> {
