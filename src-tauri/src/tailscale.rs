@@ -130,7 +130,7 @@ mod platform {
     /// Reduces peak memory on the socket side. True disk-to-socket streaming
     /// would require a custom hyper Body; this is a pragmatic middle ground.
     async fn stream_file_to_socket(path: &str, body: Vec<u8>) -> Result<Vec<u8>, String> {
-        use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt};
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
         use tokio::net::UnixStream;
 
         let mut stream = UnixStream::connect(SOCKET_PATH)
@@ -140,9 +140,6 @@ mod platform {
         // Timeout: 60s base + 60s per MB for large files
         let timeout_secs = 60 + (body.len() as u64 / (1024 * 1024)) * 60;
         let timeout = std::time::Duration::from_secs(timeout_secs.min(600));
-        stream
-            .set_write_timeout(Some(timeout))
-            .map_err(|e| format!("set_write_timeout: {}", e))?;
 
         // Write HTTP/1.1 request with streaming body
         let request = format!(
@@ -150,18 +147,18 @@ mod platform {
             path,
             body.len()
         );
-        stream
-            .write_all(request.as_bytes())
+        tokio::time::timeout(timeout, stream.write_all(request.as_bytes()))
             .await
+            .map_err(|_| "Timeout writing request headers to Tailscale daemon".to_string())?
             .map_err(|e| format!("Failed to write request: {}", e))?;
 
         // Stream file in 8KB chunks to avoid loading entire file in memory
         let mut pos = 0;
         while pos < body.len() {
             let end = (pos + 8192).min(body.len());
-            stream
-                .write_all(&body[pos..end])
+            tokio::time::timeout(timeout, stream.write_all(&body[pos..end]))
                 .await
+                .map_err(|_| "Timeout writing file data to Tailscale daemon".to_string())?
                 .map_err(|e| format!("Failed to write file data: {}", e))?;
             pos = end;
         }
