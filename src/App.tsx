@@ -21,19 +21,21 @@ function App() {
     updateSettings,
   } = useTailscale();
 
-  // Diagnostic: log state changes to console (visible in Safari Web Inspector)
+  // Diagnostic: log state changes in dev mode only (visible in Safari Web Inspector)
   useEffect(() => {
-    console.log("[taildrop] state:", {
-      loading,
-      error,
-      totalPeers: peers.length,
-      visiblePeers: visiblePeers.length,
-      selfNode: peers.find((p) => p.is_self)?.dns_name ?? "none",
-      samplePeer: peers.find((p) => !p.is_self),
-      hiddenNodes: settings.hiddenNodes.length,
-      showOffline: settings.showOfflineNodes,
-      showExit: settings.showExitNodes,
-    });
+    if (import.meta.env.DEV) {
+      console.log("[taildrop] state:", {
+        loading,
+        error,
+        totalPeers: peers.length,
+        visiblePeers: visiblePeers.length,
+        selfNode: peers.find((p) => p.is_self)?.dns_name ?? "none",
+        samplePeer: peers.find((p) => !p.is_self),
+        hiddenNodes: settings.hiddenNodes.length,
+        showOffline: settings.showOfflineNodes,
+        showExit: settings.showExitNodes,
+      });
+    }
   }, [loading, error, peers, visiblePeers, settings]);
 
   // Bug #5: store only the ID, derive the peer object from current peers

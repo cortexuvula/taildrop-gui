@@ -20,6 +20,8 @@ cargo clippy                 # Lint Rust code
 
 There are no test suites configured. CI runs debug builds on all three platforms as validation.
 
+Rust unit tests live inside the Linux `platform` module in `tailscale.rs` (url_encode, prettify_name, unique_save_path). They only compile/run on Linux (`#[cfg(all(unix, not(target_os = "macos")))]`).
+
 ## Architecture
 
 Tauri 2.0 desktop app: **React 19 + TypeScript** frontend communicating with a **Rust** backend via Tauri's IPC bridge (`invoke()`).

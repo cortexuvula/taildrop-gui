@@ -74,9 +74,12 @@ export function useTailscale() {
       .catch(() => {});
   }, []);
 
-  // Persist transfer history
+  // Persist transfer history (debounced to avoid jank during rapid transfers)
   useEffect(() => {
-    localStorage.setItem("taildrop-transfers", JSON.stringify(transfers));
+    const timeout = setTimeout(() => {
+      localStorage.setItem("taildrop-transfers", JSON.stringify(transfers));
+    }, 500);
+    return () => clearTimeout(timeout);
   }, [transfers]);
 
   // Save settings to localStorage
@@ -107,10 +110,10 @@ export function useTailscale() {
     autoAcceptingRef.current = true;
     try {
       for (const file of files) {
-        recentlyAcceptedRef.current.set(file.Name, Date.now());
+        recentlyAcceptedRef.current.set(file.name, Date.now());
         try {
           await invoke<string>("accept_file", {
-            name: file.Name,
+            name: file.name,
             saveDir: settingsRef.current.saveDirectory,
           });
           const id = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
@@ -118,7 +121,7 @@ export function useTailscale() {
             [
               {
                 id,
-                filename: file.Name,
+                filename: file.name,
                 peerName: "incoming",
                 direction: "received" as const,
                 timestamp: Date.now(),
@@ -139,7 +142,7 @@ export function useTailscale() {
   // Send desktop notification for new incoming files
   const notifyIncoming = useCallback(async (files: IncomingFile[]) => {
     if (!settingsRef.current.notifications) return;
-    const fileKey = (f: IncomingFile) => `${f.Name}:${f.Size}`;
+    const fileKey = (f: IncomingFile) => `${f.name}:${f.size}`;
     const newFiles = files.filter((f) => !seenIncomingRef.current.has(fileKey(f)));
     if (newFiles.length === 0) return;
 
@@ -163,7 +166,7 @@ export function useTailscale() {
       if (newFiles.length === 1) {
         sendNotification({
           title: "TailDrop — Incoming File",
-          body: newFiles[0].Name,
+          body: newFiles[0].name,
         });
       } else {
         sendNotification({
@@ -183,7 +186,7 @@ export function useTailscale() {
       // Filter out files that were recently accepted (poll race prevention)
       const now = Date.now();
       const filtered = result.filter((f) => {
-        const acceptedAt = recentlyAcceptedRef.current.get(f.Name);
+        const acceptedAt = recentlyAcceptedRef.current.get(f.name);
         return !(acceptedAt && now - acceptedAt < 30000);
       });
       // Clean up stale entries
@@ -223,37 +226,51 @@ export function useTailscale() {
   // Bug #10: cap transfer history
   const sendFile = useCallback(
     async (peer: Peer, filePaths: string[]) => {
-      for (const filePath of filePaths) {
-        const filename =
-          filePath.split(/[\\/]/).pop() || "file";
+      // Create transfer records upfront
+      const records = filePaths.map((filePath) => {
+        const filename = filePath.split(/[\\/]/).pop() || "file";
         const id = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
-        const record: TransferRecord = {
-          id,
-          filename,
-          peerName: peer.display_name,
-          direction: "sent",
-          timestamp: Date.now(),
-          status: "sending",
+        return {
+          record: {
+            id,
+            filename,
+            peerName: peer.display_name,
+            direction: "sent" as const,
+            timestamp: Date.now(),
+            status: "sending" as const,
+          },
+          filePath,
         };
-        setTransfers((prev) => [record, ...prev].slice(0, MAX_TRANSFER_HISTORY));
+      });
+      setTransfers((prev) =>
+        [...records.map((r) => r.record), ...prev].slice(0, MAX_TRANSFER_HISTORY)
+      );
 
-        try {
-          await invoke("send_file", {
-            peerId: peer.id,
-            peerName: peer.machine_name,
-            filePath,
-          });
-          setTransfers((prev) =>
-            prev.map((t) => (t.id === id ? { ...t, status: "success" } : t))
-          );
-        } catch (e) {
-          setTransfers((prev) =>
-            prev.map((t) =>
-              t.id === id ? { ...t, status: "error", error: String(e) } : t
-            )
-          );
-        }
-      }
+      // Send all files in parallel
+      await Promise.allSettled(
+        records.map(async ({ record, filePath }) => {
+          try {
+            await invoke("send_file", {
+              peerId: peer.id,
+              peerName: peer.machine_name,
+              filePath,
+            });
+            setTransfers((prev) =>
+              prev.map((t) =>
+                t.id === record.id ? { ...t, status: "success" } : t
+              )
+            );
+          } catch (e) {
+            setTransfers((prev) =>
+              prev.map((t) =>
+                t.id === record.id
+                  ? { ...t, status: "error", error: String(e) }
+                  : t
+              )
+            );
+          }
+        })
+      );
     },
     []
   );
@@ -271,7 +288,7 @@ export function useTailscale() {
         status: "pending",
       };
       setTransfers((prev) => [record, ...prev].slice(0, MAX_TRANSFER_HISTORY));
-      setIncomingFiles((prev) => prev.filter((f) => f.Name !== name));
+      setIncomingFiles((prev) => prev.filter((f) => f.name !== name));
       recentlyAcceptedRef.current.set(name, Date.now());
 
       try {

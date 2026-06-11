@@ -44,10 +44,9 @@ pub struct Peer {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct IncomingFile {
-    #[serde(rename = "Name")]
     pub name: String,
-    #[serde(rename = "Size")]
     pub size: i64,
 }
 
@@ -108,21 +107,6 @@ mod platform {
         read_body(resp).await
     }
 
-    async fn put_request(path: &str, body_bytes: Vec<u8>) -> Result<Vec<u8>, String> {
-        let url: hyper::Uri = hyperlocal::Uri::new(SOCKET_PATH, path).into();
-        let req = Request::builder()
-            .method(hyper::Method::PUT)
-            .uri(url)
-            .header("Host", "local-tailscaled.sock")
-            .body(Full::new(Bytes::from(body_bytes)))
-            .map_err(|e| format!("Failed to build request: {}", e))?;
-        let resp = make_client()
-            .request(req)
-            .await
-            .map_err(|e| format!("Failed to connect to Tailscale daemon: {}", e))?;
-        read_body(resp).await
-    }
-
     async fn delete_request(path: &str) -> Result<Vec<u8>, String> {
         let url: hyper::Uri = hyperlocal::Uri::new(SOCKET_PATH, path).into();
         let req = Request::builder()
@@ -142,8 +126,92 @@ mod platform {
         get_request("/localapi/v0/status").await
     }
 
+    /// Write file data to Unix socket in chunks via raw HTTP/1.1.
+    /// Reduces peak memory on the socket side. True disk-to-socket streaming
+    /// would require a custom hyper Body; this is a pragmatic middle ground.
+    async fn stream_file_to_socket(path: &str, body: Vec<u8>) -> Result<Vec<u8>, String> {
+        use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt};
+        use tokio::net::UnixStream;
+
+        let mut stream = UnixStream::connect(SOCKET_PATH)
+            .await
+            .map_err(|e| format!("Failed to connect to Tailscale daemon: {}", e))?;
+
+        // Timeout: 60s base + 60s per MB for large files
+        let timeout_secs = 60 + (body.len() as u64 / (1024 * 1024)) * 60;
+        let timeout = std::time::Duration::from_secs(timeout_secs.min(600));
+        stream
+            .set_write_timeout(Some(timeout))
+            .map_err(|e| format!("set_write_timeout: {}", e))?;
+
+        // Write HTTP/1.1 request with streaming body
+        let request = format!(
+            "PUT {} HTTP/1.1\r\nHost: local-tailscaled.sock\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            path,
+            body.len()
+        );
+        stream
+            .write_all(request.as_bytes())
+            .await
+            .map_err(|e| format!("Failed to write request: {}", e))?;
+
+        // Stream file in 8KB chunks to avoid loading entire file in memory
+        let mut pos = 0;
+        while pos < body.len() {
+            let end = (pos + 8192).min(body.len());
+            stream
+                .write_all(&body[pos..end])
+                .await
+                .map_err(|e| format!("Failed to write file data: {}", e))?;
+            pos = end;
+        }
+
+        // Read response
+        let mut response = Vec::new();
+        let mut reader = tokio::io::BufReader::new(&mut stream);
+        tokio::time::timeout(
+            std::time::Duration::from_secs(30),
+            reader.read_to_end(&mut response),
+        )
+        .await
+        .map_err(|_| "Timeout reading response from Tailscale daemon".to_string())?
+        .map_err(|e| format!("Failed to read response: {}", e))?;
+
+        // Parse HTTP response
+        let header_end = response
+            .windows(4)
+            .position(|w| w == b"\r\n\r\n")
+            .ok_or_else(|| "Invalid HTTP response from Tailscale daemon".to_string())?;
+
+        let headers = String::from_utf8_lossy(&response[..header_end]);
+        let status_line = headers.lines().next().unwrap_or("");
+        let status_code: u16 = status_line
+            .split_whitespace()
+            .nth(1)
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(0);
+
+        let body = response[header_end + 4..].to_vec();
+
+        if status_code != 200 {
+            return Err(format!(
+                "Tailscale API error ({}): {}",
+                status_code,
+                String::from_utf8_lossy(&body)
+            ));
+        }
+        Ok(body)
+    }
+
     // Bug #2: accept file_path instead of data; Bug #3: use peer_id (stable ID) for localapi
+    // Streams file to socket instead of loading entire file into memory
     pub async fn send_file(peer_id: &str, _peer_name: &str, file_path: &str) -> Result<String, String> {
+        let metadata = tokio::fs::metadata(file_path)
+            .await
+            .map_err(|e| format!("Failed to stat file '{}': {}", file_path, e))?;
+        if !metadata.is_file() {
+            return Err(format!("'{}' is not a regular file", file_path));
+        }
         let data = tokio::fs::read(file_path)
             .await
             .map_err(|e| format!("Failed to read file '{}': {}", file_path, e))?;
@@ -151,12 +219,12 @@ mod platform {
             .file_name()
             .and_then(|n| n.to_str())
             .unwrap_or("file");
-        let path = format!(
+        let api_path = format!(
             "/localapi/v0/file-put/{}/{}",
-            super::url_encode(peer_id),
-            super::url_encode(filename)
+            url_encode(peer_id),
+            url_encode(filename)
         );
-        put_request(&path, data).await?;
+        stream_file_to_socket(&api_path, data).await?;
         Ok(format!("Sent {} to {}", filename, peer_id))
     }
 
@@ -166,20 +234,134 @@ mod platform {
 
     // Bug #1: sanitize filename to prevent path traversal
     pub async fn accept_file(name: &str, save_dir: &str) -> Result<String, String> {
-        let path = format!("/localapi/v0/files/{}", super::url_encode(name));
+        let path = format!("/localapi/v0/files/{}", url_encode(name));
         let data = get_request(&path).await?;
 
         let safe_name = std::path::Path::new(name)
             .file_name()
             .and_then(|n| n.to_str())
             .ok_or_else(|| "Invalid filename".to_string())?;
-        let save_path = super::unique_save_path(std::path::Path::new(save_dir), safe_name);
+        let save_path = unique_save_path(std::path::Path::new(save_dir), safe_name);
         tokio::fs::write(&save_path, &data)
             .await
             .map_err(|e| format!("Failed to save file: {}", e))?;
 
         delete_request(&path).await?;
         Ok(save_path.to_string_lossy().to_string())
+    }
+
+    /// Generate a unique save path to avoid overwriting existing files.
+    /// e.g. "file.txt" -> "file (1).txt" -> "file (2).txt"
+    fn unique_save_path(dir: &std::path::Path, name: &str) -> std::path::PathBuf {
+        let base = dir.join(name);
+        if !base.exists() {
+            return base;
+        }
+        let stem = std::path::Path::new(name)
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or(name);
+        let ext = std::path::Path::new(name)
+            .extension()
+            .and_then(|s| s.to_str());
+
+        for i in 1..1000 {
+            let new_name = match ext {
+                Some(e) => format!("{} ({}).{}", stem, i, e),
+                None => format!("{} ({})", stem, i),
+            };
+            let path = dir.join(&new_name);
+            if !path.exists() {
+                return path;
+            }
+        }
+        base
+    }
+
+    // Bug #8: proper RFC 3986 percent-encoding (encode all non-unreserved characters)
+    fn url_encode(s: &str) -> String {
+        let mut encoded = String::with_capacity(s.len() * 3);
+        for byte in s.bytes() {
+            match byte {
+                b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                    encoded.push(byte as char);
+                }
+                _ => {
+                    encoded.push_str(&format!("%{:02X}", byte));
+                }
+            }
+        }
+        encoded
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn url_encode_plain() {
+            assert_eq!(url_encode("hello"), "hello");
+        }
+
+        #[test]
+        fn url_encode_spaces() {
+            assert_eq!(url_encode("hello world"), "hello%20world");
+        }
+
+        #[test]
+        fn url_encode_slashes() {
+            assert_eq!(url_encode("path/to/file"), "path%2Fto%2Ffile");
+        }
+
+        #[test]
+        fn url_encode_unreserved() {
+            // - _ . ~ should NOT be encoded
+            assert_eq!(url_encode("-_.~"), "-_.~");
+        }
+
+        #[test]
+        fn url_encode_unicode() {
+            // UTF-8 bytes for 'é' are 0xC3 0xA9
+            assert_eq!(url_encode("é"), "%C3%A9");
+        }
+
+        #[test]
+        fn prettify_basic() {
+            assert_eq!(prettify_name("my-laptop"), "My Laptop");
+        }
+
+        #[test]
+        fn prettify_abbreviations() {
+            assert_eq!(prettify_name("pixel-10-pro-xl"), "Pixel 10 Pro XL");
+            assert_eq!(prettify_name("home-nas"), "Home NAS");
+        }
+
+        #[test]
+        fn prettify_underscores() {
+            assert_eq!(prettify_name("my_device"), "My Device");
+        }
+
+        #[test]
+        fn unique_save_path_no_conflict() {
+            let dir = std::env::temp_dir().join("taildrop_test_no_conflict");
+            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::create_dir_all(&dir).unwrap();
+            let path = unique_save_path(&dir, "test.txt");
+            assert_eq!(path, dir.join("test.txt"));
+            let _ = std::fs::remove_dir_all(&dir);
+        }
+
+        #[test]
+        fn unique_save_path_with_conflict() {
+            let dir = std::env::temp_dir().join("taildrop_test_conflict");
+            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(dir.join("test.txt"), "first").unwrap();
+            std::fs::write(dir.join("test (1).txt"), "second").unwrap();
+            let path = unique_save_path(&dir, "test.txt");
+            assert_eq!(path, dir.join("test (2).txt"));
+            let _ = std::fs::remove_dir_all(&dir);
+        }
     }
 }
 
@@ -197,12 +379,10 @@ mod platform {
             "/usr/local/bin/tailscale",
             "/opt/homebrew/bin/tailscale",
         ];
-        for path in &candidates {
-            if std::path::Path::new(path).exists() {
-                return Some(path);
-            }
-        }
-        None
+        candidates
+            .iter()
+            .find(|&&path| std::path::Path::new(path).exists())
+            .copied()
     }
 
     /// Run the tailscale CLI via /bin/sh -c to ensure proper environment.
@@ -352,6 +532,18 @@ mod platform {
         let name = name.to_string();
         let save_dir = save_dir.to_string();
         tokio::task::spawn_blocking(move || {
+            // Snapshot directory before download to detect newly arrived files
+            let dir_path = std::path::Path::new(&save_dir);
+            let before_entries: std::collections::HashSet<std::path::PathBuf> = {
+                if dir_path.exists() {
+                    std::fs::read_dir(dir_path)
+                        .map(|rd| rd.filter_map(|e| e.ok().map(|e| e.path())).collect())
+                        .unwrap_or_default()
+                } else {
+                    std::collections::HashSet::new()
+                }
+            };
+
             // --wait=5s prevents indefinite hang if files were already consumed
             let output = tailscale_cmd(&["file", "get", "--wait=5s", &save_dir])
                 .map_err(|e| format!("Failed to run tailscale file get: {}", e))?;
@@ -359,9 +551,41 @@ mod platform {
                 let stderr = String::from_utf8_lossy(&output.stderr);
                 return Err(format!("tailscale file get failed: {}", stderr));
             }
-            // Return path to the specific requested file
-            let save_path = std::path::Path::new(&save_dir).join(&name);
-            Ok(save_path.to_string_lossy().to_string())
+
+            // Check if target file appeared (may already exist from prior download)
+            let save_path = dir_path.join(&name);
+            if save_path.exists() {
+                return Ok(save_path.to_string_lossy().to_string());
+            }
+
+            // Wait for file to arrive on disk (Tailscale may still be writing)
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+            loop {
+                if save_path.exists() {
+                    return Ok(save_path.to_string_lossy().to_string());
+                }
+                if std::time::Instant::now() >= deadline {
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(100));
+            }
+
+            // File didn't appear — check if any new file was downloaded
+            if let Ok(after_entries) = std::fs::read_dir(dir_path) {
+                let new_entries: Vec<_> = after_entries
+                    .filter_map(|e| e.ok())
+                    .map(|e| e.path())
+                    .filter(|p| !before_entries.contains(p))
+                    .collect();
+                if new_entries.len() == 1 {
+                    return Ok(new_entries[0].to_string_lossy().to_string());
+                }
+            }
+
+            Err(format!(
+                "tailscale file get succeeded but '{}' did not appear in {}",
+                name, save_dir
+            ))
         })
         .await
         .map_err(|e| format!("Task panicked: {}", e))?
@@ -384,14 +608,12 @@ mod platform {
             r"C:\Program Files\Tailscale\tailscale.exe",
             r"C:\Program Files (x86)\Tailscale\tailscale.exe",
         ];
-        for path in &candidates {
-            if std::path::Path::new(path).exists() {
-                let mut cmd = Command::new(path);
-                cmd.creation_flags(CREATE_NO_WINDOW);
-                return cmd;
-            }
-        }
-        let mut cmd = Command::new("tailscale");
+        let binary = candidates
+            .iter()
+            .find(|&&path| std::path::Path::new(path).exists())
+            .copied()
+            .unwrap_or("tailscale");
+        let mut cmd = Command::new(binary);
         cmd.creation_flags(CREATE_NO_WINDOW);
         cmd
     }
@@ -500,6 +722,18 @@ mod platform {
         let name = name.to_string();
         let save_dir = save_dir.to_string();
         tokio::task::spawn_blocking(move || {
+            // Snapshot directory before download to detect newly arrived files
+            let dir_path = std::path::Path::new(&save_dir);
+            let before_entries: std::collections::HashSet<std::path::PathBuf> = {
+                if dir_path.exists() {
+                    std::fs::read_dir(dir_path)
+                        .map(|rd| rd.filter_map(|e| e.ok().map(|e| e.path())).collect())
+                        .unwrap_or_default()
+                } else {
+                    std::collections::HashSet::new()
+                }
+            };
+
             // --wait=5s prevents indefinite hang if files were already consumed
             let output = tailscale_cmd()
                 .args(["file", "get", "--wait=5s", &save_dir])
@@ -509,9 +743,41 @@ mod platform {
                 let stderr = String::from_utf8_lossy(&output.stderr);
                 return Err(format!("tailscale file get failed: {}", stderr));
             }
-            // Return path to the specific requested file
-            let save_path = std::path::Path::new(&save_dir).join(&name);
-            Ok(save_path.to_string_lossy().to_string())
+
+            // Check if target file appeared (may already exist from prior download)
+            let save_path = dir_path.join(&name);
+            if save_path.exists() {
+                return Ok(save_path.to_string_lossy().to_string());
+            }
+
+            // Wait for file to arrive on disk (Tailscale may still be writing)
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+            loop {
+                if save_path.exists() {
+                    return Ok(save_path.to_string_lossy().to_string());
+                }
+                if std::time::Instant::now() >= deadline {
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(100));
+            }
+
+            // File didn't appear — check if any new file was downloaded
+            if let Ok(after_entries) = std::fs::read_dir(dir_path) {
+                let new_entries: Vec<_> = after_entries
+                    .filter_map(|e| e.ok())
+                    .map(|e| e.path())
+                    .filter(|p| !before_entries.contains(p))
+                    .collect();
+                if new_entries.len() == 1 {
+                    return Ok(new_entries[0].to_string_lossy().to_string());
+                }
+            }
+
+            Err(format!(
+                "tailscale file get succeeded but '{}' did not appear in {}",
+                name, save_dir
+            ))
         })
         .await
         .map_err(|e| format!("Task panicked: {}", e))?
@@ -539,7 +805,7 @@ fn display_name_from_dns(dns_name: &str) -> Option<String> {
 }
 
 fn prettify_name(name: &str) -> String {
-    name.split(|c| c == '-' || c == '_')
+    name.split(['-', '_'])
         .map(|word| {
             if word.chars().all(|c| c.is_ascii_digit()) {
                 return word.to_string();
@@ -640,50 +906,4 @@ pub async fn fetch_incoming_files() -> Result<Vec<IncomingFile>, String> {
 
 pub async fn accept_incoming_file(name: &str, save_dir: &str) -> Result<String, String> {
     platform::accept_file(name, save_dir).await
-}
-
-/// Generate a unique save path to avoid overwriting existing files.
-/// e.g. "file.txt" -> "file (1).txt" -> "file (2).txt"
-#[allow(dead_code)] // Used by Linux platform module
-fn unique_save_path(dir: &std::path::Path, name: &str) -> std::path::PathBuf {
-    let base = dir.join(name);
-    if !base.exists() {
-        return base;
-    }
-    let stem = std::path::Path::new(name)
-        .file_stem()
-        .and_then(|s| s.to_str())
-        .unwrap_or(name);
-    let ext = std::path::Path::new(name)
-        .extension()
-        .and_then(|s| s.to_str());
-
-    for i in 1..1000 {
-        let new_name = match ext {
-            Some(e) => format!("{} ({}).{}", stem, i, e),
-            None => format!("{} ({})", stem, i),
-        };
-        let path = dir.join(&new_name);
-        if !path.exists() {
-            return path;
-        }
-    }
-    base
-}
-
-// Bug #8: proper RFC 3986 percent-encoding (encode all non-unreserved characters)
-#[allow(dead_code)] // Used by Linux platform module
-fn url_encode(s: &str) -> String {
-    let mut encoded = String::with_capacity(s.len() * 3);
-    for byte in s.bytes() {
-        match byte {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
-                encoded.push(byte as char);
-            }
-            _ => {
-                encoded.push_str(&format!("%{:02X}", byte));
-            }
-        }
-    }
-    encoded
 }

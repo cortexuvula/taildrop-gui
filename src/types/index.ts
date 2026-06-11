@@ -13,8 +13,8 @@ export interface Peer {
 }
 
 export interface IncomingFile {
-  Name: string;
-  Size: number;
+  name: string;
+  size: number;
 }
 
 export interface TransferRecord {

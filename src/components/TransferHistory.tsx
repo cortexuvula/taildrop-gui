@@ -55,14 +55,14 @@ export function TransferHistory({
         <div className="incoming-section">
           <div className="section-label">Incoming Files</div>
           {incomingFiles.map((file) => (
-            <div key={file.Name} className="incoming-item">
+            <div key={file.name} className="incoming-item">
               <div className="incoming-info">
-                <span className="incoming-name">{file.Name}</span>
-                <span className="incoming-size">{formatSize(file.Size)}</span>
+                <span className="incoming-name">{file.name}</span>
+                <span className="incoming-size">{formatSize(file.size)}</span>
               </div>
               <button
                 className="btn-accept"
-                onClick={() => { onAcceptFile(file.Name); }}
+                onClick={() => { onAcceptFile(file.name); }}
               >
                 Accept
               </button>
