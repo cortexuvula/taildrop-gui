@@ -25,6 +25,7 @@ export interface TransferRecord {
   timestamp: number;
   status: "pending" | "sending" | "success" | "error";
   error?: string;
+  progress?: number;
 }
 
 export interface AppSettings {

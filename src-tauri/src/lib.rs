@@ -1,12 +1,14 @@
 mod tailscale;
 
+use tauri::Emitter;
+
 #[tauri::command]
 async fn get_tailscale_status() -> Result<Vec<tailscale::Peer>, String> {
-    eprintln!("[taildrop] get_tailscale_status: invoking fetch_status...");
+    log::debug!("get_tailscale_status: invoking fetch_status...");
     match tailscale::fetch_status().await {
         Ok(peers) => {
-            eprintln!(
-                "[taildrop] get_tailscale_status: OK — {} peers (self={}, online={})",
+            log::info!(
+                "get_tailscale_status: OK — {} peers (self={}, online={})",
                 peers.len(),
                 peers.iter().filter(|p| p.is_self).count(),
                 peers.iter().filter(|p| p.online && !p.is_self).count()
@@ -14,7 +16,7 @@ async fn get_tailscale_status() -> Result<Vec<tailscale::Peer>, String> {
             Ok(peers)
         }
         Err(e) => {
-            eprintln!("[taildrop] get_tailscale_status: ERROR — {}", e);
+            log::error!("get_tailscale_status: ERROR — {}", e);
             Err(e)
         }
     }
@@ -22,11 +24,42 @@ async fn get_tailscale_status() -> Result<Vec<tailscale::Peer>, String> {
 
 #[tauri::command]
 async fn send_file(
+    app: tauri::AppHandle,
     peer_id: String,
     peer_name: String,
     file_path: String,
+    transfer_id: String,
 ) -> Result<String, String> {
-    tailscale::send_file_to_peer(&peer_id, &peer_name, &file_path).await
+    // Emit simulated progress events while the transfer is in flight.
+    // The actual tailscale CLI / localapi doesn't report byte-level progress,
+    // so we emit milestone percentages to give the user visual feedback.
+    let progress_handle = {
+        let app = app.clone();
+        let tid = transfer_id.clone();
+        tokio::spawn(async move {
+            for pct in [10u8, 30, 60, 90] {
+                tokio::time::sleep(std::time::Duration::from_millis(
+                    (pct as u64) * 20,
+                ))
+                .await;
+                let _ = app.emit(
+                    "transfer-progress",
+                    serde_json::json!({ "transferId": tid, "progress": pct }),
+                );
+            }
+        })
+    };
+
+    let result = tailscale::send_file_to_peer(&peer_id, &peer_name, &file_path).await;
+    progress_handle.abort();
+    // Emit 100% on success so the UI shows completion before status flips
+    if result.is_ok() {
+        let _ = app.emit(
+            "transfer-progress",
+            serde_json::json!({ "transferId": transfer_id, "progress": 100 }),
+        );
+    }
+    result
 }
 
 #[tauri::command]
@@ -58,6 +91,8 @@ fn get_default_download_dir() -> String {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    env_logger::init();
+
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_autostart::init(

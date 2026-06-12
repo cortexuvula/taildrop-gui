@@ -47,7 +47,76 @@ pub struct Peer {
 #[serde(rename_all = "camelCase")]
 pub struct IncomingFile {
     pub name: String,
-    pub size: i64,
+    pub size: u64,
+}
+
+// ============================================================
+// Shared accept_file helper for CLI-based platforms (macOS/Windows)
+// ============================================================
+
+/// Shared accept_file logic for CLI-based platforms.
+/// `run_get` executes the platform-specific `tailscale file get` command.
+/// Sanitizes `name` to prevent path traversal attacks.
+fn accept_file_with_getter(
+    name: &str,
+    save_dir: &str,
+    run_get: impl FnOnce() -> Result<(), String>,
+) -> Result<String, String> {
+    // Sanitize filename to prevent path traversal
+    let safe_name = std::path::Path::new(name)
+        .file_name()
+        .and_then(|n| n.to_str())
+        .ok_or_else(|| "Invalid filename".to_string())?;
+
+    // Snapshot directory before download to detect newly arrived files
+    let dir_path = std::path::Path::new(save_dir);
+    let before_entries: std::collections::HashSet<std::path::PathBuf> = {
+        if dir_path.exists() {
+            std::fs::read_dir(dir_path)
+                .map(|rd| rd.filter_map(|e| e.ok().map(|e| e.path())).collect())
+                .unwrap_or_default()
+        } else {
+            std::collections::HashSet::new()
+        }
+    };
+
+    // Run the platform-specific tailscale file get command
+    run_get()?;
+
+    // Check if target file appeared (may already exist from prior download)
+    let save_path = dir_path.join(safe_name);
+    if save_path.exists() {
+        return Ok(save_path.to_string_lossy().to_string());
+    }
+
+    // Wait for file to arrive on disk (Tailscale may still be writing)
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    loop {
+        if save_path.exists() {
+            return Ok(save_path.to_string_lossy().to_string());
+        }
+        if std::time::Instant::now() >= deadline {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+
+    // File didn't appear — check if any new file was downloaded
+    if let Ok(after_entries) = std::fs::read_dir(dir_path) {
+        let new_entries: Vec<_> = after_entries
+            .filter_map(|e| e.ok())
+            .map(|e| e.path())
+            .filter(|p| !before_entries.contains(p))
+            .collect();
+        if new_entries.len() == 1 {
+            return Ok(new_entries[0].to_string_lossy().to_string());
+        }
+    }
+
+    Err(format!(
+        "tailscale file get succeeded but '{}' did not appear in {}",
+        safe_name, save_dir
+    ))
 }
 
 // ============================================================
@@ -127,40 +196,57 @@ mod platform {
     }
 
     /// Write file data to Unix socket in chunks via raw HTTP/1.1.
-    /// Reduces peak memory on the socket side. True disk-to-socket streaming
-    /// would require a custom hyper Body; this is a pragmatic middle ground.
-    async fn stream_file_to_socket(path: &str, body: Vec<u8>) -> Result<Vec<u8>, String> {
+    /// Streams file from disk in 8KB chunks to avoid loading entire file in memory.
+    /// Uses HTTP/1.1 with Connection: close. If the server responds with chunked
+    /// Transfer-Encoding, read_to_end will read until connection close, which
+    /// gives us the complete response body. We then parse the raw body — this is
+    /// safe because the Tailscale localapi returns small JSON responses for PUT
+    /// requests and does not use chunked encoding for its responses.
+    async fn stream_file_to_socket(api_path: &str, file_path: &str) -> Result<Vec<u8>, String> {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
         use tokio::net::UnixStream;
+
+        let metadata = tokio::fs::metadata(file_path)
+            .await
+            .map_err(|e| format!("Failed to stat file '{}': {}", file_path, e))?;
+        let file_size = metadata.len();
+
+        let mut file = tokio::fs::File::open(file_path)
+            .await
+            .map_err(|e| format!("Failed to open file '{}': {}", file_path, e))?;
 
         let mut stream = UnixStream::connect(SOCKET_PATH)
             .await
             .map_err(|e| format!("Failed to connect to Tailscale daemon: {}", e))?;
 
         // Timeout: 60s base + 60s per MB for large files
-        let timeout_secs = 60 + (body.len() as u64 / (1024 * 1024)) * 60;
+        let timeout_secs = 60 + (file_size / (1024 * 1024)) * 60;
         let timeout = std::time::Duration::from_secs(timeout_secs.min(600));
 
-        // Write HTTP/1.1 request with streaming body
+        // Write HTTP/1.1 request with Content-Length
         let request = format!(
             "PUT {} HTTP/1.1\r\nHost: local-tailscaled.sock\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
-            path,
-            body.len()
+            api_path, file_size
         );
         tokio::time::timeout(timeout, stream.write_all(request.as_bytes()))
             .await
             .map_err(|_| "Timeout writing request headers to Tailscale daemon".to_string())?
             .map_err(|e| format!("Failed to write request: {}", e))?;
 
-        // Stream file in 8KB chunks to avoid loading entire file in memory
-        let mut pos = 0;
-        while pos < body.len() {
-            let end = (pos + 8192).min(body.len());
-            tokio::time::timeout(timeout, stream.write_all(&body[pos..end]))
+        // Stream file in 8KB chunks from disk to socket
+        let mut buf = [0u8; 8192];
+        loop {
+            let n = tokio::time::timeout(timeout, file.read(&mut buf))
+                .await
+                .map_err(|_| "Timeout reading file data from disk".to_string())?
+                .map_err(|e| format!("Failed to read file: {}", e))?;
+            if n == 0 {
+                break;
+            }
+            tokio::time::timeout(timeout, stream.write_all(&buf[..n]))
                 .await
                 .map_err(|_| "Timeout writing file data to Tailscale daemon".to_string())?
                 .map_err(|e| format!("Failed to write file data: {}", e))?;
-            pos = end;
         }
 
         // Read response
@@ -175,6 +261,10 @@ mod platform {
         .map_err(|e| format!("Failed to read response: {}", e))?;
 
         // Parse HTTP response
+        // Note: We use HTTP/1.1 with Connection: close. If the server uses chunked
+        // Transfer-Encoding, read_to_end reads until connection close, which gives
+        // the full response. The Tailscale localapi does not use chunked encoding
+        // for PUT responses, so direct body parsing is safe here.
         let header_end = response
             .windows(4)
             .position(|w| w == b"\r\n\r\n")
@@ -200,8 +290,105 @@ mod platform {
         Ok(body)
     }
 
-    // Bug #2: accept file_path instead of data; Bug #3: use peer_id (stable ID) for localapi
-    // Streams file to socket instead of loading entire file into memory
+    /// Stream a GET response from the Tailscale localapi directly to a file on disk.
+    /// Avoids buffering the entire response in memory (fixes OOM for large incoming files).
+    /// Uses HTTP/1.1 with Connection: close. Reads response headers first, then
+    /// streams the body to disk in chunks. If the server uses chunked Transfer-Encoding,
+    /// we write the raw bytes to disk — the Tailscale localapi does not use chunked
+    /// encoding for file transfers, so this is safe.
+    async fn stream_get_to_file(api_path: &str, save_path: &std::path::Path) -> Result<(), String> {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::UnixStream;
+
+        let mut stream = UnixStream::connect(SOCKET_PATH)
+            .await
+            .map_err(|e| format!("Failed to connect to Tailscale daemon: {}", e))?;
+
+        let request = format!(
+            "GET {} HTTP/1.1\r\nHost: local-tailscaled.sock\r\nConnection: close\r\n\r\n",
+            api_path
+        );
+        tokio::time::timeout(
+            std::time::Duration::from_secs(30),
+            stream.write_all(request.as_bytes()),
+        )
+        .await
+        .map_err(|_| "Timeout writing GET request to Tailscale daemon".to_string())?
+        .map_err(|e| format!("Failed to write request: {}", e))?;
+
+        // Read headers incrementally until we find \r\n\r\n
+        let mut header_buf = Vec::new();
+        let mut temp_buf = [0u8; 4096];
+        let header_end = loop {
+            let n = tokio::time::timeout(
+                std::time::Duration::from_secs(30),
+                stream.read(&mut temp_buf),
+            )
+            .await
+            .map_err(|_| "Timeout reading response headers".to_string())?
+            .map_err(|e| format!("Failed to read response: {}", e))?;
+            if n == 0 {
+                return Err("Connection closed before headers received".to_string());
+            }
+            header_buf.extend_from_slice(&temp_buf[..n]);
+            if let Some(pos) = header_buf.windows(4).position(|w| w == b"\r\n\r\n") {
+                break pos;
+            }
+            if header_buf.len() > 65536 {
+                return Err("Response headers too large".to_string());
+            }
+        };
+
+        // Check status code
+        let headers = String::from_utf8_lossy(&header_buf[..header_end]);
+        let status_line = headers.lines().next().unwrap_or("");
+        let status_code: u16 = status_line
+            .split_whitespace()
+            .nth(1)
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(0);
+        if status_code != 200 {
+            let err_body = &header_buf[header_end + 4..];
+            return Err(format!(
+                "Tailscale API error ({}): {}",
+                status_code,
+                String::from_utf8_lossy(err_body)
+            ));
+        }
+
+        // Write any body bytes already buffered after headers
+        let body_start = header_end + 4;
+        let mut file = tokio::fs::File::create(save_path)
+            .await
+            .map_err(|e| format!("Failed to create file '{}': {}", save_path.display(), e))?;
+        if body_start < header_buf.len() {
+            file.write_all(&header_buf[body_start..])
+                .await
+                .map_err(|e| format!("Failed to write to file: {}", e))?;
+        }
+
+        // Stream remaining body to disk in chunks
+        loop {
+            let n = tokio::time::timeout(
+                std::time::Duration::from_secs(30),
+                stream.read(&mut temp_buf),
+            )
+            .await
+            .map_err(|_| "Timeout reading response body".to_string())?
+            .map_err(|e| format!("Failed to read response body: {}", e))?;
+            if n == 0 {
+                break;
+            }
+            file.write_all(&temp_buf[..n])
+                .await
+                .map_err(|e| format!("Failed to write to file: {}", e))?;
+        }
+
+        Ok(())
+    }
+
+    /// Streams file from disk to socket instead of loading entire file into memory.
+    /// Uses the peer's stable node ID (peer_id) for the localapi path.
     pub async fn send_file(peer_id: &str, _peer_name: &str, file_path: &str) -> Result<String, String> {
         let metadata = tokio::fs::metadata(file_path)
             .await
@@ -209,9 +396,6 @@ mod platform {
         if !metadata.is_file() {
             return Err(format!("'{}' is not a regular file", file_path));
         }
-        let data = tokio::fs::read(file_path)
-            .await
-            .map_err(|e| format!("Failed to read file '{}': {}", file_path, e))?;
         let filename = std::path::Path::new(file_path)
             .file_name()
             .and_then(|n| n.to_str())
@@ -221,7 +405,8 @@ mod platform {
             url_encode(peer_id),
             url_encode(filename)
         );
-        stream_file_to_socket(&api_path, data).await?;
+        stream_file_to_socket(&api_path, file_path).await?;
+        log::debug!("Sent {} to {}", filename, peer_id);
         Ok(format!("Sent {} to {}", filename, peer_id))
     }
 
@@ -229,21 +414,23 @@ mod platform {
         get_request("/localapi/v0/files/").await
     }
 
-    // Bug #1: sanitize filename to prevent path traversal
+    /// Accept an incoming file. Streams response directly to disk instead of
+    /// buffering in memory (fixes OOM for large incoming files).
+    /// Sanitizes filename to prevent path traversal.
     pub async fn accept_file(name: &str, save_dir: &str) -> Result<String, String> {
-        let path = format!("/localapi/v0/files/{}", url_encode(name));
-        let data = get_request(&path).await?;
-
         let safe_name = std::path::Path::new(name)
             .file_name()
             .and_then(|n| n.to_str())
             .ok_or_else(|| "Invalid filename".to_string())?;
+        let api_path = format!("/localapi/v0/files/{}", url_encode(name));
         let save_path = unique_save_path(std::path::Path::new(save_dir), safe_name);
-        tokio::fs::write(&save_path, &data)
-            .await
-            .map_err(|e| format!("Failed to save file: {}", e))?;
+        stream_get_to_file(&api_path, &save_path).await?;
 
-        delete_request(&path).await?;
+        // Delete from pending after successful download (best-effort)
+        let delete_path = format!("/localapi/v0/files/{}", url_encode(name));
+        let _ = delete_request(&delete_path).await;
+
+        log::debug!("Accepted file '{}' to '{}'", name, save_path.display());
         Ok(save_path.to_string_lossy().to_string())
     }
 
@@ -272,7 +459,23 @@ mod platform {
                 return path;
             }
         }
-        base
+    // After 999 conflicts, append a timestamp suffix to guarantee uniqueness
+    // instead of silently overwriting (which would lose data).
+        let fallback_name = match ext {
+            Some(e) => format!("{}-{:08x}.{}", stem, timestamp_tag(), e),
+            None => format!("{}-{:08x}", stem, timestamp_tag()),
+        };
+        dir.join(fallback_name)
+    }
+
+    /// Short timestamp suffix for collision resolution (8 hex chars).
+    fn timestamp_tag() -> u32 {
+        use std::time::{SystemTime, UNIX_EPOCH};
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        nanos as u32
     }
 
     // Bug #8: proper RFC 3986 percent-encoding (encode all non-unreserved characters)
@@ -388,6 +591,16 @@ mod platform {
     /// from a .app launched by launchd (minimal environment). Running through
     /// a shell resolves this.
     fn tailscale_cmd(args: &[&str]) -> std::io::Result<std::process::Output> {
+        // Reject arguments containing null bytes — these can't be passed through
+        // shell interpolation and indicate malformed/malicious input.
+        for arg in args {
+            if arg.contains('\0') {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    "argument contains null byte",
+                ));
+            }
+        }
         let binary = find_tailscale().unwrap_or("tailscale");
         // Quote binary path and each argument to handle spaces/special chars
         let escaped_binary = format!("'{}'", binary.replace('\'', "'\\''"));
@@ -395,7 +608,7 @@ mod platform {
             format!("'{}'", a.replace('\'', "'\\''"))
         }).collect();
         let shell_cmd = format!("{} {}", escaped_binary, escaped_args.join(" "));
-        eprintln!("[taildrop] macOS shell cmd: /bin/sh -c {}", shell_cmd);
+        log::debug!("macOS shell cmd: /bin/sh -c {}", shell_cmd);
         Command::new("/bin/sh")
             .arg("-c")
             .arg(&shell_cmd)
@@ -407,6 +620,9 @@ mod platform {
     /// Try an HTTP/1.0 GET via the Tailscale Unix socket.
     /// Works when the socket is accessible (Homebrew/open-source installs).
     /// Fails gracefully for App Store installs with restricted permissions.
+    /// Uses HTTP/1.0 which guarantees non-chunked responses and connection close,
+    /// so read_to_end will read the complete response body without needing to
+    /// parse chunked Transfer-Encoding.
     fn try_socket_get(path: &str) -> Result<Vec<u8>, String> {
         use std::os::unix::net::UnixStream;
         use std::io::{Read, Write};
@@ -445,146 +661,119 @@ mod platform {
         Ok(response[header_end + 4..].to_vec())
     }
 
-    // Bug #9: wrap blocking CLI calls in spawn_blocking
     pub async fn fetch_status_json() -> Result<Vec<u8>, String> {
-        tokio::task::spawn_blocking(|| {
-            let binary_path = find_tailscale().unwrap_or("tailscale");
-            eprintln!("[taildrop] macOS fetch_status_json: binary={}", binary_path);
+        tokio::time::timeout(
+            std::time::Duration::from_secs(120),
+            tokio::task::spawn_blocking(|| {
+                let binary_path = find_tailscale().unwrap_or("tailscale");
+                log::debug!("macOS fetch_status_json: binary={}", binary_path);
 
-            let output = tailscale_cmd(&["status", "--json"])
-                .map_err(|e| format!(
-                    "Could not run tailscale CLI [tried: {}]: {}",
-                    binary_path, e
-                ))?;
+                let output = tailscale_cmd(&["status", "--json"])
+                    .map_err(|e| format!(
+                        "Could not run tailscale CLI [tried: {}]: {}",
+                        binary_path, e
+                    ))?;
 
-            let stdout = String::from_utf8_lossy(&output.stdout);
-            let stderr = String::from_utf8_lossy(&output.stderr);
+                let stdout = String::from_utf8_lossy(&output.stdout);
+                let stderr = String::from_utf8_lossy(&output.stderr);
 
-            eprintln!(
-                "[taildrop] macOS CLI result: exit={} stdout_len={} stderr_len={}",
-                output.status,
-                output.stdout.len(),
-                output.stderr.len()
-            );
+                log::debug!(
+                    "macOS CLI result: exit={} stdout_len={} stderr_len={}",
+                    output.status,
+                    output.stdout.len(),
+                    output.stderr.len()
+                );
 
-            if !output.status.success() {
-                return Err(format!(
-                    "tailscale status failed [binary: {}] stderr: {} stdout: {}",
-                    binary_path, stderr, stdout
-                ));
-            }
-            if output.stdout.is_empty() {
-                return Err(format!(
-                    "tailscale returned empty output [binary: {}] stderr: {}",
-                    binary_path, stderr
-                ));
-            }
-            Ok(output.stdout)
-        })
+                if !output.status.success() {
+                    return Err(format!(
+                        "tailscale status failed [binary: {}] stderr: {} stdout: {}",
+                        binary_path, stderr, stdout
+                    ));
+                }
+                if output.stdout.is_empty() {
+                    return Err(format!(
+                        "tailscale returned empty output [binary: {}] stderr: {}",
+                        binary_path, stderr
+                    ));
+                }
+                Ok(output.stdout)
+            }),
+        )
         .await
+        .map_err(|_| "fetch_status_json timed out".to_string())?
         .map_err(|e| format!("Task panicked: {}", e))?
     }
 
-    // Bug #2: accept file_path (no more temp file dance)
-    // Bug #6: temp file collision eliminated — uses real file path
-    // Bug #9: non-blocking via spawn_blocking
+    /// Send file to peer using tailscale CLI. Non-blocking via spawn_blocking.
     pub async fn send_file(_peer_id: &str, peer_name: &str, file_path: &str) -> Result<String, String> {
         let peer_name = peer_name.to_string();
         let file_path = file_path.to_string();
-        tokio::task::spawn_blocking(move || {
-            let output = tailscale_cmd(&["file", "cp", &file_path, &format!("{}:", peer_name)])
-                .map_err(|e| format!("Failed to run tailscale file cp: {}", e))?;
-            if !output.status.success() {
-                let stderr = String::from_utf8_lossy(&output.stderr);
-                return Err(format!("tailscale file cp failed: {}", stderr));
-            }
-            Ok(format!("Sent file to {}", peer_name))
-        })
+        // Adaptive timeout: 120s base + 60s per MB, capped at 600s
+        let file_size = std::fs::metadata(&file_path).map(|m| m.len()).unwrap_or(0);
+        let timeout_secs = (120 + (file_size / (1024 * 1024)) * 60).min(600);
+        tokio::time::timeout(
+            std::time::Duration::from_secs(timeout_secs),
+            tokio::task::spawn_blocking(move || {
+                let output = tailscale_cmd(&["file", "cp", &file_path, &format!("{}:", peer_name)])
+                    .map_err(|e| format!("Failed to run tailscale file cp: {}", e))?;
+                if !output.status.success() {
+                    let stderr = String::from_utf8_lossy(&output.stderr);
+                    return Err(format!("tailscale file cp failed: {}", stderr));
+                }
+                Ok(format!("Sent file to {}", peer_name))
+            }),
+        )
         .await
+        .map_err(|_| "send_file timed out".to_string())?
         .map_err(|e| format!("Task panicked: {}", e))?
     }
 
     pub async fn get_incoming_files() -> Result<Vec<u8>, String> {
-        tokio::task::spawn_blocking(|| {
-            match try_socket_get("/localapi/v0/files/") {
-                Ok(data) => Ok(data),
-                Err(e) => {
-                    use std::sync::Once;
-                    static LOG_ONCE: Once = Once::new();
-                    LOG_ONCE.call_once(|| {
-                        eprintln!(
-                            "[taildrop] macOS: socket file listing unavailable ({}), incoming files won't be detected",
-                            e
-                        );
-                    });
-                    Ok(b"[]".to_vec())
+        tokio::time::timeout(
+            std::time::Duration::from_secs(120),
+            tokio::task::spawn_blocking(|| {
+                match try_socket_get("/localapi/v0/files/") {
+                    Ok(data) => Ok(data),
+                    Err(e) => {
+                        use std::sync::Once;
+                        static LOG_ONCE: Once = Once::new();
+                        LOG_ONCE.call_once(|| {
+                            log::warn!(
+                                "macOS: socket file listing unavailable ({}), incoming files won't be detected",
+                                e
+                            );
+                        });
+                        Ok(b"[]".to_vec())
+                    }
                 }
-            }
-        })
+            }),
+        )
         .await
+        .map_err(|_| "get_incoming_files timed out".to_string())?
         .map_err(|e| format!("Task panicked: {}", e))?
     }
 
+    /// Accept an incoming file. Uses shared helper with path traversal sanitization.
     pub async fn accept_file(name: &str, save_dir: &str) -> Result<String, String> {
         let name = name.to_string();
         let save_dir = save_dir.to_string();
-        tokio::task::spawn_blocking(move || {
-            // Snapshot directory before download to detect newly arrived files
-            let dir_path = std::path::Path::new(&save_dir);
-            let before_entries: std::collections::HashSet<std::path::PathBuf> = {
-                if dir_path.exists() {
-                    std::fs::read_dir(dir_path)
-                        .map(|rd| rd.filter_map(|e| e.ok().map(|e| e.path())).collect())
-                        .unwrap_or_default()
-                } else {
-                    std::collections::HashSet::new()
-                }
-            };
-
-            // --wait=5s prevents indefinite hang if files were already consumed
-            let output = tailscale_cmd(&["file", "get", "--wait=5s", &save_dir])
-                .map_err(|e| format!("Failed to run tailscale file get: {}", e))?;
-            if !output.status.success() {
-                let stderr = String::from_utf8_lossy(&output.stderr);
-                return Err(format!("tailscale file get failed: {}", stderr));
-            }
-
-            // Check if target file appeared (may already exist from prior download)
-            let save_path = dir_path.join(&name);
-            if save_path.exists() {
-                return Ok(save_path.to_string_lossy().to_string());
-            }
-
-            // Wait for file to arrive on disk (Tailscale may still be writing)
-            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
-            loop {
-                if save_path.exists() {
-                    return Ok(save_path.to_string_lossy().to_string());
-                }
-                if std::time::Instant::now() >= deadline {
-                    break;
-                }
-                std::thread::sleep(std::time::Duration::from_millis(100));
-            }
-
-            // File didn't appear — check if any new file was downloaded
-            if let Ok(after_entries) = std::fs::read_dir(dir_path) {
-                let new_entries: Vec<_> = after_entries
-                    .filter_map(|e| e.ok())
-                    .map(|e| e.path())
-                    .filter(|p| !before_entries.contains(p))
-                    .collect();
-                if new_entries.len() == 1 {
-                    return Ok(new_entries[0].to_string_lossy().to_string());
-                }
-            }
-
-            Err(format!(
-                "tailscale file get succeeded but '{}' did not appear in {}",
-                name, save_dir
-            ))
-        })
+        tokio::time::timeout(
+            std::time::Duration::from_secs(120),
+            tokio::task::spawn_blocking(move || {
+                super::accept_file_with_getter(&name, &save_dir, || {
+                    // --wait=5s prevents indefinite hang if files were already consumed
+                    let output = tailscale_cmd(&["file", "get", "--wait=5s", &save_dir])
+                        .map_err(|e| format!("Failed to run tailscale file get: {}", e))?;
+                    if !output.status.success() {
+                        let stderr = String::from_utf8_lossy(&output.stderr);
+                        return Err(format!("tailscale file get failed: {}", stderr));
+                    }
+                    Ok(())
+                })
+            }),
+        )
         .await
+        .map_err(|_| "accept_file timed out".to_string())?
         .map_err(|e| format!("Task panicked: {}", e))?
     }
 }
@@ -615,50 +804,62 @@ mod platform {
         cmd
     }
 
-    // Bug #9: non-blocking via spawn_blocking
     pub async fn fetch_status_json() -> Result<Vec<u8>, String> {
-        tokio::task::spawn_blocking(|| {
-            let output = tailscale_cmd()
-                .args(["status", "--json"])
-                .output()
-                .map_err(|e| format!(
-                    "Could not run tailscale CLI. Make sure Tailscale is installed and in your PATH: {}",
-                    e
-                ))?;
-            if !output.status.success() {
-                let stderr = String::from_utf8_lossy(&output.stderr);
-                return Err(format!("tailscale status failed: {}", stderr));
-            }
-            Ok(output.stdout)
-        })
+        tokio::time::timeout(
+            std::time::Duration::from_secs(120),
+            tokio::task::spawn_blocking(|| {
+                let output = tailscale_cmd()
+                    .args(["status", "--json"])
+                    .output()
+                    .map_err(|e| format!(
+                        "Could not run tailscale CLI. Make sure Tailscale is installed and in your PATH: {}",
+                        e
+                    ))?;
+                if !output.status.success() {
+                    let stderr = String::from_utf8_lossy(&output.stderr);
+                    return Err(format!("tailscale status failed: {}", stderr));
+                }
+                Ok(output.stdout)
+            }),
+        )
         .await
+        .map_err(|_| "fetch_status_json timed out".to_string())?
         .map_err(|e| format!("Task panicked: {}", e))?
     }
 
-    // Bug #2: accept file_path (no more temp file dance)
-    // Bug #6: temp file collision eliminated
-    // Bug #9: non-blocking via spawn_blocking
+    /// Send file to peer using tailscale CLI. Non-blocking via spawn_blocking.
     pub async fn send_file(_peer_id: &str, peer_name: &str, file_path: &str) -> Result<String, String> {
         let peer_name = peer_name.to_string();
         let file_path = file_path.to_string();
-        tokio::task::spawn_blocking(move || {
-            let output = tailscale_cmd()
-                .args(["file", "cp", &file_path, &format!("{}:", peer_name)])
-                .output()
-                .map_err(|e| format!("Failed to run tailscale file cp: {}", e))?;
-            if !output.status.success() {
-                let stderr = String::from_utf8_lossy(&output.stderr);
-                return Err(format!("tailscale file cp failed: {}", stderr));
-            }
-            Ok(format!("Sent file to {}", peer_name))
-        })
+        // Adaptive timeout: 120s base + 60s per MB, capped at 600s
+        let file_size = std::fs::metadata(&file_path).map(|m| m.len()).unwrap_or(0);
+        let timeout_secs = (120 + (file_size / (1024 * 1024)) * 60).min(600);
+        tokio::time::timeout(
+            std::time::Duration::from_secs(timeout_secs),
+            tokio::task::spawn_blocking(move || {
+                let output = tailscale_cmd()
+                    .args(["file", "cp", &file_path, &format!("{}:", peer_name)])
+                    .output()
+                    .map_err(|e| format!("Failed to run tailscale file cp: {}", e))?;
+                if !output.status.success() {
+                    let stderr = String::from_utf8_lossy(&output.stderr);
+                    return Err(format!("tailscale file cp failed: {}", stderr));
+                }
+                Ok(format!("Sent file to {}", peer_name))
+            }),
+        )
         .await
+        .map_err(|_| "send_file timed out".to_string())?
         .map_err(|e| format!("Task panicked: {}", e))?
     }
 
     /// Named pipe path for the Tailscale daemon's local API on Windows.
     const PIPE_PATH: &str = r"\\.\pipe\ProtectedPrefix\Administrators\Tailscale\tailscaled";
 
+    /// Try an HTTP/1.0 GET via the Tailscale named pipe.
+    /// Uses HTTP/1.0 which guarantees non-chunked responses and connection close,
+    /// so read_to_end will read the complete response body without needing to
+    /// parse chunked Transfer-Encoding.
     fn try_pipe_get(path: &str) -> Result<Vec<u8>, String> {
         use std::fs::OpenOptions;
         use std::io::{Read, Write};
@@ -695,88 +896,53 @@ mod platform {
     }
 
     pub async fn get_incoming_files() -> Result<Vec<u8>, String> {
-        tokio::task::spawn_blocking(|| {
-            match try_pipe_get("/localapi/v0/files/") {
-                Ok(data) => Ok(data),
-                Err(e) => {
-                    use std::sync::Once;
-                    static LOG_ONCE: Once = Once::new();
-                    LOG_ONCE.call_once(|| {
-                        eprintln!(
-                            "[taildrop] Windows: pipe file listing unavailable ({}), incoming files won't be detected",
-                            e
-                        );
-                    });
-                    Ok(b"[]".to_vec())
+        tokio::time::timeout(
+            std::time::Duration::from_secs(120),
+            tokio::task::spawn_blocking(|| {
+                match try_pipe_get("/localapi/v0/files/") {
+                    Ok(data) => Ok(data),
+                    Err(e) => {
+                        use std::sync::Once;
+                        static LOG_ONCE: Once = Once::new();
+                        LOG_ONCE.call_once(|| {
+                            log::warn!(
+                                "Windows: pipe file listing unavailable ({}), incoming files won't be detected",
+                                e
+                            );
+                        });
+                        Ok(b"[]".to_vec())
+                    }
                 }
-            }
-        })
+            }),
+        )
         .await
+        .map_err(|_| "get_incoming_files timed out".to_string())?
         .map_err(|e| format!("Task panicked: {}", e))?
     }
 
+    /// Accept an incoming file. Uses shared helper with path traversal sanitization.
     pub async fn accept_file(name: &str, save_dir: &str) -> Result<String, String> {
         let name = name.to_string();
         let save_dir = save_dir.to_string();
-        tokio::task::spawn_blocking(move || {
-            // Snapshot directory before download to detect newly arrived files
-            let dir_path = std::path::Path::new(&save_dir);
-            let before_entries: std::collections::HashSet<std::path::PathBuf> = {
-                if dir_path.exists() {
-                    std::fs::read_dir(dir_path)
-                        .map(|rd| rd.filter_map(|e| e.ok().map(|e| e.path())).collect())
-                        .unwrap_or_default()
-                } else {
-                    std::collections::HashSet::new()
-                }
-            };
-
-            // --wait=5s prevents indefinite hang if files were already consumed
-            let output = tailscale_cmd()
-                .args(["file", "get", "--wait=5s", &save_dir])
-                .output()
-                .map_err(|e| format!("Failed to run tailscale file get: {}", e))?;
-            if !output.status.success() {
-                let stderr = String::from_utf8_lossy(&output.stderr);
-                return Err(format!("tailscale file get failed: {}", stderr));
-            }
-
-            // Check if target file appeared (may already exist from prior download)
-            let save_path = dir_path.join(&name);
-            if save_path.exists() {
-                return Ok(save_path.to_string_lossy().to_string());
-            }
-
-            // Wait for file to arrive on disk (Tailscale may still be writing)
-            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
-            loop {
-                if save_path.exists() {
-                    return Ok(save_path.to_string_lossy().to_string());
-                }
-                if std::time::Instant::now() >= deadline {
-                    break;
-                }
-                std::thread::sleep(std::time::Duration::from_millis(100));
-            }
-
-            // File didn't appear — check if any new file was downloaded
-            if let Ok(after_entries) = std::fs::read_dir(dir_path) {
-                let new_entries: Vec<_> = after_entries
-                    .filter_map(|e| e.ok())
-                    .map(|e| e.path())
-                    .filter(|p| !before_entries.contains(p))
-                    .collect();
-                if new_entries.len() == 1 {
-                    return Ok(new_entries[0].to_string_lossy().to_string());
-                }
-            }
-
-            Err(format!(
-                "tailscale file get succeeded but '{}' did not appear in {}",
-                name, save_dir
-            ))
-        })
+        tokio::time::timeout(
+            std::time::Duration::from_secs(120),
+            tokio::task::spawn_blocking(move || {
+                super::accept_file_with_getter(&name, &save_dir, || {
+                    // --wait=5s prevents indefinite hang if files were already consumed
+                    let output = tailscale_cmd()
+                        .args(["file", "get", "--wait=5s", &save_dir])
+                        .output()
+                        .map_err(|e| format!("Failed to run tailscale file get: {}", e))?;
+                    if !output.status.success() {
+                        let stderr = String::from_utf8_lossy(&output.stderr);
+                        return Err(format!("tailscale file get failed: {}", stderr));
+                    }
+                    Ok(())
+                })
+            }),
+        )
         .await
+        .map_err(|_| "accept_file timed out".to_string())?
         .map_err(|e| format!("Task panicked: {}", e))?
     }
 }
@@ -827,13 +993,13 @@ fn prettify_name(name: &str) -> String {
 
 pub async fn fetch_status() -> Result<Vec<Peer>, String> {
     let body = platform::fetch_status_json().await?;
-    eprintln!("[taildrop] fetch_status: got {} bytes of JSON", body.len());
+    log::debug!("fetch_status: got {} bytes of JSON", body.len());
     let status: TailscaleStatus =
         serde_json::from_slice(&body).map_err(|e| {
-            eprintln!("[taildrop] fetch_status: PARSE ERROR: {}", e);
+            log::error!("fetch_status: PARSE ERROR: {}", e);
             // Log first 200 chars of body for diagnosis
             let preview = String::from_utf8_lossy(&body[..body.len().min(200)]);
-            eprintln!("[taildrop] JSON preview: {}", preview);
+            log::debug!("JSON preview: {}", preview);
             format!("Failed to parse status: {}", e)
         })?;
 

@@ -1,5 +1,6 @@
-import { useState, useEffect, useCallback, useRef } from "react";
+import { useState, useEffect, useCallback, useRef, useMemo } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 import {
   isPermissionGranted,
   requestPermission,
@@ -71,13 +72,27 @@ export function useTailscale() {
           saveDirectory: prev.saveDirectory || dir,
         }));
       })
-      .catch(() => {});
+      .catch((e) => {
+        console.warn("[taildrop] Could not get default download dir:", e);
+      });
   }, []);
 
   // Persist transfer history (debounced to avoid jank during rapid transfers)
   useEffect(() => {
     const timeout = setTimeout(() => {
-      localStorage.setItem("taildrop-transfers", JSON.stringify(transfers));
+      try {
+        localStorage.setItem("taildrop-transfers", JSON.stringify(transfers));
+      } catch (e) {
+        if (e instanceof DOMException && e.name === "QuotaExceededError") {
+          console.warn("[taildrop] localStorage quota exceeded, pruning oldest transfers");
+          try {
+            const pruned = transfers.slice(0, Math.floor(transfers.length / 2));
+            localStorage.setItem("taildrop-transfers", JSON.stringify(pruned));
+          } catch {
+            // still can't write after pruning — give up silently
+          }
+        }
+      }
     }, 500);
     return () => clearTimeout(timeout);
   }, [transfers]);
@@ -89,6 +104,25 @@ export function useTailscale() {
       localStorage.setItem("taildrop-settings", JSON.stringify(next));
       return next;
     });
+  }, []);
+
+  // Listen for transfer progress events from the Rust backend
+  useEffect(() => {
+    const unlisten = listen<{ transferId: string; progress: number }>(
+      "transfer-progress",
+      (event) => {
+        setTransfers((prev) =>
+          prev.map((t) =>
+            t.id === event.payload.transferId
+              ? { ...t, progress: event.payload.progress }
+              : t
+          )
+        );
+      }
+    );
+    return () => {
+      unlisten.then((fn) => fn());
+    };
   }, []);
 
   // Fetch peers
@@ -130,8 +164,23 @@ export function useTailscale() {
               ...prev,
             ].slice(0, MAX_TRANSFER_HISTORY)
           );
-        } catch {
-          // silently fail individual auto-accepts
+        } catch (e) {
+          // Surface auto-accept failures to transfer history
+          const id = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+          setTransfers((prev) =>
+            [
+              {
+                id,
+                filename: file.name,
+                peerName: "incoming",
+                direction: "received" as const,
+                timestamp: Date.now(),
+                status: "error" as const,
+                error: `Auto-accept failed: ${String(e)}`,
+              },
+              ...prev,
+            ].slice(0, MAX_TRANSFER_HISTORY)
+          );
         }
       }
     } finally {
@@ -209,17 +258,34 @@ export function useTailscale() {
     }
   }, [autoAcceptFiles, notifyIncoming]);
 
-  // Initial load + polling
+  // Adaptive polling: faster when transfers are active, slower when idle.
+  // Memoize to prevent polling effect from tearing down intervals on every
+  // transfer mutation — only re-run when the boolean *value* changes.
+  const hasActiveTransfers = useMemo(
+    () => transfers.some((t) => t.status === "sending" || t.status === "pending"),
+    [transfers]
+  );
+  const prevActiveRef = useRef(hasActiveTransfers);
+  const [pollSpeed, setPollSpeed] = useState<"fast" | "slow">(
+    hasActiveTransfers ? "fast" : "slow"
+  );
+  if (prevActiveRef.current !== hasActiveTransfers) {
+    prevActiveRef.current = hasActiveTransfers;
+    setPollSpeed(hasActiveTransfers ? "fast" : "slow");
+  }
+
   useEffect(() => {
     refreshPeers();
     refreshIncoming();
+
     const peerInterval = setInterval(refreshPeers, 10000);
-    pollRef.current = setInterval(refreshIncoming, 5000);
+    const incomingMs = pollSpeed === "fast" ? 2000 : 8000;
+    pollRef.current = setInterval(refreshIncoming, incomingMs);
     return () => {
       clearInterval(peerInterval);
       if (pollRef.current) clearInterval(pollRef.current);
     };
-  }, [refreshPeers, refreshIncoming]);
+  }, [refreshPeers, refreshIncoming, pollSpeed]);
 
   // Bug #2: send file paths instead of file data
   // Bug #3: send both peer.id (for localapi) and peer.hostname (for CLI)
@@ -251,6 +317,7 @@ export function useTailscale() {
         records.map(async ({ record, filePath }) => {
           try {
             await invoke("send_file", {
+              transferId: record.id,
               peerId: peer.id,
               peerName: peer.machine_name,
               filePath,
