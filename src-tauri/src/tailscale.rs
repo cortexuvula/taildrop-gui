@@ -370,10 +370,15 @@ mod platform {
 
     /// Stream a GET response from the Tailscale localapi directly to a file on disk.
     /// Avoids buffering the entire response in memory (fixes OOM for large incoming files).
-    /// Uses HTTP/1.1 with Connection: close. Reads response headers first, then
-    /// streams the body to disk in chunks. If the server uses chunked Transfer-Encoding,
-    /// we write the raw bytes to disk — the Tailscale localapi does not use chunked
-    /// encoding for file transfers, so this is safe.
+    ///
+    /// Uses HTTP/1.0 with `Connection: close`. HTTP/1.0 prevents the daemon from
+    /// using chunked Transfer-Encoding, so the body is delivered as raw bytes
+    /// terminated by connection close — no chunked-framing decoder is needed. The
+    /// response headers are read first (up to the `\r\n\r\n` boundary), then the
+    /// body is streamed to disk in fixed-size chunks. This is consistent with the
+    /// macOS `try_socket_get`/`try_socket_delete` helpers and the Linux
+    /// `stream_file_to_socket` upload path, which all rely on HTTP/1.0 for the
+    /// same reason.
     async fn stream_get_to_file(api_path: &str, save_path: &std::path::Path) -> Result<(), String> {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
         use tokio::net::UnixStream;
@@ -709,19 +714,50 @@ mod platform {
         Ok(response[header_end + 4..].to_vec())
     }
 
+    /// Outcome of [`try_socket_get_to_file`].
+    ///
+    /// Distinguishes "the Unix socket itself is unavailable" (the App Store
+    /// install case) from "the socket connected but the request failed". The
+    /// caller uses this to decide whether falling back to the `tailscale file
+    /// get` CLI is safe — a transient daemon error (HTTP 5xx, 4xx) should be
+    /// surfaced, not masked by the CLI downloading *every* pending file into
+    /// `save_dir`.
+    enum SocketGetError {
+        /// `UnixStream::connect` failed — the socket is missing or
+        /// inaccessible. Falling back to the CLI is the intended behaviour.
+        Connect(String),
+        /// The socket connected but the HTTP request/response failed (HTTP
+        /// error status, transport failure mid-response, malformed headers,
+        /// disk write error, …). Must be propagated, not swallowed.
+        Other(String),
+    }
+
     /// Stream a GET response from the Tailscale Unix socket directly to disk.
-    /// Uses HTTP/1.0 (non-chunked, connection close at end of body). Fails for
-    /// App Store installs where the socket isn't accessible — callers should
-    /// fall back to the `tailscale file get` CLI.
-    fn try_socket_get_to_file(path: &str, save_path: &std::path::Path) -> Result<(), String> {
+    ///
+    /// Uses HTTP/1.0 (non-chunked, connection close at end of body). The
+    /// response headers are read first in small chunks until the `\r\n\r\n`
+    /// boundary is found; any body bytes that arrived in the same read buffer
+    /// are flushed to the file before continuing. The remaining body is then
+    /// streamed to disk in 8 KB chunks, so files much larger than memory can
+    /// be downloaded without OOM risk — mirroring the Linux
+    /// [`stream_get_to_file`](super::stream_get_to_file) design.
+    ///
+    /// Returns [`SocketGetError::Connect`] only when `UnixStream::connect`
+    /// fails (the App Store install case). All other failures — including
+    /// HTTP 4xx/5xx responses — are returned as [`SocketGetError::Other`] so
+    /// callers can propagate them instead of silently falling back to the CLI.
+    fn try_socket_get_to_file(
+        path: &str,
+        save_path: &std::path::Path,
+    ) -> Result<(), SocketGetError> {
         use std::io::{Read, Write};
         use std::os::unix::net::UnixStream;
 
         let mut stream = UnixStream::connect(SOCKET_PATH)
-            .map_err(|e| format!("connect: {}", e))?;
+            .map_err(|e| SocketGetError::Connect(format!("connect: {}", e)))?;
         stream
             .set_read_timeout(Some(std::time::Duration::from_secs(30)))
-            .map_err(|e| format!("timeout: {}", e))?;
+            .map_err(|e| SocketGetError::Other(format!("timeout: {}", e)))?;
 
         let req = format!(
             "GET {} HTTP/1.0\r\nHost: local-tailscaled.sock\r\nConnection: close\r\n\r\n",
@@ -729,33 +765,102 @@ mod platform {
         );
         stream
             .write_all(req.as_bytes())
-            .map_err(|e| format!("write: {}", e))?;
+            .map_err(|e| SocketGetError::Other(format!("write: {}", e)))?;
 
-        // HTTP/1.0 closes the connection at end of body, so read_to_end
-        // captures the complete response without parsing chunked encoding.
-        let mut response = Vec::new();
-        stream
-            .read_to_end(&mut response)
-            .map_err(|e| format!("read: {}", e))?;
+        // Read headers incrementally until we find the \r\n\r\n boundary.
+        // Any body bytes that arrive in the same buffer must be written to
+        // the file afterwards — they are the start of the response body, not
+        // part of the headers.
+        let mut header_buf: Vec<u8> = Vec::with_capacity(8192);
+        let mut temp_buf = [0u8; 8192];
+        let header_end = loop {
+            let n = stream
+                .read(&mut temp_buf)
+                .map_err(|e| SocketGetError::Other(format!("read headers: {}", e)))?;
+            if n == 0 {
+                return Err(SocketGetError::Other(
+                    "Connection closed before headers received".to_string(),
+                ));
+            }
+            header_buf.extend_from_slice(&temp_buf[..n]);
+            if let Some(pos) = header_buf.windows(4).position(|w| w == b"\r\n\r\n") {
+                break pos;
+            }
+            if header_buf.len() > 65536 {
+                return Err(SocketGetError::Other(
+                    "Response headers too large".to_string(),
+                ));
+            }
+        };
 
-        let header_end = response
-            .windows(4)
-            .position(|w| w == b"\r\n\r\n")
-            .ok_or_else(|| "Invalid HTTP response".to_string())?;
-
-        let headers = String::from_utf8_lossy(&response[..header_end]);
+        // Parse the HTTP status line.
+        let headers = String::from_utf8_lossy(&header_buf[..header_end]);
         let status_line = headers.lines().next().unwrap_or("");
-        if !status_line.contains(" 200 ") {
-            let body = String::from_utf8_lossy(&response[header_end + 4..]);
-            return Err(format!("HTTP error: {} body: {}", status_line, body));
+        let status_code: u16 = status_line
+            .split_whitespace()
+            .nth(1)
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(0);
+        if status_code != 200 {
+            // Drain the rest of the error body until connection close so the
+            // diagnostic isn't truncated by the 8 KB header buffer. The error
+            // body is small (a short message from the daemon), but we cap it
+            // to avoid unbounded memory growth on a misbehaving server.
+            let mut err_body = header_buf[header_end + 4..].to_vec();
+            loop {
+                let n = stream
+                    .read(&mut temp_buf)
+                    .map_err(|e| SocketGetError::Other(format!("read error body: {}", e)))?;
+                if n == 0 {
+                    break;
+                }
+                err_body.extend_from_slice(&temp_buf[..n]);
+                if err_body.len() > 65536 {
+                    break;
+                }
+            }
+            return Err(SocketGetError::Other(format!(
+                "Tailscale API error ({}): {}",
+                status_code,
+                String::from_utf8_lossy(&err_body)
+            )));
         }
 
-        std::fs::write(save_path, &response[header_end + 4..])
-            .map_err(|e| format!("write file: {}", e))?;
+        // Open the output file and flush any body bytes already sitting in the
+        // header buffer (the chunk that contained the final \r\n\r\n often
+        // also carries the start of the body).
+        let body_start = header_end + 4;
+        let mut file = std::fs::File::create(save_path).map_err(|e| {
+            SocketGetError::Other(format!("create file '{}': {}", save_path.display(), e))
+        })?;
+        if body_start < header_buf.len() {
+            file.write_all(&header_buf[body_start..])
+                .map_err(|e| SocketGetError::Other(format!("write body to file: {}", e)))?;
+        }
+
+        // Stream the remaining body to disk in 8 KB chunks. HTTP/1.0 + the
+        // read timeout above bounds the wait; the loop exits when the daemon
+        // closes the connection at end of body.
+        loop {
+            let n = stream
+                .read(&mut temp_buf)
+                .map_err(|e| SocketGetError::Other(format!("read body: {}", e)))?;
+            if n == 0 {
+                break;
+            }
+            file.write_all(&temp_buf[..n])
+                .map_err(|e| SocketGetError::Other(format!("write body to file: {}", e)))?;
+        }
+
         Ok(())
     }
 
     /// Best-effort DELETE of a pending file via the Tailscale Unix socket.
+    ///
+    /// Returns `Ok(())` only when the daemon responds with HTTP 200. Any other
+    /// status (or a transport error) is surfaced as `Err` so the caller's
+    /// `log::warn!` fires — matching the Linux [`delete_request`](super::delete_request)
+    /// behaviour where HTTP errors are propagated, not silently discarded.
     fn try_socket_delete(path: &str) -> Result<(), String> {
         use std::io::{Read, Write};
         use std::os::unix::net::UnixStream;
@@ -773,9 +878,35 @@ mod platform {
         stream
             .write_all(req.as_bytes())
             .map_err(|e| format!("write: {}", e))?;
-        // Drain and discard the response body.
-        let mut buf = Vec::new();
-        let _ = stream.read_to_end(&mut buf);
+
+        // DELETE responses are tiny (a short status line at most), so reading
+        // the full response into memory is fine. HTTP/1.0 closes the
+        // connection at end of body, so read_to_end captures everything
+        // without needing to parse chunked encoding.
+        let mut response = Vec::new();
+        stream
+            .read_to_end(&mut response)
+            .map_err(|e| format!("read: {}", e))?;
+
+        let header_end = response
+            .windows(4)
+            .position(|w| w == b"\r\n\r\n")
+            .ok_or_else(|| "Invalid HTTP response from DELETE".to_string())?;
+
+        let headers = String::from_utf8_lossy(&response[..header_end]);
+        let status_line = headers.lines().next().unwrap_or("");
+        let status_code: u16 = status_line
+            .split_whitespace()
+            .nth(1)
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(0);
+        if status_code != 200 {
+            let body = String::from_utf8_lossy(&response[header_end + 4..]);
+            return Err(format!(
+                "Tailscale API error on DELETE ({}): {}",
+                status_code, body
+            ));
+        }
         Ok(())
     }
 
@@ -872,9 +1003,12 @@ mod platform {
     }
 
     /// Accept an incoming file. Tries the Unix socket first (streams large
-    /// files efficiently), then falls back to the `tailscale file get` CLI for
-    /// App Store installs where the socket is not accessible. Uses the shared
-    /// helper with path traversal sanitization for the CLI path.
+    /// files efficiently), then falls back to the `tailscale file get` CLI —
+    /// but **only** when the socket itself is unavailable (the App Store
+    /// install case). HTTP-level errors from the daemon (404, 5xx, …) are
+    /// propagated to the caller rather than masked by the CLI, which would
+    /// otherwise download *every* pending file into `save_dir`. Uses the
+    /// shared helper with path traversal sanitization for the CLI path.
     pub async fn accept_file(name: &str, save_dir: &str) -> Result<String, String> {
         let name = name.to_string();
         let save_dir = save_dir.to_string();
@@ -903,11 +1037,14 @@ mod platform {
                         }
                         Ok(save_path.to_string_lossy().to_string())
                     }
-                    Err(socket_err) => {
-                        // Socket unavailable (e.g. App Store install) — fall
-                        // back to the `tailscale file get` CLI.
+                    Err(SocketGetError::Connect(socket_err)) => {
+                        // The Unix socket is missing/inaccessible (e.g. App
+                        // Store install) — fall back to the `tailscale file
+                        // get` CLI. This is the only case where falling back
+                        // is safe: the socket itself is unavailable, so the
+                        // daemon cannot be queried directly.
                         log::debug!(
-                            "macOS: socket accept failed ({}), falling back to CLI",
+                            "macOS: socket unavailable ({}), falling back to CLI",
                             socket_err
                         );
                         super::accept_file_with_getter(&name, &save_dir, || {
@@ -920,6 +1057,20 @@ mod platform {
                             }
                             Ok(())
                         })
+                    }
+                    Err(SocketGetError::Other(http_err)) => {
+                        // The socket connected but the request failed (HTTP
+                        // 4xx/5xx, transport failure mid-response, disk write
+                        // error, …). Propagate the real error instead of
+                        // falling back to the CLI — otherwise a transient
+                        // daemon error would cause `tailscale file get` to
+                        // download every pending file into save_dir.
+                        log::debug!(
+                            "macOS: socket accept failed with HTTP/transport error ({}), \
+                             not falling back to CLI",
+                            http_err
+                        );
+                        Err(http_err)
                     }
                 }
             }),
