@@ -52,6 +52,9 @@ async fn send_file(
 
     let result = tailscale::send_file_to_peer(&peer_id, &peer_name, &file_path).await;
     progress_handle.abort();
+    // Wait briefly for the aborted task to actually stop so queued progress
+    // events can't arrive after the 100% event below.
+    let _ = tokio::time::timeout(std::time::Duration::from_millis(100), progress_handle).await;
     // Emit 100% on success so the UI shows completion before status flips
     if result.is_ok() {
         let _ = app.emit(
