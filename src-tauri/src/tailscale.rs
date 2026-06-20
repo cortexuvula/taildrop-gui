@@ -120,11 +120,85 @@ fn accept_file_with_getter(
 }
 
 // ============================================================
+// Shared helpers (used by multiple platform modules)
+// ============================================================
+
+/// Short, unique timestamp suffix for collision resolution.
+///
+/// Combines wall-clock milliseconds with a monotonic counter so that rapid
+/// successive calls never collide. The previous `nanos as u32` implementation
+/// wrapped every ~4.29 seconds, causing silent file overwrites.
+fn timestamp_tag() -> u64 {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::time::{SystemTime, UNIX_EPOCH};
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let ms = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64;
+    let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+    // ~44 bits of ms (272 years from epoch) + 20 bits of counter (~1M calls/ms)
+    (ms << 20) | (n & 0xFFFFF)
+}
+
+/// Generate a unique save path to avoid overwriting existing files.
+/// e.g. "file.txt" -> "file (1).txt" -> "file (2).txt"; after 999 conflicts,
+/// a unique timestamp suffix is appended to guarantee uniqueness.
+fn unique_save_path(dir: &std::path::Path, name: &str) -> std::path::PathBuf {
+    let base = dir.join(name);
+    if !base.exists() {
+        return base;
+    }
+    let stem = std::path::Path::new(name)
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or(name);
+    let ext = std::path::Path::new(name)
+        .extension()
+        .and_then(|s| s.to_str());
+
+    for i in 1..1000 {
+        let new_name = match ext {
+            Some(e) => format!("{} ({}).{}", stem, i, e),
+            None => format!("{} ({})", stem, i),
+        };
+        let path = dir.join(&new_name);
+        if !path.exists() {
+            return path;
+        }
+    }
+    // After 999 conflicts, append a unique timestamp suffix to guarantee
+    // uniqueness instead of silently overwriting (which would lose data).
+    let fallback_name = match ext {
+        Some(e) => format!("{}-{:016x}.{}", stem, timestamp_tag(), e),
+        None => format!("{}-{:016x}", stem, timestamp_tag()),
+    };
+    dir.join(fallback_name)
+}
+
+/// RFC 3986 percent-encoding (encode all non-unreserved characters).
+fn url_encode(s: &str) -> String {
+    let mut encoded = String::with_capacity(s.len() * 3);
+    for byte in s.bytes() {
+        match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                encoded.push(byte as char);
+            }
+            _ => {
+                encoded.push_str(&format!("%{:02X}", byte));
+            }
+        }
+    }
+    encoded
+}
+
+// ============================================================
 // Linux implementation — hyperlocal (Unix socket)
 // ============================================================
 
 #[cfg(all(unix, not(target_os = "macos")))]
 mod platform {
+    use super::{unique_save_path, url_encode};
     use bytes::Bytes;
     use http_body_util::{BodyExt, Full};
     use hyper::body::Buf;
@@ -305,7 +379,7 @@ mod platform {
             .map_err(|e| format!("Failed to connect to Tailscale daemon: {}", e))?;
 
         let request = format!(
-            "GET {} HTTP/1.1\r\nHost: local-tailscaled.sock\r\nConnection: close\r\n\r\n",
+            "GET {} HTTP/1.0\r\nHost: local-tailscaled.sock\r\nConnection: close\r\n\r\n",
             api_path
         );
         tokio::time::timeout(
@@ -348,11 +422,27 @@ mod platform {
             .and_then(|s| s.parse().ok())
             .unwrap_or(0);
         if status_code != 200 {
-            let err_body = &header_buf[header_end + 4..];
+            // Read the full error body until connection close (HTTP/1.0) so
+            // diagnostics aren't truncated by the 4KB header read buffer.
+            let mut err_body = header_buf[header_end + 4..].to_vec();
+            loop {
+                let n = stream
+                    .read(&mut temp_buf)
+                    .await
+                    .map_err(|e| format!("Failed to read error body: {}", e))?;
+                if n == 0 {
+                    break;
+                }
+                err_body.extend_from_slice(&temp_buf[..n]);
+                // Cap the captured error body to avoid unbounded memory growth.
+                if err_body.len() > 65536 {
+                    break;
+                }
+            }
             return Err(format!(
                 "Tailscale API error ({}): {}",
                 status_code,
-                String::from_utf8_lossy(err_body)
+                String::from_utf8_lossy(&err_body)
             ));
         }
 
@@ -367,15 +457,14 @@ mod platform {
                 .map_err(|e| format!("Failed to write to file: {}", e))?;
         }
 
-        // Stream remaining body to disk in chunks
+        // Stream remaining body to disk in chunks. No per-read timeout here —
+        // the operation is bounded by the outer 120s timeout in `accept_file`,
+        // matching the upload path's reliance on a single outer timeout.
         loop {
-            let n = tokio::time::timeout(
-                std::time::Duration::from_secs(30),
-                stream.read(&mut temp_buf),
-            )
-            .await
-            .map_err(|_| "Timeout reading response body".to_string())?
-            .map_err(|e| format!("Failed to read response body: {}", e))?;
+            let n = stream
+                .read(&mut temp_buf)
+                .await
+                .map_err(|e| format!("Failed to read response body: {}", e))?;
             if n == 0 {
                 break;
             }
@@ -418,84 +507,39 @@ mod platform {
     /// buffering in memory (fixes OOM for large incoming files).
     /// Sanitizes filename to prevent path traversal.
     pub async fn accept_file(name: &str, save_dir: &str) -> Result<String, String> {
-        let safe_name = std::path::Path::new(name)
-            .file_name()
-            .and_then(|n| n.to_str())
-            .ok_or_else(|| "Invalid filename".to_string())?;
-        let api_path = format!("/localapi/v0/files/{}", url_encode(name));
-        let save_path = unique_save_path(std::path::Path::new(save_dir), safe_name);
-        stream_get_to_file(&api_path, &save_path).await?;
+        let name = name.to_string();
+        let save_dir = save_dir.to_string();
+        // Single outer timeout bounds the whole operation (matches the upload
+        // path's adaptive timeout and macOS/Windows' 120s wrapper).
+        tokio::time::timeout(std::time::Duration::from_secs(120), async {
+            let safe_name = std::path::Path::new(&name)
+                .file_name()
+                .and_then(|n| n.to_str())
+                .ok_or_else(|| "Invalid filename".to_string())?;
+            let api_path = format!("/localapi/v0/files/{}", url_encode(&name));
+            let save_path = unique_save_path(std::path::Path::new(&save_dir), safe_name);
+            stream_get_to_file(&api_path, &save_path).await?;
 
-        // Delete from pending after successful download (best-effort)
-        let delete_path = format!("/localapi/v0/files/{}", url_encode(name));
-        let _ = delete_request(&delete_path).await;
-
-        log::debug!("Accepted file '{}' to '{}'", name, save_path.display());
-        Ok(save_path.to_string_lossy().to_string())
-    }
-
-    /// Generate a unique save path to avoid overwriting existing files.
-    /// e.g. "file.txt" -> "file (1).txt" -> "file (2).txt"
-    fn unique_save_path(dir: &std::path::Path, name: &str) -> std::path::PathBuf {
-        let base = dir.join(name);
-        if !base.exists() {
-            return base;
-        }
-        let stem = std::path::Path::new(name)
-            .file_stem()
-            .and_then(|s| s.to_str())
-            .unwrap_or(name);
-        let ext = std::path::Path::new(name)
-            .extension()
-            .and_then(|s| s.to_str());
-
-        for i in 1..1000 {
-            let new_name = match ext {
-                Some(e) => format!("{} ({}).{}", stem, i, e),
-                None => format!("{} ({})", stem, i),
-            };
-            let path = dir.join(&new_name);
-            if !path.exists() {
-                return path;
+            // Delete from pending after successful download. Surface failures
+            // so stale entries don't silently linger in the pending list.
+            let delete_path = format!("/localapi/v0/files/{}", url_encode(&name));
+            if let Err(e) = delete_request(&delete_path).await {
+                log::warn!(
+                    "Failed to delete pending file '{}' from Tailscale: {}",
+                    name, e
+                );
             }
-        }
-    // After 999 conflicts, append a timestamp suffix to guarantee uniqueness
-    // instead of silently overwriting (which would lose data).
-        let fallback_name = match ext {
-            Some(e) => format!("{}-{:08x}.{}", stem, timestamp_tag(), e),
-            None => format!("{}-{:08x}", stem, timestamp_tag()),
-        };
-        dir.join(fallback_name)
-    }
 
-    /// Short timestamp suffix for collision resolution (8 hex chars).
-    fn timestamp_tag() -> u32 {
-        use std::time::{SystemTime, UNIX_EPOCH};
-        let nanos = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_nanos();
-        nanos as u32
-    }
-
-    // Bug #8: proper RFC 3986 percent-encoding (encode all non-unreserved characters)
-    fn url_encode(s: &str) -> String {
-        let mut encoded = String::with_capacity(s.len() * 3);
-        for byte in s.bytes() {
-            match byte {
-                b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
-                    encoded.push(byte as char);
-                }
-                _ => {
-                    encoded.push_str(&format!("%{:02X}", byte));
-                }
-            }
-        }
-        encoded
+            log::debug!("Accepted file '{}' to '{}'", name, save_path.display());
+            Ok(save_path.to_string_lossy().to_string())
+        })
+        .await
+        .map_err(|_| "accept_file timed out".to_string())?
     }
 
     #[cfg(test)]
     mod tests {
+        use super::super::{prettify_name, unique_save_path, url_encode};
         use super::*;
 
         #[test]
@@ -661,6 +705,76 @@ mod platform {
         Ok(response[header_end + 4..].to_vec())
     }
 
+    /// Stream a GET response from the Tailscale Unix socket directly to disk.
+    /// Uses HTTP/1.0 (non-chunked, connection close at end of body). Fails for
+    /// App Store installs where the socket isn't accessible — callers should
+    /// fall back to the `tailscale file get` CLI.
+    fn try_socket_get_to_file(path: &str, save_path: &std::path::Path) -> Result<(), String> {
+        use std::io::{Read, Write};
+        use std::os::unix::net::UnixStream;
+
+        let mut stream = UnixStream::connect(SOCKET_PATH)
+            .map_err(|e| format!("connect: {}", e))?;
+        stream
+            .set_read_timeout(Some(std::time::Duration::from_secs(30)))
+            .map_err(|e| format!("timeout: {}", e))?;
+
+        let req = format!(
+            "GET {} HTTP/1.0\r\nHost: local-tailscaled.sock\r\nConnection: close\r\n\r\n",
+            path
+        );
+        stream
+            .write_all(req.as_bytes())
+            .map_err(|e| format!("write: {}", e))?;
+
+        // HTTP/1.0 closes the connection at end of body, so read_to_end
+        // captures the complete response without parsing chunked encoding.
+        let mut response = Vec::new();
+        stream
+            .read_to_end(&mut response)
+            .map_err(|e| format!("read: {}", e))?;
+
+        let header_end = response
+            .windows(4)
+            .position(|w| w == b"\r\n\r\n")
+            .ok_or_else(|| "Invalid HTTP response".to_string())?;
+
+        let headers = String::from_utf8_lossy(&response[..header_end]);
+        let status_line = headers.lines().next().unwrap_or("");
+        if !status_line.contains(" 200 ") {
+            let body = String::from_utf8_lossy(&response[header_end + 4..]);
+            return Err(format!("HTTP error: {} body: {}", status_line, body));
+        }
+
+        std::fs::write(save_path, &response[header_end + 4..])
+            .map_err(|e| format!("write file: {}", e))?;
+        Ok(())
+    }
+
+    /// Best-effort DELETE of a pending file via the Tailscale Unix socket.
+    fn try_socket_delete(path: &str) -> Result<(), String> {
+        use std::io::{Read, Write};
+        use std::os::unix::net::UnixStream;
+
+        let mut stream = UnixStream::connect(SOCKET_PATH)
+            .map_err(|e| format!("connect: {}", e))?;
+        stream
+            .set_read_timeout(Some(std::time::Duration::from_secs(5)))
+            .map_err(|e| format!("timeout: {}", e))?;
+
+        let req = format!(
+            "DELETE {} HTTP/1.0\r\nHost: local-tailscaled.sock\r\nConnection: close\r\n\r\n",
+            path
+        );
+        stream
+            .write_all(req.as_bytes())
+            .map_err(|e| format!("write: {}", e))?;
+        // Drain and discard the response body.
+        let mut buf = Vec::new();
+        let _ = stream.read_to_end(&mut buf);
+        Ok(())
+    }
+
     pub async fn fetch_status_json() -> Result<Vec<u8>, String> {
         tokio::time::timeout(
             std::time::Duration::from_secs(120),
@@ -753,23 +867,57 @@ mod platform {
         .map_err(|e| format!("Task panicked: {}", e))?
     }
 
-    /// Accept an incoming file. Uses shared helper with path traversal sanitization.
+    /// Accept an incoming file. Tries the Unix socket first (streams large
+    /// files efficiently), then falls back to the `tailscale file get` CLI for
+    /// App Store installs where the socket is not accessible. Uses the shared
+    /// helper with path traversal sanitization for the CLI path.
     pub async fn accept_file(name: &str, save_dir: &str) -> Result<String, String> {
         let name = name.to_string();
         let save_dir = save_dir.to_string();
         tokio::time::timeout(
             std::time::Duration::from_secs(120),
             tokio::task::spawn_blocking(move || {
-                super::accept_file_with_getter(&name, &save_dir, || {
-                    // --wait=5s prevents indefinite hang if files were already consumed
-                    let output = tailscale_cmd(&["file", "get", "--wait=5s", &save_dir])
-                        .map_err(|e| format!("Failed to run tailscale file get: {}", e))?;
-                    if !output.status.success() {
-                        let stderr = String::from_utf8_lossy(&output.stderr);
-                        return Err(format!("tailscale file get failed: {}", stderr));
+                let safe_name = std::path::Path::new(&name)
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .ok_or_else(|| "Invalid filename".to_string())?;
+                let save_path =
+                    super::unique_save_path(std::path::Path::new(&save_dir), safe_name);
+                let api_path = format!("/localapi/v0/files/{}", super::url_encode(&name));
+
+                // Try the socket first (streams large files without buffering).
+                match try_socket_get_to_file(&api_path, &save_path) {
+                    Ok(()) => {
+                        // Best-effort delete of the pending file from the daemon.
+                        let delete_path =
+                            format!("/localapi/v0/files/{}", super::url_encode(&name));
+                        if let Err(e) = try_socket_delete(&delete_path) {
+                            log::warn!(
+                                "Failed to delete pending file '{}' from Tailscale: {}",
+                                name, e
+                            );
+                        }
+                        Ok(save_path.to_string_lossy().to_string())
                     }
-                    Ok(())
-                })
+                    Err(socket_err) => {
+                        // Socket unavailable (e.g. App Store install) — fall
+                        // back to the `tailscale file get` CLI.
+                        log::debug!(
+                            "macOS: socket accept failed ({}), falling back to CLI",
+                            socket_err
+                        );
+                        super::accept_file_with_getter(&name, &save_dir, || {
+                            // --wait=5s prevents indefinite hang if files were already consumed
+                            let output = tailscale_cmd(&["file", "get", "--wait=5s", &save_dir])
+                                .map_err(|e| format!("Failed to run tailscale file get: {}", e))?;
+                            if !output.status.success() {
+                                let stderr = String::from_utf8_lossy(&output.stderr);
+                                return Err(format!("tailscale file get failed: {}", stderr));
+                            }
+                            Ok(())
+                        })
+                    }
+                }
             }),
         )
         .await
