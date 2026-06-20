@@ -275,11 +275,12 @@ mod platform {
 
     /// Write file data to Unix socket in chunks via raw HTTP/1.1.
     /// Streams file from disk in 8KB chunks to avoid loading entire file in memory.
-    /// Uses HTTP/1.1 with Connection: close. If the server responds with chunked
-    /// Transfer-Encoding, read_to_end will read until connection close, which
-    /// gives us the complete response body. We then parse the raw body — this is
-    /// safe because the Tailscale localapi returns small JSON responses for PUT
-    /// requests and does not use chunked encoding for its responses.
+    /// Uses HTTP/1.1 with Content-Length and Connection: close so the daemon
+    /// knows the exact body size up front (Content-Length requires HTTP/1.1).
+    /// If the daemon rejects the transfer (peer offline, not found, etc.) it may
+    /// send an HTTP error response and close the connection while we are still
+    /// streaming the body, causing a broken-pipe write error. We catch that and
+    /// attempt to read the daemon's error response before reporting.
     async fn stream_file_to_socket(api_path: &str, file_path: &str) -> Result<Vec<u8>, String> {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
         use tokio::net::UnixStream;
@@ -321,10 +322,20 @@ mod platform {
             if n == 0 {
                 break;
             }
-            tokio::time::timeout(timeout, stream.write_all(&buf[..n]))
-                .await
-                .map_err(|_| "Timeout writing file data to Tailscale daemon".to_string())?
-                .map_err(|e| format!("Failed to write file data: {}", e))?;
+            match tokio::time::timeout(timeout, stream.write_all(&buf[..n])).await {
+                Ok(Ok(())) => {}
+                Ok(Err(e)) => {
+                    // Write failed (likely broken pipe / connection reset). The
+                    // Tailscale daemon may have rejected the transfer and sent
+                    // an HTTP error response before closing the connection.
+                    return Err(read_daemon_error(&mut stream, &e).await);
+                }
+                Err(_) => {
+                    return Err(
+                        "Timeout writing file data to Tailscale daemon".to_string(),
+                    );
+                }
+            }
         }
 
         // Read response
@@ -338,11 +349,10 @@ mod platform {
         .map_err(|_| "Timeout reading response from Tailscale daemon".to_string())?
         .map_err(|e| format!("Failed to read response: {}", e))?;
 
-        // Parse HTTP response
-        // Note: We use HTTP/1.1 with Connection: close. If the server uses chunked
-        // Transfer-Encoding, read_to_end reads until connection close, which gives
-        // the full response. The Tailscale localapi does not use chunked encoding
-        // for PUT responses, so direct body parsing is safe here.
+        // Parse HTTP response. We sent Connection: close, so read_to_end reads
+        // until the daemon closes the connection, yielding the full body. The
+        // Tailscale localapi returns small JSON responses for PUT requests and
+        // does not use chunked Transfer-Encoding, so direct body parsing works.
         let header_end = response
             .windows(4)
             .position(|w| w == b"\r\n\r\n")
@@ -368,6 +378,108 @@ mod platform {
         Ok(body)
     }
 
+    /// Attempts to read and parse an HTTP error response from the Tailscale
+    /// daemon after a write failure (broken pipe / connection reset) during
+    /// file upload. The daemon often sends an HTTP error response (e.g. 400
+    /// with a JSON body) before closing the connection; this surfaces that
+    /// message instead of the opaque "Broken pipe (os error 32)".
+    async fn read_daemon_error(
+        stream: &mut tokio::net::UnixStream,
+        write_err: &std::io::Error,
+    ) -> String {
+        use tokio::io::AsyncReadExt;
+
+        let write_err_str = write_err.to_string();
+        let is_broken_pipe = write_err_str.contains("Broken pipe")
+            || write_err_str.contains("Connection reset")
+            || write_err_str.contains("Connection reset by peer");
+
+        // Try to read whatever the daemon sent before closing (short timeout —
+        // the daemon has likely already closed the connection, so this returns
+        // immediately in practice).
+        let mut error_response = Vec::new();
+        let read_result = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            stream.read_to_end(&mut error_response),
+        )
+        .await;
+
+        match read_result {
+            Ok(Ok(_)) if !error_response.is_empty() => {
+                parse_daemon_http_error(&error_response, &write_err_str, is_broken_pipe)
+            }
+            _ => {
+                if is_broken_pipe {
+                    "Tailscale daemon closed connection during file transfer \
+                     (broken pipe). The peer may be offline or not accepting files."
+                        .to_string()
+                } else {
+                    format!(
+                        "Failed to write file data: {} \
+                         (the peer may be offline or not accepting files)",
+                        write_err_str
+                    )
+                }
+            }
+        }
+    }
+
+    /// Parses the daemon's raw HTTP error response into a human-readable error
+    /// string. Extracts the status code and body when possible; falls back to
+    /// including the raw response text if parsing fails.
+    fn parse_daemon_http_error(
+        response: &[u8],
+        write_err: &str,
+        is_broken_pipe: bool,
+    ) -> String {
+        let text = String::from_utf8_lossy(response);
+
+        // Split headers from body at the first "\r\n\r\n".
+        let (headers, body) = match text.find("\r\n\r\n") {
+            Some(idx) => (&text[..idx], &text[idx + 4..]),
+            None => (text.as_ref(), ""),
+        };
+
+        // Extract the HTTP status code from the status line, e.g.
+        // "HTTP/1.1 400 Bad Request".
+        let status_line = headers.lines().next().unwrap_or("");
+        let status_code: Option<u16> = status_line
+            .split_whitespace()
+            .nth(1)
+            .and_then(|s| s.parse().ok());
+
+        let body_trimmed = body.trim();
+        match status_code {
+            Some(code) if code != 200 => {
+                if !body_trimmed.is_empty() {
+                    format!(
+                        "Tailscale daemon rejected file transfer (HTTP {}): {}",
+                        code, body_trimmed
+                    )
+                } else {
+                    format!("Tailscale daemon rejected file transfer (HTTP {})", code)
+                }
+            }
+            _ => {
+                // Could not parse a useful status code; include the raw
+                // daemon response so the user still gets a clue.
+                if is_broken_pipe {
+                    format!(
+                        "Tailscale daemon closed connection during file transfer \
+                         (broken pipe). Daemon response: {}",
+                        text.trim()
+                    )
+                } else {
+                    format!(
+                        "Failed to write file data: {} | Daemon response: {}",
+                        write_err,
+                        text.trim()
+                    )
+                }
+            }
+        }
+    }
+
     /// Stream a GET response from the Tailscale localapi directly to a file on disk.
     /// Avoids buffering the entire response in memory (fixes OOM for large incoming files).
     ///
@@ -376,9 +488,9 @@ mod platform {
     /// terminated by connection close — no chunked-framing decoder is needed. The
     /// response headers are read first (up to the `\r\n\r\n` boundary), then the
     /// body is streamed to disk in fixed-size chunks. This is consistent with the
-    /// macOS `try_socket_get`/`try_socket_delete` helpers and the Linux
-    /// `stream_file_to_socket` upload path, which all rely on HTTP/1.0 for the
-    /// same reason.
+    /// macOS `try_socket_get`/`try_socket_delete` helpers. (The Linux upload path
+    /// `stream_file_to_socket` uses HTTP/1.1 instead, because PUT uploads require
+    /// `Content-Length`, which needs HTTP/1.1.)
     async fn stream_get_to_file(api_path: &str, save_path: &std::path::Path) -> Result<(), String> {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
         use tokio::net::UnixStream;
