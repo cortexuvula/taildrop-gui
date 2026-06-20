@@ -15,6 +15,8 @@ export interface Peer {
 export interface IncomingFile {
   name: string;
   size: number;
+  /** Peer that sent the file, when the Tailscale API exposes it. */
+  peerName?: string;
 }
 
 export interface TransferRecord {

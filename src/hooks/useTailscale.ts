@@ -48,6 +48,10 @@ export function useTailscale() {
   const autoAcceptingRef = useRef(false);
   const seenIncomingRef = useRef(new Set<string>());
   const recentlyAcceptedRef = useRef(new Map<string, number>());
+  // Mirror of incomingFiles for synchronous lookup in acceptFile (avoids
+  // stale-closure issues without adding incomingFiles to its dep array).
+  const incomingFilesRef = useRef<IncomingFile[]>([]);
+  incomingFilesRef.current = incomingFiles;
 
   // Load settings from localStorage (with validation)
   useEffect(() => {
@@ -85,9 +89,12 @@ export function useTailscale() {
       } catch (e) {
         if (e instanceof DOMException && e.name === "QuotaExceededError") {
           console.warn("[taildrop] localStorage quota exceeded, pruning oldest transfers");
+          const pruned = transfers.slice(0, Math.floor(transfers.length / 2));
           try {
-            const pruned = transfers.slice(0, Math.floor(transfers.length / 2));
             localStorage.setItem("taildrop-transfers", JSON.stringify(pruned));
+            // Keep in-memory state in sync with the persisted list so the next
+            // render doesn't re-attempt to persist the full (oversized) array.
+            setTransfers(pruned);
           } catch {
             // still can't write after pruning — give up silently
           }
@@ -108,7 +115,7 @@ export function useTailscale() {
 
   // Listen for transfer progress events from the Rust backend
   useEffect(() => {
-    const unlisten = listen<{ transferId: string; progress: number }>(
+    const unlistenPromise = listen<{ transferId: string; progress: number }>(
       "transfer-progress",
       (event) => {
         setTransfers((prev) =>
@@ -121,7 +128,8 @@ export function useTailscale() {
       }
     );
     return () => {
-      unlisten.then((fn) => fn());
+      // Swallow rejections from a failed listen() or a throwing unlisten fn.
+      unlistenPromise.then((fn) => fn()).catch(() => {});
     };
   }, []);
 
@@ -145,6 +153,7 @@ export function useTailscale() {
     try {
       for (const file of files) {
         recentlyAcceptedRef.current.set(file.name, Date.now());
+        const peerName = file.peerName ?? "incoming";
         try {
           await invoke<string>("accept_file", {
             name: file.name,
@@ -156,7 +165,7 @@ export function useTailscale() {
               {
                 id,
                 filename: file.name,
-                peerName: "incoming",
+                peerName,
                 direction: "received" as const,
                 timestamp: Date.now(),
                 status: "success" as const,
@@ -172,7 +181,7 @@ export function useTailscale() {
               {
                 id,
                 filename: file.name,
-                peerName: "incoming",
+                peerName,
                 direction: "received" as const,
                 timestamp: Date.now(),
                 status: "error" as const,
@@ -259,33 +268,23 @@ export function useTailscale() {
   }, [autoAcceptFiles, notifyIncoming]);
 
   // Adaptive polling: faster when transfers are active, slower when idle.
-  // Memoize to prevent polling effect from tearing down intervals on every
-  // transfer mutation — only re-run when the boolean *value* changes.
   const hasActiveTransfers = useMemo(
     () => transfers.some((t) => t.status === "sending" || t.status === "pending"),
     [transfers]
   );
-  const prevActiveRef = useRef(hasActiveTransfers);
-  const [pollSpeed, setPollSpeed] = useState<"fast" | "slow">(
-    hasActiveTransfers ? "fast" : "slow"
-  );
-  if (prevActiveRef.current !== hasActiveTransfers) {
-    prevActiveRef.current = hasActiveTransfers;
-    setPollSpeed(hasActiveTransfers ? "fast" : "slow");
-  }
 
   useEffect(() => {
     refreshPeers();
     refreshIncoming();
 
     const peerInterval = setInterval(refreshPeers, 10000);
-    const incomingMs = pollSpeed === "fast" ? 2000 : 8000;
+    const incomingMs = hasActiveTransfers ? 2000 : 8000;
     pollRef.current = setInterval(refreshIncoming, incomingMs);
     return () => {
       clearInterval(peerInterval);
       if (pollRef.current) clearInterval(pollRef.current);
     };
-  }, [refreshPeers, refreshIncoming, pollSpeed]);
+  }, [refreshPeers, refreshIncoming, hasActiveTransfers]);
 
   // Bug #2: send file paths instead of file data
   // Bug #3: send both peer.id (for localapi) and peer.hostname (for CLI)
@@ -346,10 +345,13 @@ export function useTailscale() {
   const acceptFile = useCallback(
     async (name: string) => {
       const id = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+      const peerName =
+        incomingFilesRef.current.find((f) => f.name === name)?.peerName ??
+        "incoming";
       const record: TransferRecord = {
         id,
         filename: name,
-        peerName: "incoming",
+        peerName,
         direction: "received",
         timestamp: Date.now(),
         status: "pending",

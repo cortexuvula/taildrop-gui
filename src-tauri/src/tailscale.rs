@@ -48,6 +48,10 @@ pub struct Peer {
 pub struct IncomingFile {
     pub name: String,
     pub size: u64,
+    /// Peer that sent the file, when the Tailscale localapi exposes it.
+    /// Accepts both camelCase (`peerName`) and PascalCase (`PeerName`).
+    #[serde(default, alias = "PeerName")]
+    pub peer_name: Option<String>,
 }
 
 // ============================================================
