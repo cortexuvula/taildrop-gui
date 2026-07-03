@@ -16,12 +16,29 @@ const DEFAULT_DURATION_MS = 5000;
 
 export type ToastVariant = "error" | "info";
 
+export interface ToastAction {
+  label: string;
+  onClick: () => void;
+}
+
 export interface Toast {
   id: string;
   title: string;
   message?: string;
   variant: ToastVariant;
-  durationMs: number;
+  durationMs: number;           // 0 = persistent (no auto-dismiss)
+  action?: ToastAction;
+}
+
+export interface ToastPushOptions {
+  durationMs?: number;
+  action?: ToastAction;
+}
+
+export interface ToastPatch {
+  title?: string;
+  message?: string;
+  action?: ToastAction | undefined;
 }
 
 export interface SendErrorInfo {
@@ -33,10 +50,12 @@ export interface SendErrorInfo {
 interface ToastApi {
   /** Show an error toast. Returns the toast id. */
   error: (title: string, message?: string) => string;
-  /** Show an info toast (reserved for future use). Returns the toast id. */
-  info: (title: string, message?: string) => string;
+  /** Show an info toast. Returns the toast id. */
+  info: (title: string, message?: string, opts?: ToastPushOptions) => string;
   /** Manually dismiss a toast by id. */
   dismiss: (id: string) => void;
+  /** Mutate an existing toast in place. No-op if id is unknown. */
+  update: (id: string | null, patch: ToastPatch) => void;
 }
 
 const ToastContext = createContext<ToastApi | null>(null);
@@ -55,6 +74,14 @@ function ToastCard({
         <div className="toast-title">{toast.title}</div>
         {toast.message && <div className="toast-message">{toast.message}</div>}
       </div>
+      {toast.action && (
+        <button
+          className="toast-action"
+          onClick={toast.action.onClick}
+        >
+          {toast.action.label}
+        </button>
+      )}
       <button
         className="toast-close"
         aria-label="Dismiss"
@@ -105,17 +132,24 @@ export function ToastProvider({ children }: { children: ReactNode }) {
   );
 
   const push = useCallback(
-    (variant: ToastVariant, title: string, message?: string): string => {
+    (
+      variant: ToastVariant,
+      title: string,
+      message?: string,
+      opts?: ToastPushOptions,
+    ): string => {
       const id =
         typeof crypto !== "undefined" && "randomUUID" in crypto
           ? crypto.randomUUID()
           : `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+      const durationMs = opts?.durationMs ?? DEFAULT_DURATION_MS;
       const toast: Toast = {
         id,
         title,
         message,
         variant,
-        durationMs: DEFAULT_DURATION_MS,
+        durationMs,
+        action: opts?.action,
       };
       setToasts((prev) => {
         // Cap visible toasts: drop the oldest if we'd exceed MAX_VISIBLE.
@@ -128,23 +162,43 @@ export function ToastProvider({ children }: { children: ReactNode }) {
         }
         return next;
       });
-      // Auto-dismiss timer.
-      timersRef.current.set(
-        id,
-        setTimeout(() => dismiss(id), DEFAULT_DURATION_MS),
-      );
+      // Auto-dismiss timer. durationMs === 0 means persistent (no timer).
+      if (durationMs > 0) {
+        timersRef.current.set(
+          id,
+          setTimeout(() => dismiss(id), durationMs),
+        );
+      }
       return id;
     },
     [clearTimer, dismiss],
   );
 
+  const update = useCallback((id: string | null, patch: ToastPatch) => {
+    if (!id) return;
+    setToasts((prev) =>
+      prev.map((t) =>
+        t.id === id
+          ? {
+              ...t,
+              ...(patch.title !== undefined ? { title: patch.title } : {}),
+              ...(patch.message !== undefined ? { message: patch.message } : {}),
+              // action is always overwritten (pass undefined to clear it)
+              action: patch.action,
+            }
+          : t,
+      ),
+    );
+  }, []);
+
   const api = useMemo<ToastApi>(
     () => ({
       error: (title, message) => push("error", title, message),
-      info: (title, message) => push("info", title, message),
+      info: (title, message, opts) => push("info", title, message, opts),
       dismiss,
+      update,
     }),
-    [push, dismiss],
+    [push, dismiss, update],
   );
 
   // Clean up all timers on unmount.

@@ -762,6 +762,24 @@ body {
   background: var(--bg-hover);
 }
 
+.toast-action {
+  background: var(--accent);
+  color: #fff;
+  border: none;
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 600;
+  padding: 5px 10px;
+  border-radius: var(--radius);
+  flex-shrink: 0;
+  align-self: center;
+  white-space: nowrap;
+}
+
+.toast-action:hover {
+  background: var(--accent-hover);
+}
+
 @keyframes toast-slide-in {
   from {
     opacity: 0;
