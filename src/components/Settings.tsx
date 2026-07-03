@@ -1,6 +1,9 @@
 import { useState, useEffect } from "react";
 import { enable, disable, isEnabled } from "@tauri-apps/plugin-autostart";
 import { open } from "@tauri-apps/plugin-dialog";
+import { getVersion } from "@tauri-apps/api/app";
+import { useToast } from "./ToastProvider";
+import type { UseUpdaterApi } from "../hooks/useUpdater";
 import type { Peer, AppSettings } from "../types";
 
 interface SettingsProps {
@@ -8,11 +11,20 @@ interface SettingsProps {
   allPeers: Peer[];
   onUpdate: (update: Partial<AppSettings>) => void;
   onClose: () => void;
+  updater: UseUpdaterApi;
 }
 
-export function Settings({ settings, allPeers, onUpdate, onClose }: SettingsProps) {
+export function Settings({ settings, allPeers, onUpdate, onClose, updater }: SettingsProps) {
   const [nodeSearch, setNodeSearch] = useState("");
   const [autoStart, setAutoStart] = useState(false);
+  const [appVersion, setAppVersion] = useState("");
+  const toast = useToast();
+
+  useEffect(() => {
+    getVersion()
+      .then(setAppVersion)
+      .catch(() => setAppVersion(""));
+  }, []);
 
   useEffect(() => {
     isEnabled().then(setAutoStart);
@@ -47,6 +59,18 @@ export function Settings({ settings, allPeers, onUpdate, onClose }: SettingsProp
       ? settings.hiddenNodes.filter((h) => h !== id)
       : [...settings.hiddenNodes, id];
     onUpdate({ hiddenNodes: hidden });
+  };
+
+  const handleCheckUpdates = async () => {
+    const wasIdle = updater.status === "idle";
+    await updater.check();
+    // Surface terminal manual-check results via transient toasts.
+    // "available" is handled by App's effect (persistent toast) — no duplicate.
+    if (updater.status === "idle" && !wasIdle) {
+      toast.info("You're up to date", "TailDrop is on the latest version.");
+    } else if (updater.status === "error") {
+      toast.error("Couldn't check for updates", updater.error);
+    }
   };
 
   return (
@@ -184,6 +208,25 @@ export function Settings({ settings, allPeers, onUpdate, onClose }: SettingsProp
               <div className="empty-state">No peers discovered yet</div>
             )}
           </div>
+        </div>
+
+        <div className="settings-section settings-footer">
+          <div className="settings-version">
+            {appVersion ? `TailDrop v${appVersion}` : "TailDrop"}
+          </div>
+          <button
+            className="btn-secondary"
+            onClick={handleCheckUpdates}
+            disabled={
+              updater.status === "checking" || updater.status === "downloading"
+            }
+          >
+            {updater.status === "checking"
+              ? "Checking…"
+              : updater.status === "downloading"
+                ? "Downloading…"
+                : "Check for updates"}
+          </button>
         </div>
       </div>
     </div>

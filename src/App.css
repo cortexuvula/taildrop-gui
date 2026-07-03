@@ -790,3 +790,19 @@ body {
     transform: translateX(0);
   }
 }
+
+/* ===== Settings Footer ===== */
+.settings-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  border-top: 1px solid var(--border);
+  margin-top: 8px;
+  padding-top: 14px;
+}
+
+.settings-version {
+  color: var(--text-muted);
+  font-size: 12px;
+}

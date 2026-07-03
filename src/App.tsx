@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useRef } from "react";
 import { Sidebar } from "./components/Sidebar";
 import { DropZone } from "./components/DropZone";
 import { TransferHistory } from "./components/TransferHistory";
@@ -6,10 +6,13 @@ import { Settings } from "./components/Settings";
 import { DebugPanel } from "./components/DebugPanel";
 import { ToastProvider, useToast } from "./components/ToastProvider";
 import { useTailscale, type SendErrorInfoLike } from "./hooks/useTailscale";
+import { useUpdater } from "./hooks/useUpdater";
 import "./App.css";
 
 function App() {
   const toast = useToast();
+  const updater = useUpdater();
+  const updateToastId = useRef<string | null>(null);
 
   const onSendError = useCallback(
     (info: SendErrorInfoLike) => {
@@ -21,6 +24,39 @@ function App() {
     },
     [toast],
   );
+
+  // Drive a single persistent toast through the update lifecycle:
+  // available → downloading → ready. Dismissed on idle/error.
+  useEffect(() => {
+    const id = updateToastId.current;
+    if (updater.status === "available") {
+      updateToastId.current = toast.info(
+        `TailDrop ${updater.version} is available`,
+        "Click to download and install the update.",
+        {
+          durationMs: 0,
+          action: { label: "Download & Install", onClick: () => void updater.download() },
+        },
+      );
+    } else if (updater.status === "downloading") {
+      toast.update(id, {
+        title: "Downloading update…",
+        message: `${updater.progress ?? 0}%`,
+        action: undefined,
+      });
+    } else if (updater.status === "ready") {
+      toast.update(id, {
+        title: `Update ready — ${updater.version}`,
+        message: "Relaunch to finish installing.",
+        action: { label: "Relaunch now", onClick: () => void updater.install() },
+      });
+    } else if (updater.status === "idle" || updater.status === "error") {
+      if (id) {
+        toast.dismiss(id);
+        updateToastId.current = null;
+      }
+    }
+  }, [updater.status, updater.progress, updater.version, toast, updater]);
 
   const {
     peers,
@@ -111,6 +147,7 @@ function App() {
           allPeers={peers}
           onUpdate={updateSettings}
           onClose={() => setShowSettings(false)}
+          updater={updater}
         />
       )}
 
