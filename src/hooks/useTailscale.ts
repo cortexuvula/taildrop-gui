@@ -19,7 +19,21 @@ const DEFAULT_SETTINGS: AppSettings = {
 
 const MAX_TRANSFER_HISTORY = 200;
 
-export function useTailscale() {
+export interface UseTailscaleOptions {
+  /** Invoked when a manual send or accept fails. Pure notification; the hook
+   * still writes the red transfer-history row. The component layer wires this
+   * to a toast. */
+  onSendError?: (info: SendErrorInfoLike) => void;
+}
+
+// Minimal shape to avoid importing from ToastProvider (keeps the hook pure).
+export interface SendErrorInfoLike {
+  filename: string;
+  error: string;
+  direction: "sent" | "received";
+}
+
+export function useTailscale(options?: UseTailscaleOptions) {
   const [peers, setPeers] = useState<Peer[]>([]);
   const [incomingFiles, setIncomingFiles] = useState<IncomingFile[]>([]);
   const [transfers, setTransfers] = useState<TransferRecord[]>(() => {
@@ -52,6 +66,10 @@ export function useTailscale() {
   // stale-closure issues without adding incomingFiles to its dep array).
   const incomingFilesRef = useRef<IncomingFile[]>([]);
   incomingFilesRef.current = incomingFiles;
+  // Keep the latest onSendError callback in a ref so the send/accept
+  // closures don't need it in their dependency arrays.
+  const onSendErrorRef = useRef(options?.onSendError);
+  onSendErrorRef.current = options?.onSendError;
 
   // Load settings from localStorage (with validation)
   useEffect(() => {
@@ -327,13 +345,19 @@ export function useTailscale() {
               )
             );
           } catch (e) {
+            const errorStr = String(e);
             setTransfers((prev) =>
               prev.map((t) =>
                 t.id === record.id
-                  ? { ...t, status: "error", error: String(e) }
+                  ? { ...t, status: "error", error: errorStr }
                   : t
               )
             );
+            onSendErrorRef.current?.({
+              filename: record.filename,
+              error: errorStr,
+              direction: "sent",
+            });
           }
         })
       );
@@ -372,11 +396,17 @@ export function useTailscale() {
         refreshIncoming();
         return savedPath;
       } catch (e) {
+        const errorStr = String(e);
         setTransfers((prev) =>
           prev.map((t) =>
-            t.id === id ? { ...t, status: "error", error: String(e) } : t
+            t.id === id ? { ...t, status: "error", error: errorStr } : t
           )
         );
+        onSendErrorRef.current?.({
+          filename: name,
+          error: errorStr,
+          direction: "received",
+        });
       }
     },
     [refreshIncoming]
