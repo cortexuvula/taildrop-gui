@@ -1,13 +1,27 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useCallback } from "react";
 import { Sidebar } from "./components/Sidebar";
 import { DropZone } from "./components/DropZone";
 import { TransferHistory } from "./components/TransferHistory";
 import { Settings } from "./components/Settings";
 import { DebugPanel } from "./components/DebugPanel";
-import { useTailscale } from "./hooks/useTailscale";
+import { ToastProvider, useToast } from "./components/ToastProvider";
+import { useTailscale, type SendErrorInfoLike } from "./hooks/useTailscale";
 import "./App.css";
 
 function App() {
+  const toast = useToast();
+
+  const onSendError = useCallback(
+    (info: SendErrorInfoLike) => {
+      const title =
+        info.direction === "sent"
+          ? `Send failed: ${info.filename}`
+          : `Couldn't receive ${info.filename}`;
+      toast.error(title, info.error);
+    },
+    [toast],
+  );
+
   const {
     peers,
     visiblePeers,
@@ -19,7 +33,7 @@ function App() {
     sendFile,
     acceptFile,
     updateSettings,
-  } = useTailscale();
+  } = useTailscale({ onSendError });
 
   // Diagnostic: log state changes in dev mode only (visible in Safari Web Inspector)
   useEffect(() => {
@@ -54,7 +68,7 @@ function App() {
         peers={visiblePeers}
         totalPeerCount={peers.filter((p) => !p.is_self).length}
         selectedPeer={selectedPeer}
-        onSelectPeer={(peer) => setSelectedPeerId(prev => prev === peer.id ? null : peer.id)}
+        onSelectPeer={(peer) => setSelectedPeerId((prev) => (prev === peer.id ? null : peer.id))}
         incomingCount={incomingFiles.length}
         onShowSettings={() => setShowSettings(true)}
         onShowDebug={() => setShowDebug(true)}
@@ -110,4 +124,10 @@ function App() {
   );
 }
 
-export default App;
+export default function AppWithToast() {
+  return (
+    <ToastProvider>
+      <App />
+    </ToastProvider>
+  );
+}
