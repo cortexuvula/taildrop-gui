@@ -2,6 +2,7 @@ import { useState, useEffect, useCallback, useRef } from "react";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { open } from "@tauri-apps/plugin-dialog";
 import type { Peer } from "../types";
+import { useToast } from "./ToastProvider";
 
 interface DropZoneProps {
   selectedPeer: Peer | null;
@@ -16,6 +17,11 @@ export function DropZone({ selectedPeer, onSendFiles, peers }: DropZoneProps) {
   const [pendingPaths, setPendingPaths] = useState<string[]>([]);
   const [showPeerPicker, setShowPeerPicker] = useState(false);
   const processRef = useRef<((paths: string[]) => void) | undefined>(undefined);
+  const toast = useToast();
+  // Keep the latest toast in a ref so the event listener (registered once on
+  // mount) always calls the current one without re-registering.
+  const toastRef = useRef(toast);
+  toastRef.current = toast;
 
   const processFiles = useCallback(
     (paths: string[]) => {
@@ -57,6 +63,13 @@ export function DropZone({ selectedPeer, onSendFiles, peers }: DropZoneProps) {
         const paths = event.payload.paths;
         if (paths && paths.length > 0) {
           processRef.current?.(paths);
+        } else {
+          // Empty drop — no sendable file paths (e.g. file from Recycle Bin,
+          // or non-file content dragged in).
+          toastRef.current.error(
+            "No files to send",
+            "Drop files from Finder/Explorer, not the Recycle Bin.",
+          );
         }
       }
     });
