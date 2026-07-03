@@ -14,6 +14,9 @@
     "notification:allow-is-permission-granted",
     "notification:allow-request-permission",
     "notification:allow-notify",
-    "notification:allow-show"
+    "notification:allow-show",
+    "updater:default",
+    "process:default",
+    "core:app:default"
   ]
 }
