@@ -1,5 +1,9 @@
 import { useState, useEffect } from "react";
+import { invoke } from "@tauri-apps/api/core";
+import { getVersion } from "@tauri-apps/api/app";
 import type { Peer } from "../types";
+import { useDebugLogs } from "../hooks/useDebugLogs";
+import { clearFrontendLogs } from "../lib/logger";
 
 interface DebugPanelProps {
   peers: Peer[];
@@ -8,6 +12,18 @@ interface DebugPanelProps {
 
 export function DebugPanel({ peers, onClose }: DebugPanelProps) {
   const [copied, setCopied] = useState(false);
+  const [copiedLogs, setCopiedLogs] = useState(false);
+  const [appVersion, setAppVersion] = useState("");
+  const [envInfo, setEnvInfo] = useState("");
+  const logs = useDebugLogs(true);
+
+  useEffect(() => {
+    getVersion().then(setAppVersion).catch(() => setAppVersion("?"));
+  }, []);
+
+  useEffect(() => {
+    invoke<string>("get_env_info").then(setEnvInfo).catch(() => setEnvInfo(""));
+  }, []);
 
   useEffect(() => {
     const handleKey = (e: KeyboardEvent) => {
@@ -44,11 +60,30 @@ export function DebugPanel({ peers, onClose }: DebugPanelProps) {
     });
   };
 
+  const logsText = logs
+    .map(
+      (l) =>
+        `${new Date(l.timestampMs).toISOString()} [${l.source[0].toUpperCase()}] ${l.level.padEnd(5)} ${l.target}: ${l.message}`,
+    )
+    .join("\n");
+
+  const handleCopyLogs = () => {
+    const header = `TailDrop v${appVersion} | ${envInfo}\nCaptured: ${new Date().toISOString()}\n${"=".repeat(60)}\n`;
+    navigator.clipboard.writeText(header + logsText).then(() => {
+      setCopiedLogs(true);
+      setTimeout(() => setCopiedLogs(false), 2000);
+    });
+  };
+
+  const handleClearFe = () => {
+    clearFrontendLogs();
+  };
+
   return (
     <div className="settings-overlay" onClick={onClose}>
       <div
         className="settings-panel"
-        style={{ maxWidth: 700, width: "90vw" }}
+        style={{ maxWidth: 800, width: "90vw" }}
         onClick={(e) => e.stopPropagation()}
       >
         <div className="settings-header">
@@ -60,6 +95,13 @@ export function DebugPanel({ peers, onClose }: DebugPanelProps) {
             <button className="icon-btn" onClick={onClose}>
               ✕
             </button>
+          </div>
+        </div>
+
+        <div className="settings-section">
+          <label className="settings-label">Environment</label>
+          <div className="debug-env">
+            TailDrop v{appVersion} | {envInfo}
           </div>
         </div>
 
@@ -137,6 +179,21 @@ export function DebugPanel({ peers, onClose }: DebugPanelProps) {
           >
             {jsonText}
           </pre>
+        </div>
+
+        <div className="settings-section">
+          <label className="settings-label">
+            Logs ({logs.length})
+            <span style={{ float: "right", display: "flex", gap: 8 }}>
+              <button className="btn-secondary" onClick={handleClearFe}>
+                Clear FE
+              </button>
+              <button className="btn-secondary" onClick={handleCopyLogs}>
+                {copiedLogs ? "✓ Copied" : "📋 Copy logs"}
+              </button>
+            </span>
+          </label>
+          <pre className="debug-logs">{logsText}</pre>
         </div>
       </div>
     </div>
