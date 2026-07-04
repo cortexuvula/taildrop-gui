@@ -7,6 +7,7 @@ import { DebugPanel } from "./components/DebugPanel";
 import { ToastProvider, useToast } from "./components/ToastProvider";
 import { useTailscale, type SendErrorInfoLike } from "./hooks/useTailscale";
 import { useUpdater } from "./hooks/useUpdater";
+import { logger } from "./lib/logger";
 import "./App.css";
 
 function App() {
@@ -16,6 +17,8 @@ function App() {
 
   const onSendError = useCallback(
     (info: SendErrorInfoLike) => {
+      // [DEBUG-TOAST] link 2: did App's onSendError callback actually run?
+      logger.debug("App", "onSendError callback RUN, calling toast.error:", info);
       const title =
         info.direction === "sent"
           ? `Send failed: ${info.filename}`
@@ -71,21 +74,19 @@ function App() {
     updateSettings,
   } = useTailscale({ onSendError });
 
-  // Diagnostic: log state changes in dev mode only (visible in Safari Web Inspector)
+  // Diagnostic: log state changes (buffered for DebugPanel; mirrored to console in dev)
   useEffect(() => {
-    if (import.meta.env.DEV) {
-      console.log("[taildrop] state:", {
-        loading,
-        error,
-        totalPeers: peers.length,
-        visiblePeers: visiblePeers.length,
-        selfNode: peers.find((p) => p.is_self)?.dns_name ?? "none",
-        samplePeer: peers.find((p) => !p.is_self),
-        hiddenNodes: settings.hiddenNodes.length,
-        showOffline: settings.showOfflineNodes,
-        showExit: settings.showExitNodes,
-      });
-    }
+    logger.debug("App", "state:", {
+      loading,
+      error,
+      totalPeers: peers.length,
+      visiblePeers: visiblePeers.length,
+      selfNode: peers.find((p) => p.is_self)?.dns_name ?? "none",
+      samplePeer: peers.find((p) => !p.is_self),
+      hiddenNodes: settings.hiddenNodes.length,
+      showOffline: settings.showOfflineNodes,
+      showExit: settings.showExitNodes,
+    });
   }, [loading, error, peers, visiblePeers, settings]);
 
   // Bug #5: store only the ID, derive the peer object from current peers

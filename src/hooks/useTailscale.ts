@@ -7,6 +7,7 @@ import {
   sendNotification,
 } from "@tauri-apps/plugin-notification";
 import type { Peer, IncomingFile, TransferRecord, AppSettings } from "../types";
+import { logger } from "../lib/logger";
 
 const DEFAULT_SETTINGS: AppSettings = {
   hiddenNodes: [],
@@ -95,7 +96,7 @@ export function useTailscale(options?: UseTailscaleOptions) {
         }));
       })
       .catch((e) => {
-        console.warn("[taildrop] Could not get default download dir:", e);
+        logger.warn("useTailscale", "Could not get default download dir:", e);
       });
   }, []);
 
@@ -106,7 +107,7 @@ export function useTailscale(options?: UseTailscaleOptions) {
         localStorage.setItem("taildrop-transfers", JSON.stringify(transfers));
       } catch (e) {
         if (e instanceof DOMException && e.name === "QuotaExceededError") {
-          console.warn("[taildrop] localStorage quota exceeded, pruning oldest transfers");
+          logger.warn("useTailscale", "localStorage quota exceeded, pruning oldest transfers");
           const pruned = transfers.slice(0, Math.floor(transfers.length / 2));
           try {
             localStorage.setItem("taildrop-transfers", JSON.stringify(pruned));
@@ -353,6 +354,7 @@ export function useTailscale(options?: UseTailscaleOptions) {
                   : t
               )
             );
+            logger.debug("useTailscale", "send catch: errorStr =", errorStr, "| onSendErrorRef.current is", typeof onSendErrorRef.current === "function" ? "SET" : "NULL");
             onSendErrorRef.current?.({
               filename: record.filename,
               error: errorStr,

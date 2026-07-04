@@ -8,6 +8,7 @@ import {
   useState,
   type ReactNode,
 } from "react";
+import { logger } from "../lib/logger";
 
 // Maximum number of toasts shown at once. When a new toast would exceed this,
 // the oldest is dropped. Prevents flooding during a multi-file batch failure.
@@ -112,6 +113,20 @@ function ToastViewport({
 
 export function ToastProvider({ children }: { children: ReactNode }) {
   const [toasts, setToasts] = useState<Toast[]>([]);
+  // [DEBUG-TOAST] confirm provider mounted + viewport renders
+  logger.debug("ToastProvider", "rendered, toasts in state:", toasts.length);
+
+  // DOM probe: confirms the viewport node committed to the DOM after render.
+  useEffect(() => {
+    const node = document.querySelector(".toast-viewport");
+    logger.debug(
+      "ToastProvider",
+      "post-commit DOM probe: viewport node =",
+      node ? "FOUND" : "NULL",
+      "| child toast count =",
+      node ? node.children.length : "n/a",
+    );
+  });
   // Track each toast's auto-dismiss timer so we can clear it on manual dismiss.
   const timersRef = useRef(new Map<string, ReturnType<typeof setTimeout>>());
 
@@ -160,6 +175,7 @@ export function ToastProvider({ children }: { children: ReactNode }) {
           // ref, safe to mutate outside React's render via queueMicrotask.
           queueMicrotask(() => clearTimer(dropped.id));
         }
+        logger.debug("ToastProvider", "push:", { id, variant, title, prevCount: prev.length, nextCount: next.length });
         return next;
       });
       // Auto-dismiss timer. durationMs === 0 means persistent (no timer).

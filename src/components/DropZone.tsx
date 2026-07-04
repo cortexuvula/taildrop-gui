@@ -3,6 +3,7 @@ import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { open } from "@tauri-apps/plugin-dialog";
 import type { Peer } from "../types";
 import { useToast } from "./ToastProvider";
+import { logger } from "../lib/logger";
 
 interface DropZoneProps {
   selectedPeer: Peer | null;
@@ -22,6 +23,8 @@ export function DropZone({ selectedPeer, onSendFiles, peers }: DropZoneProps) {
   // mount) always calls the current one without re-registering.
   const toastRef = useRef(toast);
   toastRef.current = toast;
+  // [DEBUG-TOAST] confirm DropZone consumed useToast successfully
+  logger.debug("DropZone", "useToast() returned:", typeof toast?.error === "function" ? "valid API" : "INVALID");
 
   const processFiles = useCallback(
     (paths: string[]) => {
@@ -54,6 +57,7 @@ export function DropZone({ selectedPeer, onSendFiles, peers }: DropZoneProps) {
   // Tauri native drag-and-drop — gives file paths directly
   useEffect(() => {
     const unlisten = getCurrentWebview().onDragDropEvent((event) => {
+      logger.debug("DropZone", "drag event =", event.payload.type);
       if (event.payload.type === "enter") {
         setIsDragging(true);
       } else if (event.payload.type === "leave") {
@@ -66,6 +70,7 @@ export function DropZone({ selectedPeer, onSendFiles, peers }: DropZoneProps) {
         } else {
           // Empty drop — no sendable file paths (e.g. file from Recycle Bin,
           // or non-file content dragged in).
+          logger.debug("DropZone", "empty drop → calling toast.error");
           toastRef.current.error(
             "No files to send",
             "Drop files from Finder/Explorer, not the Recycle Bin.",
