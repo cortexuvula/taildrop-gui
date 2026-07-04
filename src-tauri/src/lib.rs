@@ -1,3 +1,4 @@
+mod debug_log;
 mod tailscale;
 
 use tauri::Emitter;
@@ -92,9 +93,19 @@ fn get_default_download_dir() -> String {
         .to_string()
 }
 
+#[tauri::command]
+fn get_debug_logs() -> Vec<debug_log::LogEntry> {
+    debug_log::snapshot()
+}
+
+#[tauri::command]
+fn get_env_info() -> String {
+    format!("{} {}", std::env::consts::OS, std::env::consts::ARCH)
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    env_logger::init();
+    debug_log::init();
 
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
@@ -111,6 +122,8 @@ pub fn run() {
             get_incoming_files,
             accept_file,
             get_default_download_dir,
+            get_debug_logs,
+            get_env_info,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
