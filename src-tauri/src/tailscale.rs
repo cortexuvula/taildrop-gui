@@ -449,6 +449,19 @@ mod platform {
             .and_then(|s| s.parse().ok());
 
         let body_trimmed = body.trim();
+
+        // Linux socket-permission case: the localapi socket requires root or
+        // operator privileges. The daemon returns 403 "file access denied" —
+        // which misleadingly sounds like a receiver-side issue. Rewrite it to
+        // the actionable guidance the Tailscale CLI itself prints.
+        if status_code == Some(403)
+            && body_trimmed.to_ascii_lowercase().contains("access denied")
+        {
+            return "Access denied to the Tailscale socket. \
+                    Run this once: sudo tailscale set --operator=$USER"
+                .to_string();
+        }
+
         match status_code {
             Some(code) if code != 200 => {
                 if !body_trimmed.is_empty() {
