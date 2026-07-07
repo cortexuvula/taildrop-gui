@@ -74,20 +74,11 @@ function App() {
     updateSettings,
   } = useTailscale({ onSendError });
 
-  // Diagnostic: log state changes (buffered for DebugPanel; mirrored to console in dev)
+  // Mount-time diagnostic: one summary log (not per-render noise).
   useEffect(() => {
-    logger.debug("App", "state:", {
-      loading,
-      error,
-      totalPeers: peers.length,
-      visiblePeers: visiblePeers.length,
-      selfNode: peers.find((p) => p.is_self)?.dns_name ?? "none",
-      samplePeer: peers.find((p) => !p.is_self),
-      hiddenNodes: settings.hiddenNodes.length,
-      showOffline: settings.showOfflineNodes,
-      showExit: settings.showExitNodes,
-    });
-  }, [loading, error, peers, visiblePeers, settings]);
+    logger.debug("App", "started — online peers:", peers.filter((p) => p.online && !p.is_self).length);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   // Bug #5: store only the ID, derive the peer object from current peers
   // so it stays in sync when peers refresh (online/offline, IP changes, etc.)

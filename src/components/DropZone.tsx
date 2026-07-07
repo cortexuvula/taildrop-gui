@@ -23,8 +23,6 @@ export function DropZone({ selectedPeer, onSendFiles, peers }: DropZoneProps) {
   // mount) always calls the current one without re-registering.
   const toastRef = useRef(toast);
   toastRef.current = toast;
-  // [DEBUG-TOAST] confirm DropZone consumed useToast successfully
-  logger.debug("DropZone", "useToast() returned:", typeof toast?.error === "function" ? "valid API" : "INVALID");
 
   const processFiles = useCallback(
     (paths: string[]) => {
@@ -57,7 +55,10 @@ export function DropZone({ selectedPeer, onSendFiles, peers }: DropZoneProps) {
   // Tauri native drag-and-drop — gives file paths directly
   useEffect(() => {
     const unlisten = getCurrentWebview().onDragDropEvent((event) => {
-      logger.debug("DropZone", "drag event =", event.payload.type);
+      // Log state transitions only; 'over' fires ~30×/sec while hovering.
+      if (event.payload.type !== "over") {
+        logger.debug("DropZone", "drag event =", event.payload.type);
+      }
       if (event.payload.type === "enter") {
         setIsDragging(true);
       } else if (event.payload.type === "leave") {

@@ -42,6 +42,27 @@ impl Log for InMemorySink {
                 logger.log(record);
             }
         }
+        // Suppress chatty third-party debug/info from the in-app buffer.
+        // These still reach stderr (above), but don't flood the DebugPanel.
+        // Our own crates (taildrop_gui*, tailscale) are always captured.
+        let target = record.target();
+        const NOISY_PREFIXES: &[&str] = &[
+            "reqwest",
+            "rustls",
+            "hyper",
+            "tauri_plugin_updater::updater",
+            "tonic",
+            "h2",
+            "tower",
+        ];
+        let is_ours = target.starts_with("taildrop_gui") || target == "tailscale";
+        if !is_ours && record.level() > Level::Warn {
+            for prefix in NOISY_PREFIXES {
+                if target.starts_with(prefix) {
+                    return;
+                }
+            }
+        }
         // Append to the in-memory buffer.
         let timestamp_ms = SystemTime::now()
             .duration_since(UNIX_EPOCH)
