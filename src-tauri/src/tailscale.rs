@@ -845,13 +845,17 @@ mod platform {
     /// JSON has no WaitingFiles field, and `tailscale file get --wait=false`
     /// consumes files into the target directory.
     ///
+    /// Uses `--conflict=overwrite` so files that were already downloaded by a
+    /// previous poll are overwritten and consumed from the inbox, preventing a
+    /// stuck loop where the same file blocks every subsequent poll.
+    ///
     /// This function downloads any pending files directly to `save_dir` and
     /// returns a JSON array `[{name, size}]` of the files that were received.
     /// The frontend treats these as incoming files; since they're already on
     /// disk, the accept path is a no-op (the file is already consumed from the
     /// daemon's inbox).
     fn try_cli_receive_files(save_dir: &str) -> Result<Vec<u8>, String> {
-        let output = tailscale_cmd(&["file", "get", "--wait=false", "--verbose", save_dir])
+        let output = tailscale_cmd(&["file", "get", "--wait=false", "--verbose", "--conflict=overwrite", save_dir])
             .map_err(|e| format!("Failed to run tailscale file get: {}", e))?;
         let stdout = String::from_utf8_lossy(&output.stdout);
         let stderr = String::from_utf8_lossy(&output.stderr);
