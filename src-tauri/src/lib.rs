@@ -67,8 +67,17 @@ async fn send_file(
 }
 
 #[tauri::command]
-async fn get_incoming_files() -> Result<Vec<tailscale::IncomingFile>, String> {
-    tailscale::fetch_incoming_files().await
+async fn get_incoming_files(save_dir: String) -> Result<Vec<tailscale::IncomingFile>, String> {
+    let save_dir = save_dir.trim().to_string();
+    let dir = if save_dir.is_empty() {
+        dirs::download_dir()
+            .unwrap_or_else(|| dirs::home_dir().unwrap_or_else(|| std::path::PathBuf::from(".")))
+            .to_string_lossy()
+            .to_string()
+    } else {
+        save_dir
+    };
+    tailscale::fetch_incoming_files(&dir).await
 }
 
 #[tauri::command]

@@ -633,7 +633,7 @@ mod platform {
         Ok(format!("Sent {} to {}", filename, peer_id))
     }
 
-    pub async fn get_incoming_files() -> Result<Vec<u8>, String> {
+    pub async fn get_incoming_files(_save_dir: &str) -> Result<Vec<u8>, String> {
         get_request("/localapi/v0/files/").await
     }
 
@@ -839,77 +839,94 @@ mod platform {
         Ok(response[header_end + 4..].to_vec())
     }
 
-    /// CLI fallback for listing pending incoming files when the Unix socket is
-    /// unavailable (the macOS GUI install case, where the daemon uses a TCP
-    /// loopback port instead of a Unix socket). Uses `tailscale status --json`
-    /// which may include a `WaitingFiles` array in its JSON output when Taildrop
-    /// files are pending.
+    /// CLI auto-receive fallback for when the Unix socket is unavailable (the
+    /// macOS GUI install case). On macOS there is no way to LIST pending files
+    /// without DOWNLOADING them — the localapi socket is unavailable, status
+    /// JSON has no WaitingFiles field, and `tailscale file get --wait=false`
+    /// consumes files into the target directory.
     ///
-    /// Returns a JSON array `[{name, size}]` matching the localapi `/files/`
-    /// shape (size unknown → 0). The accept path doesn't require the size; it's
-    /// only used for display.
-    fn try_cli_list_files() -> Result<Vec<u8>, String> {
-        let output = tailscale_cmd(&["status", "--json"])
-            .map_err(|e| format!("Failed to run tailscale status: {}", e))?;
+    /// This function downloads any pending files directly to `save_dir` and
+    /// returns a JSON array `[{name, size}]` of the files that were received.
+    /// The frontend treats these as incoming files; since they're already on
+    /// disk, the accept path is a no-op (the file is already consumed from the
+    /// daemon's inbox).
+    fn try_cli_receive_files(save_dir: &str) -> Result<Vec<u8>, String> {
+        let output = tailscale_cmd(&["file", "get", "--wait=false", "--verbose", save_dir])
+            .map_err(|e| format!("Failed to run tailscale file get: {}", e))?;
         let stdout = String::from_utf8_lossy(&output.stdout);
-        // Parse the status JSON and look for any key that might contain
-        // pending Taildrop files. The exact field name varies across Tailscale
-        // versions; log what we find for diagnosis.
-        let parsed: serde_json::Value = match serde_json::from_str(&stdout) {
-            Ok(v) => v,
-            Err(e) => {
-                log::debug!(
-                    "macOS CLI file-listing: failed to parse status JSON ({}), stdout_len={}",
-                    e,
-                    stdout.len()
-                );
-                return Ok(b"[]".to_vec());
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        log::debug!(
+            "macOS CLI auto-receive: exit={} stdout_len={} stderr_len={}",
+            output.status,
+            stdout.len(),
+            stderr.len()
+        );
+        // The CLI prints "moved X/Y files" to stdout. Parse to find how many
+        // files were received. If 0/0, nothing was pending.
+        let moved_line = stdout.lines().find(|l| l.contains("moved") && l.contains("files"));
+        let count = match moved_line {
+            Some(line) => {
+                // Parse "moved N/N files" — extract the first N (files moved).
+                let nums: Vec<&str> = line
+                    .split_whitespace()
+                    .filter(|w| w.chars().all(|c| c.is_ascii_digit() || c == '/'))
+                    .collect();
+                if let Some(fraction) = nums.first() {
+                    let moved = fraction.split('/').next().and_then(|n| n.parse::<usize>().ok());
+                    log::debug!("macOS CLI auto-receive: parsed '{}' → {} files", line, moved.unwrap_or(0));
+                    moved.unwrap_or(0)
+                } else {
+                    0
+                }
+            }
+            None => {
+                // No "moved" line — either no files or unexpected output format.
+                // If stdout is non-empty, log it for diagnosis.
+                if !stdout.trim().is_empty() {
+                    log::debug!("macOS CLI auto-receive: unexpected stdout: {:?}", stdout.lines().take(3).collect::<Vec<_>>());
+                }
+                0
             }
         };
-        // Try known field names for pending files in status JSON.
-        let waiting = parsed
-            .get("WaitingFiles")
-            .or_else(|| parsed.get("waitingFiles"))
-            .or_else(|| parsed.get("waiting_files"));
-        let files = match waiting {
-            Some(serde_json::Value::Array(arr)) if !arr.is_empty() => {
-                log::debug!(
-                    "macOS CLI file-listing: found {} pending file(s)",
-                    arr.len()
-                );
-                arr
+        if count == 0 {
+            return Ok(b"[]".to_vec());
+        }
+        // Files were downloaded to save_dir. We need to return their names so
+        // the frontend can show them. List the most recently modified files in
+        // save_dir (matching the count) — they're the ones just downloaded.
+        let entries = match std::fs::read_dir(save_dir) {
+            Ok(entries) => {
+                let mut files: Vec<_> = entries
+                    .filter_map(|e| e.ok())
+                    .filter(|e| e.file_type().map(|t| t.is_file()).unwrap_or(false))
+                    .collect();
+                // Sort by modified time descending (newest first).
+                files.sort_by(|a, b| {
+                    let ma = a.metadata().and_then(|m| m.modified()).ok();
+                    let mb = b.metadata().and_then(|m| m.modified()).ok();
+                    mb.cmp(&ma)
+                });
+                files.into_iter().take(count).collect::<Vec<_>>()
             }
-            _ => {
-                // Log the top-level keys so we can discover the correct field
-                // name if our guesses are wrong.
-                if let Some(obj) = parsed.as_object() {
-                    log::debug!(
-                        "macOS CLI file-listing: no WaitingFiles key. Top-level keys: [{}]",
-                        obj.keys().cloned().collect::<Vec<_>>().join(", ")
-                    );
-                } else {
-                    log::debug!("macOS CLI file-listing: status JSON is not an object");
-                }
+            Err(e) => {
+                log::debug!("macOS CLI auto-receive: can't read save_dir '{}': {}", save_dir, e);
                 return Ok(b"[]".to_vec());
             }
         };
         // Build [{name, size}] JSON matching the IncomingFile struct shape.
-        let mut entries: Vec<String> = Vec::new();
-        for file in files {
-            let name = file
-                .get("Name")
-                .or_else(|| file.get("name"))
-                .and_then(|n| n.as_str())
-                .unwrap_or("unknown");
-            let size = file
-                .get("Size")
-                .or_else(|| file.get("size"))
-                .and_then(|s| s.as_u64())
-                .unwrap_or(0);
+        let mut json_entries: Vec<String> = Vec::new();
+        for entry in entries {
+            let name = entry.file_name().to_string_lossy().to_string();
+            let size = entry.metadata().map(|m| m.len()).unwrap_or(0);
             let escaped = name.replace('\\', "\\\\").replace('"', "\\\"");
-            entries.push(format!(r#"{{"name":"{}","size":{}}}"#, escaped, size));
+            json_entries.push(format!(r#"{{"name":"{}","size":{}}}"#, escaped, size));
         }
-        let json = format!("[{}]", entries.join(","));
+        log::debug!(
+            "macOS CLI auto-receive: returning {} file(s) already saved to '{}'",
+            json_entries.len(),
+            save_dir
+        );
+        let json = format!("[{}]", json_entries.join(","));
         Ok(json.into_bytes())
     }
 
@@ -1176,10 +1193,11 @@ mod platform {
         .map_err(|e| format!("Task panicked: {}", e))?
     }
 
-    pub async fn get_incoming_files() -> Result<Vec<u8>, String> {
+    pub async fn get_incoming_files(save_dir: &str) -> Result<Vec<u8>, String> {
+        let save_dir = save_dir.to_string();
         tokio::time::timeout(
             std::time::Duration::from_secs(120),
-            tokio::task::spawn_blocking(|| {
+            tokio::task::spawn_blocking(move || {
                 match try_socket_get("/localapi/v0/files/") {
                     Ok(data) => {
                         log::debug!(
@@ -1195,9 +1213,14 @@ mod platform {
                         if e.starts_with("connect:") {
                             // Socket unavailable (macOS GUI install uses a TCP
                             // loopback port, not a Unix socket). Fall back to
-                            // the CLI, which handles the TCP transport itself.
-                            log::debug!("macOS: falling back to CLI for file listing");
-                            try_cli_list_files()
+                            // the CLI auto-receive: download pending files
+                            // directly to the save dir (there is no pure
+                            // "list" CLI command on macOS — file get consumes).
+                            log::debug!(
+                                "macOS: falling back to CLI auto-receive to '{}'",
+                                save_dir
+                            );
+                            try_cli_receive_files(&save_dir)
                         } else {
                             // HTTP/transport error — don't mask with CLI.
                             // Return empty so the UI degrades gracefully; the
@@ -1409,7 +1432,7 @@ mod platform {
         Ok(response[header_end + 4..].to_vec())
     }
 
-    pub async fn get_incoming_files() -> Result<Vec<u8>, String> {
+    pub async fn get_incoming_files(_save_dir: &str) -> Result<Vec<u8>, String> {
         tokio::time::timeout(
             std::time::Duration::from_secs(120),
             tokio::task::spawn_blocking(|| {
@@ -1574,8 +1597,8 @@ pub async fn send_file_to_peer(
     platform::send_file(peer_id, peer_name, file_path).await
 }
 
-pub async fn fetch_incoming_files() -> Result<Vec<IncomingFile>, String> {
-    let body = platform::get_incoming_files().await?;
+pub async fn fetch_incoming_files(save_dir: &str) -> Result<Vec<IncomingFile>, String> {
+    let body = platform::get_incoming_files(save_dir).await?;
     let files: Vec<IncomingFile> =
         serde_json::from_slice(&body).map_err(|e| format!("Failed to parse files: {}", e))?;
     Ok(files)

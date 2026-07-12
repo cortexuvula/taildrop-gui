@@ -259,7 +259,9 @@ export function useTailscale(options?: UseTailscaleOptions) {
   // Fetch incoming files
   const refreshIncoming = useCallback(async () => {
     try {
-      const result = await invoke<IncomingFile[]>("get_incoming_files");
+      const result = await invoke<IncomingFile[]>("get_incoming_files", {
+        saveDir: settingsRef.current.saveDirectory,
+      });
       // Filter out files that were recently accepted (poll race prevention)
       const now = Date.now();
       const filtered = result.filter((f) => {
