@@ -1282,8 +1282,10 @@ mod platform {
                             socket_err
                         );
                         super::accept_file_with_getter(&name, &save_dir, || {
-                            // --wait=5s prevents indefinite hang if files were already consumed
-                            let output = tailscale_cmd(&["file", "get", "--wait=5s", &save_dir])
+                            // --wait=false: don't block if the inbox is empty
+                            // (the file may have already been consumed by the
+                            // auto-receive poll on macOS).
+                            let output = tailscale_cmd(&["file", "get", "--wait=false", &save_dir])
                                 .map_err(|e| format!("Failed to run tailscale file get: {}", e))?;
                             if !output.status.success() {
                                 let stderr = String::from_utf8_lossy(&output.stderr);
@@ -1465,9 +1467,9 @@ mod platform {
             std::time::Duration::from_secs(120),
             tokio::task::spawn_blocking(move || {
                 super::accept_file_with_getter(&name, &save_dir, || {
-                    // --wait=5s prevents indefinite hang if files were already consumed
+                    // --wait=false: don't block if the inbox is empty.
                     let output = tailscale_cmd()
-                        .args(["file", "get", "--wait=5s", &save_dir])
+                        .args(["file", "get", "--wait=false", &save_dir])
                         .output()
                         .map_err(|e| format!("Failed to run tailscale file get: {}", e))?;
                     if !output.status.success() {
