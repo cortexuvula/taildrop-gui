@@ -839,6 +839,50 @@ mod platform {
         Ok(response[header_end + 4..].to_vec())
     }
 
+    /// CLI fallback for listing pending incoming files when the Unix socket is
+    /// unavailable (the macOS GUI install case, where the daemon uses a TCP
+    /// loopback port instead of a Unix socket). Runs
+    /// `tailscale file get --wait=false` which returns immediately with the
+    /// list of pending files (non-blocking).
+    ///
+    /// The CLI output format varies across Tailscale versions: it may emit
+    /// JSON, or one filename per line, or a path per line. We parse
+    /// defensively and build a JSON array `[{name, size}]` matching the
+    /// localapi `/files/` shape (size unknown → 0). The accept path doesn't
+    /// require the size; it's only used for display.
+    fn try_cli_list_files() -> Result<Vec<u8>, String> {
+        let output = tailscale_cmd(&["file", "get", "--wait=false", "--verbose"])
+            .map_err(|e| format!("Failed to run tailscale file get: {}", e))?;
+        // --wait=false exits non-zero (typically exit 1) when no files are
+        // waiting; treat that as an empty list, not an error.
+        if !output.status.success() {
+            return Ok(b"[]".to_vec());
+        }
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let trimmed = stdout.trim();
+        if trimmed.is_empty() {
+            return Ok(b"[]".to_vec());
+        }
+        // Build [{name, size}] from non-empty lines. Each line is a pending
+        // file's name (the CLI prints the basename or relative path).
+        let entries: Vec<&str> = trimmed.lines().map(|l| l.trim()).filter(|l| !l.is_empty()).collect();
+        // Serialize manually to avoid pulling in extra deps; shape matches the
+        // camelCase IncomingFile struct that fetch_incoming_files deserializes.
+        let mut json = String::from("[");
+        for (i, name) in entries.iter().enumerate() {
+            if i > 0 {
+                json.push(',');
+            }
+            // Escape the filename for JSON safety.
+            let escaped = name.replace('\\', "\\\\").replace('"', "\\\"");
+            // Use only the basename so it matches what accept_file expects.
+            let basename = escaped.rsplit('/').next().unwrap_or(&escaped);
+            json.push_str(&format!(r#"{{"name":"{}","size":0}}"#, basename));
+        }
+        json.push(']');
+        Ok(json.into_bytes())
+    }
+
     /// Outcome of [`try_socket_get_to_file`].
     ///
     /// Distinguishes "the Unix socket itself is unavailable" (the App Store
@@ -1107,17 +1151,29 @@ mod platform {
             std::time::Duration::from_secs(120),
             tokio::task::spawn_blocking(|| {
                 match try_socket_get("/localapi/v0/files/") {
-                    Ok(data) => Ok(data),
+                    Ok(data) => {
+                        log::debug!(
+                            "macOS: socket file listing OK ({} bytes)",
+                            data.len()
+                        );
+                        Ok(data)
+                    }
                     Err(e) => {
-                        use std::sync::Once;
-                        static LOG_ONCE: Once = Once::new();
-                        LOG_ONCE.call_once(|| {
-                            log::warn!(
-                                "macOS: socket file listing unavailable ({}), incoming files won't be detected",
-                                e
-                            );
-                        });
-                        Ok(b"[]".to_vec())
+                        // Always log (not Once-gated) so the DebugPanel shows
+                        // the real error on every poll while the panel is open.
+                        log::debug!("macOS: socket file listing failed: {}", e);
+                        if e.starts_with("connect:") {
+                            // Socket unavailable (macOS GUI install uses a TCP
+                            // loopback port, not a Unix socket). Fall back to
+                            // the CLI, which handles the TCP transport itself.
+                            log::debug!("macOS: falling back to CLI for file listing");
+                            try_cli_list_files()
+                        } else {
+                            // HTTP/transport error — don't mask with CLI.
+                            // Return empty so the UI degrades gracefully; the
+                            // error is logged above for diagnosis.
+                            Ok(b"[]".to_vec())
+                        }
                     }
                 }
             }),
