@@ -841,45 +841,75 @@ mod platform {
 
     /// CLI fallback for listing pending incoming files when the Unix socket is
     /// unavailable (the macOS GUI install case, where the daemon uses a TCP
-    /// loopback port instead of a Unix socket). Runs
-    /// `tailscale file get --wait=false` which returns immediately with the
-    /// list of pending files (non-blocking).
+    /// loopback port instead of a Unix socket). Uses `tailscale status --json`
+    /// which may include a `WaitingFiles` array in its JSON output when Taildrop
+    /// files are pending.
     ///
-    /// The CLI output format varies across Tailscale versions: it may emit
-    /// JSON, or one filename per line, or a path per line. We parse
-    /// defensively and build a JSON array `[{name, size}]` matching the
-    /// localapi `/files/` shape (size unknown → 0). The accept path doesn't
-    /// require the size; it's only used for display.
+    /// Returns a JSON array `[{name, size}]` matching the localapi `/files/`
+    /// shape (size unknown → 0). The accept path doesn't require the size; it's
+    /// only used for display.
     fn try_cli_list_files() -> Result<Vec<u8>, String> {
-        let output = tailscale_cmd(&["file", "get", "--wait=false", "--verbose"])
-            .map_err(|e| format!("Failed to run tailscale file get: {}", e))?;
-        // --wait=false exits non-zero (typically exit 1) when no files are
-        // waiting; treat that as an empty list, not an error.
-        if !output.status.success() {
-            return Ok(b"[]".to_vec());
-        }
+        let output = tailscale_cmd(&["status", "--json"])
+            .map_err(|e| format!("Failed to run tailscale status: {}", e))?;
         let stdout = String::from_utf8_lossy(&output.stdout);
-        let trimmed = stdout.trim();
-        if trimmed.is_empty() {
-            return Ok(b"[]".to_vec());
-        }
-        // Build [{name, size}] from non-empty lines. Each line is a pending
-        // file's name (the CLI prints the basename or relative path).
-        let entries: Vec<&str> = trimmed.lines().map(|l| l.trim()).filter(|l| !l.is_empty()).collect();
-        // Serialize manually to avoid pulling in extra deps; shape matches the
-        // camelCase IncomingFile struct that fetch_incoming_files deserializes.
-        let mut json = String::from("[");
-        for (i, name) in entries.iter().enumerate() {
-            if i > 0 {
-                json.push(',');
+        // Parse the status JSON and look for any key that might contain
+        // pending Taildrop files. The exact field name varies across Tailscale
+        // versions; log what we find for diagnosis.
+        let parsed: serde_json::Value = match serde_json::from_str(&stdout) {
+            Ok(v) => v,
+            Err(e) => {
+                log::debug!(
+                    "macOS CLI file-listing: failed to parse status JSON ({}), stdout_len={}",
+                    e,
+                    stdout.len()
+                );
+                return Ok(b"[]".to_vec());
             }
-            // Escape the filename for JSON safety.
+        };
+        // Try known field names for pending files in status JSON.
+        let waiting = parsed
+            .get("WaitingFiles")
+            .or_else(|| parsed.get("waitingFiles"))
+            .or_else(|| parsed.get("waiting_files"));
+        let files = match waiting {
+            Some(serde_json::Value::Array(arr)) if !arr.is_empty() => {
+                log::debug!(
+                    "macOS CLI file-listing: found {} pending file(s)",
+                    arr.len()
+                );
+                arr
+            }
+            _ => {
+                // Log the top-level keys so we can discover the correct field
+                // name if our guesses are wrong.
+                if let Some(obj) = parsed.as_object() {
+                    log::debug!(
+                        "macOS CLI file-listing: no WaitingFiles key. Top-level keys: [{}]",
+                        obj.keys().cloned().collect::<Vec<_>>().join(", ")
+                    );
+                } else {
+                    log::debug!("macOS CLI file-listing: status JSON is not an object");
+                }
+                return Ok(b"[]".to_vec());
+            }
+        };
+        // Build [{name, size}] JSON matching the IncomingFile struct shape.
+        let mut entries: Vec<String> = Vec::new();
+        for file in files {
+            let name = file
+                .get("Name")
+                .or_else(|| file.get("name"))
+                .and_then(|n| n.as_str())
+                .unwrap_or("unknown");
+            let size = file
+                .get("Size")
+                .or_else(|| file.get("size"))
+                .and_then(|s| s.as_u64())
+                .unwrap_or(0);
             let escaped = name.replace('\\', "\\\\").replace('"', "\\\"");
-            // Use only the basename so it matches what accept_file expects.
-            let basename = escaped.rsplit('/').next().unwrap_or(&escaped);
-            json.push_str(&format!(r#"{{"name":"{}","size":0}}"#, basename));
+            entries.push(format!(r#"{{"name":"{}","size":{}}}"#, escaped, size));
         }
-        json.push(']');
+        let json = format!("[{}]", entries.join(","));
         Ok(json.into_bytes())
     }
 
