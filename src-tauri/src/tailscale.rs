@@ -1347,6 +1347,95 @@ mod platform {
         cmd
     }
 
+    /// CLI auto-receive fallback for when the named pipe is unavailable.
+    /// Downloads pending files directly to save_dir using
+    /// `tailscale file get --wait=false --conflict=overwrite`. Returns a JSON
+    /// array [{name, size}] of received files. Same approach as macOS.
+    fn try_cli_receive_files(save_dir: &str) -> Result<Vec<u8>, String> {
+        let output = tailscale_cmd()
+            .args(["file", "get", "--wait=false", "--verbose", "--conflict=overwrite", save_dir])
+            .output()
+            .map_err(|e| format!("Failed to run tailscale file get: {}", e))?;
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        log::debug!(
+            "Windows CLI auto-receive: exit={} stdout_len={} stderr_len={}",
+            output.status,
+            stdout.len(),
+            stderr.len()
+        );
+        // Parse "moved X/Y files" from stdout.
+        let moved_line = stdout.lines().find(|l| l.contains("moved") && l.contains("files"));
+        let count = match moved_line {
+            Some(line) => {
+                let nums: Vec<&str> = line
+                    .split_whitespace()
+                    .filter(|w| w.chars().all(|c| c.is_ascii_digit() || c == '/'))
+                    .collect();
+                if let Some(fraction) = nums.first() {
+                    let moved = fraction.split('/').next().and_then(|n| n.parse::<usize>().ok());
+                    log::debug!(
+                        "Windows CLI auto-receive: parsed '{}' → {} files",
+                        line,
+                        moved.unwrap_or(0)
+                    );
+                    moved.unwrap_or(0)
+                } else {
+                    0
+                }
+            }
+            None => {
+                if !stdout.trim().is_empty() {
+                    log::debug!(
+                        "Windows CLI auto-receive: unexpected stdout: {:?}",
+                        stdout.lines().take(3).collect::<Vec<_>>()
+                    );
+                }
+                0
+            }
+        };
+        if count == 0 {
+            return Ok(b"[]".to_vec());
+        }
+        // List the most recently modified files in save_dir matching the count.
+        let entries = match std::fs::read_dir(save_dir) {
+            Ok(entries) => {
+                let mut files: Vec<_> = entries
+                    .filter_map(|e| e.ok())
+                    .filter(|e| e.file_type().map(|t| t.is_file()).unwrap_or(false))
+                    .collect();
+                files.sort_by(|a, b| {
+                    let ma = a.metadata().and_then(|m| m.modified()).ok();
+                    let mb = b.metadata().and_then(|m| m.modified()).ok();
+                    mb.cmp(&ma)
+                });
+                files.into_iter().take(count).collect::<Vec<_>>()
+            }
+            Err(e) => {
+                log::debug!(
+                    "Windows CLI auto-receive: can't read save_dir '{}': {}",
+                    save_dir,
+                    e
+                );
+                return Ok(b"[]".to_vec());
+            }
+        };
+        let mut json_entries: Vec<String> = Vec::new();
+        for entry in entries {
+            let name = entry.file_name().to_string_lossy().to_string();
+            let size = entry.metadata().map(|m| m.len()).unwrap_or(0);
+            let escaped = name.replace('\\', "\\\\").replace('"', "\\\"");
+            json_entries.push(format!(r#"{{"name":"{}","size":{}}}"#, escaped, size));
+        }
+        log::debug!(
+            "Windows CLI auto-receive: returning {} file(s) already saved to '{}'",
+            json_entries.len(),
+            save_dir
+        );
+        let json = format!("[{}]", json_entries.join(","));
+        Ok(json.into_bytes())
+    }
+
     pub async fn fetch_status_json() -> Result<Vec<u8>, String> {
         tokio::time::timeout(
             std::time::Duration::from_secs(120),
@@ -1438,22 +1527,34 @@ mod platform {
         Ok(response[header_end + 4..].to_vec())
     }
 
-    pub async fn get_incoming_files(_save_dir: &str) -> Result<Vec<u8>, String> {
+    pub async fn get_incoming_files(save_dir: &str) -> Result<Vec<u8>, String> {
+        let save_dir = save_dir.to_string();
         tokio::time::timeout(
             std::time::Duration::from_secs(120),
-            tokio::task::spawn_blocking(|| {
+            tokio::task::spawn_blocking(move || {
                 match try_pipe_get("/localapi/v0/files/") {
-                    Ok(data) => Ok(data),
+                    Ok(data) => {
+                        log::debug!(
+                            "Windows: pipe file listing OK ({} bytes)",
+                            data.len()
+                        );
+                        Ok(data)
+                    }
                     Err(e) => {
-                        use std::sync::Once;
-                        static LOG_ONCE: Once = Once::new();
-                        LOG_ONCE.call_once(|| {
-                            log::warn!(
-                                "Windows: pipe file listing unavailable ({}), incoming files won't be detected",
-                                e
+                        // Always log (not Once-gated) so the DebugPanel shows
+                        // the real error on every poll.
+                        log::debug!("Windows: pipe file listing failed: {}", e);
+                        if e.starts_with("open pipe:") {
+                            // Named pipe unavailable — fall back to CLI auto-receive
+                            // (same approach as macOS when the socket is missing).
+                            log::debug!(
+                                "Windows: falling back to CLI auto-receive to '{}'",
+                                save_dir
                             );
-                        });
-                        Ok(b"[]".to_vec())
+                            try_cli_receive_files(&save_dir)
+                        } else {
+                            Ok(b"[]".to_vec())
+                        }
                     }
                 }
             }),
