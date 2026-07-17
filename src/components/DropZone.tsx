@@ -3,6 +3,7 @@ import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { open } from "@tauri-apps/plugin-dialog";
 import type { Peer } from "../types";
 import { useToast } from "./ToastProvider";
+import { useModal } from "../hooks/useModal";
 import { logger } from "../lib/logger";
 
 interface DropZoneProps {
@@ -39,18 +40,15 @@ export function DropZone({ selectedPeer, onSendFiles, peers }: DropZoneProps) {
   // Keep ref in sync for the Tauri event listener
   processRef.current = processFiles;
 
-  // Escape to close peer picker
-  useEffect(() => {
-    if (!showPeerPicker) return;
-    const handleKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") {
-        setShowPeerPicker(false);
-        setPendingPaths([]);
-      }
-    };
-    document.addEventListener("keydown", handleKey);
-    return () => document.removeEventListener("keydown", handleKey);
-  }, [showPeerPicker]);
+  // Peer picker modal: useModal handles Escape + focus, onClose clears state.
+  const closePeerPicker = useCallback(() => {
+    setShowPeerPicker(false);
+    setPendingPaths([]);
+  }, []);
+  const { overlayRef: pickerRef, overlayProps: pickerProps } = useModal(
+    closePeerPicker,
+    showPeerPicker,
+  );
 
   // Tauri native drag-and-drop — gives file paths directly
   useEffect(() => {
@@ -147,7 +145,7 @@ export function DropZone({ selectedPeer, onSendFiles, peers }: DropZoneProps) {
       </div>
 
       {showPeerPicker && pendingPaths.length > 0 && (
-        <div className="peer-picker-overlay" onClick={() => setShowPeerPicker(false)}>
+        <div className="peer-picker-overlay" ref={pickerRef} {...pickerProps} onClick={closePeerPicker}>
           <div className="peer-picker" onClick={(e) => e.stopPropagation()}>
             <h3>Send {pendingPaths.length} file(s) to:</h3>
             <div className="peer-picker-list">

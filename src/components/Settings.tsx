@@ -3,6 +3,7 @@ import { enable, disable, isEnabled } from "@tauri-apps/plugin-autostart";
 import { open } from "@tauri-apps/plugin-dialog";
 import { getVersion } from "@tauri-apps/api/app";
 import { useToast } from "./ToastProvider";
+import { useModal } from "../hooks/useModal";
 import type { UseUpdaterApi } from "../hooks/useUpdater";
 import type { Peer, AppSettings } from "../types";
 
@@ -19,6 +20,7 @@ export function Settings({ settings, allPeers, onUpdate, onClose, updater }: Set
   const [autoStart, setAutoStart] = useState(false);
   const [appVersion, setAppVersion] = useState("");
   const toast = useToast();
+  const { overlayRef, overlayProps } = useModal(onClose);
 
   useEffect(() => {
     getVersion()
@@ -29,14 +31,6 @@ export function Settings({ settings, allPeers, onUpdate, onClose, updater }: Set
   useEffect(() => {
     isEnabled().then(setAutoStart);
   }, []);
-
-  useEffect(() => {
-    const handleKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") onClose();
-    };
-    document.addEventListener("keydown", handleKey);
-    return () => document.removeEventListener("keydown", handleKey);
-  }, [onClose]);
 
   const toggleAutoStart = async (checked: boolean) => {
     try {
@@ -74,7 +68,7 @@ export function Settings({ settings, allPeers, onUpdate, onClose, updater }: Set
   };
 
   return (
-    <div className="settings-overlay" onClick={onClose}>
+    <div className="settings-overlay" ref={overlayRef} {...overlayProps} onClick={onClose}>
       <div className="settings-panel" onClick={(e) => e.stopPropagation()}>
         <div className="settings-header">
           <h2>Settings</h2>

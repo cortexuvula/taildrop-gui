@@ -63,6 +63,7 @@ export function TransferHistory({
               <button
                 className="btn-accept"
                 onClick={() => { onAcceptFile(file.name); }}
+                aria-label={`Accept ${file.name}`}
               >
                 Accept
               </button>

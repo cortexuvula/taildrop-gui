@@ -829,3 +829,98 @@ body {
   word-break: break-all;
   color: #ccc;
 }
+
+/* ===== Debug Panel table ===== */
+.debug-panel {
+  max-width: 800px;
+  width: 90vw;
+}
+
+.debug-header-actions {
+  display: flex;
+  gap: 8px;
+  /* float is a no-op on flex items, so this is harmless inside the flex
+     .settings-header. It lets the same class right-align the action
+     buttons inside the block-level Logs label below without an inline style. */
+  float: right;
+}
+
+.debug-stats {
+  display: flex;
+  gap: 16px;
+  margin-bottom: 12px;
+  font-size: 13px;
+}
+
+.debug-stats .online {
+  color: var(--green);
+}
+
+.debug-stats .offline {
+  color: var(--text-muted);
+}
+
+.debug-table {
+  width: 100%;
+  font-size: 12px;
+  border-collapse: collapse;
+}
+
+.debug-th {
+  padding: 4px 8px;
+  text-align: left;
+  border-bottom: 1px solid var(--border);
+}
+
+.debug-td {
+  padding: 4px 8px;
+}
+
+.debug-td.muted {
+  color: var(--text-secondary);
+}
+
+.debug-td.small {
+  font-size: 11px;
+  color: var(--text-secondary);
+}
+
+.debug-row {
+  border-bottom: 1px solid var(--border);
+}
+
+.debug-row.offline {
+  opacity: 0.45;
+}
+
+.debug-td.self {
+  font-weight: 700;
+}
+
+.debug-you {
+  margin-left: 4px;
+  font-size: 10px;
+  color: var(--text-muted);
+}
+
+.debug-online-dot {
+  color: var(--green);
+}
+
+.debug-offline-dot {
+  color: var(--text-muted);
+}
+
+.debug-raw-json {
+  background: var(--bg-primary);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 12px;
+  font-size: 11px;
+  font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  max-height: 220px;
+  overflow-y: auto;
+  white-space: pre-wrap;
+  word-break: break-all;
+  color: var(--text-primary);
+}
