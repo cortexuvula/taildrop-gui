@@ -370,7 +370,7 @@ mod platform {
         let url: hyper::Uri = hyperlocal::Uri::new(SOCKET_PATH, path).into();
         let req = Request::builder()
             .uri(url)
-            .header("Host", LOCALAPI_HOST)
+            .header("Host", super::LOCALAPI_HOST)
             .body(Full::new(Bytes::new()))
             .map_err(|e| format!("Failed to build request: {}", e))?;
         let resp = make_client()
@@ -385,7 +385,7 @@ mod platform {
         let req = Request::builder()
             .method(hyper::Method::DELETE)
             .uri(url)
-            .header("Host", LOCALAPI_HOST)
+            .header("Host", super::LOCALAPI_HOST)
             .body(Full::new(Bytes::new()))
             .map_err(|e| format!("Failed to build request: {}", e))?;
         let resp = make_client()
@@ -431,7 +431,9 @@ mod platform {
         // Write HTTP/1.1 request with Content-Length
         let request = format!(
             "PUT {} HTTP/1.1\r\nHost: {}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
-            api_path, LOCALAPI_HOST, file_size
+            api_path,
+            super::LOCALAPI_HOST,
+            file_size
         );
         tokio::time::timeout(timeout, stream.write_all(request.as_bytes()))
             .await
