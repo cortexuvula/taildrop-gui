@@ -1,6 +1,10 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
+/// Host header used in all raw HTTP requests to the Tailscale localapi.
+/// Tailscale's daemon expects this exact value.
+const LOCALAPI_HOST: &str = "local-tailscaled.sock";
+
 // --- Tailscale API Types ---
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -123,8 +127,108 @@ fn accept_file_with_getter(
     ))
 }
 
+/// Shared CLI auto-receive logic for macOS/Windows. Runs
+/// `tailscale file get --wait=false --conflict=overwrite <save_dir>` (via the
+/// platform-specific `run_get` closure), parses the "moved N/N files" output,
+/// and returns a JSON array of the received files.
+///
+/// `platform_label` is used in log messages ("macOS" / "Windows").
+fn cli_receive_files(
+    save_dir: &str,
+    platform_label: &str,
+    run_get: impl FnOnce(&str) -> Result<std::process::Output, String>,
+) -> Result<Vec<u8>, String> {
+    let output = run_get(save_dir)?;
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    log::debug!(
+        "{} CLI auto-receive: exit={} stdout_len={} stderr_len={}",
+        platform_label,
+        output.status,
+        stdout.len(),
+        stderr.len()
+    );
+    // Parse "moved X/Y files" from stdout.
+    let moved_line = stdout.lines().find(|l| l.contains("moved") && l.contains("files"));
+    let count = match moved_line {
+        Some(line) => {
+            let nums: Vec<&str> = line
+                .split_whitespace()
+                .filter(|w| w.chars().all(|c| c.is_ascii_digit() || c == '/'))
+                .collect();
+            if let Some(fraction) = nums.first() {
+                let moved = fraction.split('/').next().and_then(|n| n.parse::<usize>().ok());
+                log::debug!(
+                    "{} CLI auto-receive: parsed '{}' → {} files",
+                    platform_label,
+                    line,
+                    moved.unwrap_or(0)
+                );
+                moved.unwrap_or(0)
+            } else {
+                0
+            }
+        }
+        None => {
+            if !stdout.trim().is_empty() {
+                log::debug!(
+                    "{} CLI auto-receive: unexpected stdout: {:?}",
+                    platform_label,
+                    stdout.lines().take(3).collect::<Vec<_>>()
+                );
+            }
+            0
+        }
+    };
+    if count == 0 {
+        return Ok(b"[]".to_vec());
+    }
+    // List the most recently modified files in save_dir matching the count.
+    let entries = match std::fs::read_dir(save_dir) {
+        Ok(entries) => {
+            let mut files: Vec<_> = entries
+                .filter_map(|e| e.ok())
+                .filter(|e| e.file_type().map(|t| t.is_file()).unwrap_or(false))
+                .collect();
+            files.sort_by(|a, b| {
+                let ma = a.metadata().and_then(|m| m.modified()).ok();
+                let mb = b.metadata().and_then(|m| m.modified()).ok();
+                mb.cmp(&ma)
+            });
+            files.into_iter().take(count).collect::<Vec<_>>()
+        }
+        Err(e) => {
+            log::debug!(
+                "{} CLI auto-receive: can't read save_dir '{}': {}",
+                platform_label,
+                save_dir,
+                e
+            );
+            return Ok(b"[]".to_vec());
+        }
+    };
+    // Build [{name, size}] JSON using serde (correct escaping).
+    let files: Vec<IncomingFile> = entries
+        .iter()
+        .map(|e| IncomingFile {
+            name: e.file_name().to_string_lossy().to_string(),
+            size: e.metadata().map(|m| m.len()).unwrap_or(0),
+            peer_name: None,
+        })
+        .collect();
+    log::debug!(
+        "{} CLI auto-receive: returning {} file(s) already saved to '{}'",
+        platform_label,
+        files.len(),
+        save_dir
+    );
+    let json = serde_json::to_string(&files)
+        .map_err(|e| format!("Failed to serialize file list: {}", e))?;
+    Ok(json.into_bytes())
+}
+
 // ============================================================
-// Shared helpers (used by multiple platform modules)
+// Shared accept_file helper for CLI-based platforms (macOS/Windows)
 // ============================================================
 
 /// Short, unique timestamp suffix for collision resolution.
@@ -244,7 +348,7 @@ mod platform {
         let url: hyper::Uri = hyperlocal::Uri::new(SOCKET_PATH, path).into();
         let req = Request::builder()
             .uri(url)
-            .header("Host", "local-tailscaled.sock")
+            .header("Host", LOCALAPI_HOST)
             .body(Full::new(Bytes::new()))
             .map_err(|e| format!("Failed to build request: {}", e))?;
         let resp = make_client()
@@ -259,7 +363,7 @@ mod platform {
         let req = Request::builder()
             .method(hyper::Method::DELETE)
             .uri(url)
-            .header("Host", "local-tailscaled.sock")
+            .header("Host", LOCALAPI_HOST)
             .body(Full::new(Bytes::new()))
             .map_err(|e| format!("Failed to build request: {}", e))?;
         let resp = make_client()
@@ -304,8 +408,8 @@ mod platform {
 
         // Write HTTP/1.1 request with Content-Length
         let request = format!(
-            "PUT {} HTTP/1.1\r\nHost: local-tailscaled.sock\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
-            api_path, file_size
+            "PUT {} HTTP/1.1\r\nHost: {}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            api_path, LOCALAPI_HOST, file_size
         );
         tokio::time::timeout(timeout, stream.write_all(request.as_bytes()))
             .await
@@ -513,8 +617,8 @@ mod platform {
             .map_err(|e| format!("Failed to connect to Tailscale daemon: {}", e))?;
 
         let request = format!(
-            "GET {} HTTP/1.0\r\nHost: local-tailscaled.sock\r\nConnection: close\r\n\r\n",
-            api_path
+            "GET {} HTTP/1.0\r\nHost: {}\r\nConnection: close\r\n\r\n",
+            api_path, super::LOCALAPI_HOST
         );
         tokio::time::timeout(
             std::time::Duration::from_secs(30),
@@ -813,8 +917,8 @@ mod platform {
 
         // Use HTTP/1.0 to guarantee non-chunked response and connection close
         let req = format!(
-            "GET {} HTTP/1.0\r\nHost: local-tailscaled.sock\r\n\r\n",
-            path
+            "GET {} HTTP/1.0\r\nHost: {}\r\n\r\n",
+            path, super::LOCALAPI_HOST
         );
         stream
             .write_all(req.as_bytes())
@@ -832,7 +936,12 @@ mod platform {
 
         let headers = String::from_utf8_lossy(&response[..header_end]);
         let status_line = headers.lines().next().unwrap_or("");
-        if !status_line.contains(" 200 ") {
+        let status_code: u16 = status_line
+            .split_whitespace()
+            .nth(1)
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(0);
+        if status_code != 200 {
             return Err(format!("HTTP error: {}", status_line));
         }
 
@@ -840,101 +949,13 @@ mod platform {
     }
 
     /// CLI auto-receive fallback for when the Unix socket is unavailable (the
-    /// macOS GUI install case). On macOS there is no way to LIST pending files
-    /// without DOWNLOADING them — the localapi socket is unavailable, status
-    /// JSON has no WaitingFiles field, and `tailscale file get --wait=false`
-    /// consumes files into the target directory.
-    ///
-    /// Uses `--conflict=overwrite` so files that were already downloaded by a
-    /// previous poll are overwritten and consumed from the inbox, preventing a
-    /// stuck loop where the same file blocks every subsequent poll.
-    ///
-    /// This function downloads any pending files directly to `save_dir` and
-    /// returns a JSON array `[{name, size}]` of the files that were received.
-    /// The frontend treats these as incoming files; since they're already on
-    /// disk, the accept path is a no-op (the file is already consumed from the
-    /// daemon's inbox).
+    /// macOS GUI install case). Delegates to the shared `cli_receive_files`
+    /// helper with the macOS-specific `tailscale_cmd` invocation.
     fn try_cli_receive_files(save_dir: &str) -> Result<Vec<u8>, String> {
-        let output = tailscale_cmd(&["file", "get", "--wait=false", "--verbose", "--conflict=overwrite", save_dir])
-            .map_err(|e| format!("Failed to run tailscale file get: {}", e))?;
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        log::debug!(
-            "macOS CLI auto-receive: exit={} stdout_len={} stderr_len={}",
-            output.status,
-            stdout.len(),
-            stderr.len()
-        );
-        // The CLI prints "moved X/Y files" to stdout. Parse to find how many
-        // files were received. If 0/0, nothing was pending.
-        let moved_line = stdout.lines().find(|l| l.contains("moved") && l.contains("files"));
-        let count = match moved_line {
-            Some(line) => {
-                // Parse "moved N/N files" — extract the first N (files moved).
-                let nums: Vec<&str> = line
-                    .split_whitespace()
-                    .filter(|w| w.chars().all(|c| c.is_ascii_digit() || c == '/'))
-                    .collect();
-                if let Some(fraction) = nums.first() {
-                    let moved = fraction.split('/').next().and_then(|n| n.parse::<usize>().ok());
-                    log::debug!("macOS CLI auto-receive: parsed '{}' → {} files", line, moved.unwrap_or(0));
-                    moved.unwrap_or(0)
-                } else {
-                    0
-                }
-            }
-            None => {
-                // No "moved" line — either no files or unexpected output format.
-                // If stdout is non-empty, log it for diagnosis.
-                if !stdout.trim().is_empty() {
-                    log::debug!("macOS CLI auto-receive: unexpected stdout: {:?}", stdout.lines().take(3).collect::<Vec<_>>());
-                }
-                0
-            }
-        };
-        if count == 0 {
-            return Ok(b"[]".to_vec());
-        }
-        // Files were downloaded to save_dir. We need to return their names so
-        // the frontend can show them. List the most recently modified files in
-        // save_dir (matching the count) — they're the ones just downloaded.
-        let entries = match std::fs::read_dir(save_dir) {
-            Ok(entries) => {
-                let mut files: Vec<_> = entries
-                    .filter_map(|e| e.ok())
-                    .filter(|e| e.file_type().map(|t| t.is_file()).unwrap_or(false))
-                    .collect();
-                // Sort by modified time descending (newest first).
-                files.sort_by(|a, b| {
-                    let ma = a.metadata().and_then(|m| m.modified()).ok();
-                    let mb = b.metadata().and_then(|m| m.modified()).ok();
-                    mb.cmp(&ma)
-                });
-                files.into_iter().take(count).collect::<Vec<_>>()
-            }
-            Err(e) => {
-                log::debug!("macOS CLI auto-receive: can't read save_dir '{}': {}", save_dir, e);
-                return Ok(b"[]".to_vec());
-            }
-        };
-        // Build [{name, size}] JSON using serde on the IncomingFile struct
-        // (correct escaping for newlines, tabs, control chars in filenames).
-        let files: Vec<super::IncomingFile> = entries
-            .iter()
-            .map(|e| super::IncomingFile {
-                name: e.file_name().to_string_lossy().to_string(),
-                size: e.metadata().map(|m| m.len()).unwrap_or(0),
-                peer_name: None,
-            })
-            .collect();
-        log::debug!(
-            "macOS CLI auto-receive: returning {} file(s) already saved to '{}'",
-            files.len(),
-            save_dir
-        );
-        let json = serde_json::to_string(&files)
-            .map_err(|e| format!("Failed to serialize file list: {}", e))?;
-        Ok(json.into_bytes())
+        super::cli_receive_files(save_dir, "macOS", |dir| {
+            tailscale_cmd(&["file", "get", "--wait=false", "--verbose", "--conflict=overwrite", dir])
+                .map_err(|e| format!("Failed to run tailscale file get: {}", e))
+        })
     }
 
     /// Outcome of [`try_socket_get_to_file`].
@@ -983,8 +1004,8 @@ mod platform {
             .map_err(|e| SocketGetError::Other(format!("timeout: {}", e)))?;
 
         let req = format!(
-            "GET {} HTTP/1.0\r\nHost: local-tailscaled.sock\r\nConnection: close\r\n\r\n",
-            path
+            "GET {} HTTP/1.0\r\nHost: {}\r\nConnection: close\r\n\r\n",
+            path, super::LOCALAPI_HOST
         );
         stream
             .write_all(req.as_bytes())
@@ -1095,8 +1116,8 @@ mod platform {
             .map_err(|e| format!("timeout: {}", e))?;
 
         let req = format!(
-            "DELETE {} HTTP/1.0\r\nHost: local-tailscaled.sock\r\nConnection: close\r\n\r\n",
-            path
+            "DELETE {} HTTP/1.0\r\nHost: {}\r\nConnection: close\r\n\r\n",
+            path, super::LOCALAPI_HOST
         );
         stream
             .write_all(req.as_bytes())
@@ -1351,94 +1372,15 @@ mod platform {
     }
 
     /// CLI auto-receive fallback for when the named pipe is unavailable.
-    /// Downloads pending files directly to save_dir using
-    /// `tailscale file get --wait=false --conflict=overwrite`. Returns a JSON
-    /// array [{name, size}] of received files. Same approach as macOS.
+    /// Delegates to the shared `cli_receive_files` helper with the
+    /// Windows-specific `tailscale_cmd` invocation.
     fn try_cli_receive_files(save_dir: &str) -> Result<Vec<u8>, String> {
-        let output = tailscale_cmd()
-            .args(["file", "get", "--wait=false", "--verbose", "--conflict=overwrite", save_dir])
-            .output()
-            .map_err(|e| format!("Failed to run tailscale file get: {}", e))?;
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        log::debug!(
-            "Windows CLI auto-receive: exit={} stdout_len={} stderr_len={}",
-            output.status,
-            stdout.len(),
-            stderr.len()
-        );
-        // Parse "moved X/Y files" from stdout.
-        let moved_line = stdout.lines().find(|l| l.contains("moved") && l.contains("files"));
-        let count = match moved_line {
-            Some(line) => {
-                let nums: Vec<&str> = line
-                    .split_whitespace()
-                    .filter(|w| w.chars().all(|c| c.is_ascii_digit() || c == '/'))
-                    .collect();
-                if let Some(fraction) = nums.first() {
-                    let moved = fraction.split('/').next().and_then(|n| n.parse::<usize>().ok());
-                    log::debug!(
-                        "Windows CLI auto-receive: parsed '{}' → {} files",
-                        line,
-                        moved.unwrap_or(0)
-                    );
-                    moved.unwrap_or(0)
-                } else {
-                    0
-                }
-            }
-            None => {
-                if !stdout.trim().is_empty() {
-                    log::debug!(
-                        "Windows CLI auto-receive: unexpected stdout: {:?}",
-                        stdout.lines().take(3).collect::<Vec<_>>()
-                    );
-                }
-                0
-            }
-        };
-        if count == 0 {
-            return Ok(b"[]".to_vec());
-        }
-        // List the most recently modified files in save_dir matching the count.
-        let entries = match std::fs::read_dir(save_dir) {
-            Ok(entries) => {
-                let mut files: Vec<_> = entries
-                    .filter_map(|e| e.ok())
-                    .filter(|e| e.file_type().map(|t| t.is_file()).unwrap_or(false))
-                    .collect();
-                files.sort_by(|a, b| {
-                    let ma = a.metadata().and_then(|m| m.modified()).ok();
-                    let mb = b.metadata().and_then(|m| m.modified()).ok();
-                    mb.cmp(&ma)
-                });
-                files.into_iter().take(count).collect::<Vec<_>>()
-            }
-            Err(e) => {
-                log::debug!(
-                    "Windows CLI auto-receive: can't read save_dir '{}': {}",
-                    save_dir,
-                    e
-                );
-                return Ok(b"[]".to_vec());
-            }
-        };
-        let files: Vec<super::IncomingFile> = entries
-            .iter()
-            .map(|e| super::IncomingFile {
-                name: e.file_name().to_string_lossy().to_string(),
-                size: e.metadata().map(|m| m.len()).unwrap_or(0),
-                peer_name: None,
-            })
-            .collect();
-        log::debug!(
-            "Windows CLI auto-receive: returning {} file(s) already saved to '{}'",
-            files.len(),
-            save_dir
-        );
-        let json = serde_json::to_string(&files)
-            .map_err(|e| format!("Failed to serialize file list: {}", e))?;
-        Ok(json.into_bytes())
+        super::cli_receive_files(save_dir, "Windows", |dir| {
+            tailscale_cmd()
+                .args(["file", "get", "--wait=false", "--verbose", "--conflict=overwrite", dir])
+                .output()
+                .map_err(|e| format!("Failed to run tailscale file get: {}", e))
+        })
     }
 
     pub async fn fetch_status_json() -> Result<Vec<u8>, String> {
@@ -1508,8 +1450,8 @@ mod platform {
             .map_err(|e| format!("open pipe: {}", e))?;
 
         let req = format!(
-            "GET {} HTTP/1.0\r\nHost: local-tailscaled.sock\r\n\r\n",
-            path
+            "GET {} HTTP/1.0\r\nHost: {}\r\n\r\n",
+            path, super::LOCALAPI_HOST
         );
         pipe.write_all(req.as_bytes())
             .map_err(|e| format!("write: {}", e))?;
@@ -1525,7 +1467,12 @@ mod platform {
 
         let headers = String::from_utf8_lossy(&response[..header_end]);
         let status_line = headers.lines().next().unwrap_or("");
-        if !status_line.contains(" 200 ") {
+        let status_code: u16 = status_line
+            .split_whitespace()
+            .nth(1)
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(0);
+        if status_code != 200 {
             return Err(format!("HTTP error: {}", status_line));
         }
 
