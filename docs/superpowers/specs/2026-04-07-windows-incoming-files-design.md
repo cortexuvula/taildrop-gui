@@ -1,7 +1,21 @@
 # Windows Incoming File Detection via Named Pipe
 
 **Date:** 2026-04-07
-**Status:** Approved
+**Status:** SUPERSEDED — see revision note below
+
+> **Revision (2026-07-13):** This spec described the original design using
+> `std::sync::Once`-gated logging and silent `[]` return on failure. The
+> shipped implementation (v0.9.3+) intentionally diverged:
+> - The `Once` gate was removed; failures are logged on every poll for
+>   DebugPanel visibility.
+> - A `try_cli_receive_files` CLI auto-receive fallback was added (v0.9.8)
+>   for when the named pipe is inaccessible (non-admin), mirroring the macOS
+>   fallback pattern.
+> - `get_incoming_files` now takes a `save_dir` parameter, threaded through
+>   from the frontend, used by the CLI fallback as the download target.
+> - Polling is 8s idle / 2s during active transfers (adaptive), not 5s.
+>
+> This document is preserved as a historical design record.
 
 ## Problem
 

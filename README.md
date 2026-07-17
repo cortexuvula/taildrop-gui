@@ -6,7 +6,7 @@ A drag-and-drop file transfer desktop app for Tailscale Taildrop. Built with Tau
 
 - **Node Discovery** — auto-discovers all Tailscale peers with online/offline status, sorted alphabetically
 - **Drag & Drop Sending** — drop files onto a node card or the drop zone to send via Taildrop
-- **File Receiving** — polls for incoming files with accept/save workflow (Linux; macOS when socket is accessible)
+- **File Receiving** — polls for incoming files with accept/save workflow (all platforms; macOS and Windows auto-receive via CLI fallback when socket/pipe is unavailable)
 - **Auto-Accept** — optionally auto-accept incoming files to a configured directory
 - **Desktop Notifications** — opt-in native notifications when files arrive
 - **Transfer History** — persistent history of sent/received files with timestamps and status (survives app restarts)
@@ -57,13 +57,15 @@ The production build output will be in `src-tauri/target/release/bundle/`.
 ```
 taildrop-gui/
 ├── src/                    # React frontend
-│   ├── components/         # UI components (Sidebar, DropZone, TransferHistory, Settings, DebugPanel)
-│   ├── hooks/              # useTailscale hook (state management + Tauri IPC)
+│   ├── components/         # UI components (Sidebar, DropZone, TransferHistory, Settings, DebugPanel, ToastProvider)
+│   ├── hooks/              # useTailscale, useUpdater, useDebugLogs (state management + Tauri IPC)
+│   ├── lib/                # logger.ts, toErrorMsg.ts (shared utils)
 │   └── types/              # TypeScript interfaces
 ├── src-tauri/              # Rust backend
 │   └── src/
 │       ├── lib.rs          # Tauri commands (IPC bridge)
 │       ├── tailscale.rs    # Platform-specific Tailscale communication
+│       ├── debug_log.rs    # In-memory log sink for DebugPanel
 │       └── main.rs         # Entry point
 ```
 
@@ -74,12 +76,14 @@ taildrop-gui/
 | Platform | Method | Details |
 |----------|--------|---------|
 | **Linux** | LocalAPI (Unix socket) | Connects to `/var/run/tailscale/tailscaled.sock` via `hyperlocal` + `hyper`. Uses peer stable node ID for file transfers. Full incoming file support. |
-| **macOS** | CLI + socket fallback | Sends files via `tailscale` CLI (avoids socket permission issues with signed .app bundles). Attempts Unix socket for incoming file listing; falls back gracefully if inaccessible. |
-| **Windows** | CLI (`tailscale.exe`) | Invokes `tailscale.exe` with `CREATE_NO_WINDOW` flag. Uses peer hostname for file transfers. Incoming file listing not yet supported (CLI limitation). |
+| **macOS** | Socket-first, CLI fallback | Tries Unix socket for all operations; falls back to `tailscale` CLI when socket is unavailable (App Store installs). Incoming files are auto-received to the save directory via CLI when the socket is inaccessible. |
+| **Windows** | Named pipe, CLI fallback | Tries the Tailscale named pipe for incoming file detection; falls back to `tailscale.exe file get` CLI auto-receive when the pipe is inaccessible (non-admin). Sends via CLI with `CREATE_NO_WINDOW`. |
 
-**Linux note:** You may need elevated permissions or group membership to access the Tailscale socket.
+**Linux note:** Run `sudo tailscale set --operator=$USER` once to grant your user access to the Tailscale socket without needing root.
 
-**macOS note:** Incoming file detection works when the Tailscale Unix socket is accessible (e.g., Homebrew installs). App Store installs with restricted socket permissions will not detect incoming files.
+**macOS note:** The macOS GUI Tailscale daemon uses a TCP loopback port instead of a Unix socket, so the socket path is usually unavailable. Incoming files are auto-downloaded to your save directory via the CLI fallback.
+
+**Windows note:** The named pipe requires admin privileges. Without elevation, incoming files are auto-downloaded to your save directory via the CLI fallback.
 
 ## CI
 
