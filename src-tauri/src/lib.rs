@@ -39,10 +39,7 @@ async fn send_file(
         let tid = transfer_id.clone();
         tokio::spawn(async move {
             for pct in [10u8, 30, 60, 90] {
-                tokio::time::sleep(std::time::Duration::from_millis(
-                    (pct as u64) * 20,
-                ))
-                .await;
+                tokio::time::sleep(std::time::Duration::from_millis((pct as u64) * 20)).await;
                 let _ = app.emit(
                     "transfer-progress",
                     serde_json::json!({ "transferId": tid, "progress": pct }),

@@ -75,6 +75,7 @@ function App() {
   } = useTailscale({ onSendError });
 
   // Mount-time diagnostic: one summary log (not per-render noise).
+  // Intentionally empty deps — we only want this on first mount.
   useEffect(() => {
     logger.debug("App", "started — online peers:", peers.filter((p) => p.online && !p.is_self).length);
     // eslint-disable-next-line react-hooks/exhaustive-deps

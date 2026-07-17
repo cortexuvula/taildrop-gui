@@ -1,8 +1,8 @@
+use log::{Level, Log, Metadata, Record};
+use serde::Serialize;
 use std::collections::VecDeque;
 use std::sync::{LazyLock, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
-use log::{Level, Log, Metadata, Record};
-use serde::Serialize;
 
 const MAX_ENTRIES: usize = 500;
 const CAPTURE_LEVEL: Level = Level::Debug;

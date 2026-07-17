@@ -50,6 +50,25 @@ jobs:
       - name: Build frontend
         run: npm run build
 
+      - name: Frontend tests
+        if: matrix.os == 'ubuntu-22.04'
+        run: npm test
+
+      - name: Rust formatting check
+        if: matrix.os == 'ubuntu-22.04'
+        run: cargo fmt --all -- --check
+        working-directory: src-tauri
+
+      - name: Rust clippy
+        if: matrix.os == 'ubuntu-22.04'
+        run: cargo clippy --all-targets -- -D warnings
+        working-directory: src-tauri
+
+      - name: Rust tests
+        if: matrix.os == 'ubuntu-22.04'
+        run: cargo test
+        working-directory: src-tauri
+
       - name: Build Tauri (debug)
         uses: tauri-apps/tauri-action@v0
         env:

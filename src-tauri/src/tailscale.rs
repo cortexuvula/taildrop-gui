@@ -149,7 +149,9 @@ fn cli_receive_files(
         stderr.len()
     );
     // Parse "moved X/Y files" from stdout.
-    let moved_line = stdout.lines().find(|l| l.contains("moved") && l.contains("files"));
+    let moved_line = stdout
+        .lines()
+        .find(|l| l.contains("moved") && l.contains("files"));
     let count = match moved_line {
         Some(line) => {
             let nums: Vec<&str> = line
@@ -157,7 +159,10 @@ fn cli_receive_files(
                 .filter(|w| w.chars().all(|c| c.is_ascii_digit() || c == '/'))
                 .collect();
             if let Some(fraction) = nums.first() {
-                let moved = fraction.split('/').next().and_then(|n| n.parse::<usize>().ok());
+                let moved = fraction
+                    .split('/')
+                    .next()
+                    .and_then(|n| n.parse::<usize>().ok());
                 log::debug!(
                     "{} CLI auto-receive: parsed '{}' → {} files",
                     platform_label,
@@ -435,9 +440,7 @@ mod platform {
                     return Err(read_daemon_error(&mut stream, &e).await);
                 }
                 Err(_) => {
-                    return Err(
-                        "Timeout writing file data to Tailscale daemon".to_string(),
-                    );
+                    return Err("Timeout writing file data to Tailscale daemon".to_string());
                 }
             }
         }
@@ -531,11 +534,7 @@ mod platform {
     /// Parses the daemon's raw HTTP error response into a human-readable error
     /// string. Extracts the status code and body when possible; falls back to
     /// including the raw response text if parsing fails.
-    fn parse_daemon_http_error(
-        response: &[u8],
-        write_err: &str,
-        is_broken_pipe: bool,
-    ) -> String {
+    fn parse_daemon_http_error(response: &[u8], write_err: &str, is_broken_pipe: bool) -> String {
         let text = String::from_utf8_lossy(response);
 
         // Split headers from body at the first "\r\n\r\n".
@@ -558,9 +557,7 @@ mod platform {
         // operator privileges. The daemon returns 403 "file access denied" —
         // which misleadingly sounds like a receiver-side issue. Rewrite it to
         // the actionable guidance the Tailscale CLI itself prints.
-        if status_code == Some(403)
-            && body_trimmed.to_ascii_lowercase().contains("access denied")
-        {
+        if status_code == Some(403) && body_trimmed.to_ascii_lowercase().contains("access denied") {
             return "Access denied to the Tailscale socket. \
                     Run this once: sudo tailscale set --operator=$USER"
                 .to_string();
@@ -618,7 +615,8 @@ mod platform {
 
         let request = format!(
             "GET {} HTTP/1.0\r\nHost: {}\r\nConnection: close\r\n\r\n",
-            api_path, super::LOCALAPI_HOST
+            api_path,
+            super::LOCALAPI_HOST
         );
         tokio::time::timeout(
             std::time::Duration::from_secs(30),
@@ -716,7 +714,11 @@ mod platform {
 
     /// Streams file from disk to socket instead of loading entire file into memory.
     /// Uses the peer's stable node ID (peer_id) for the localapi path.
-    pub async fn send_file(peer_id: &str, _peer_name: &str, file_path: &str) -> Result<String, String> {
+    pub async fn send_file(
+        peer_id: &str,
+        _peer_name: &str,
+        file_path: &str,
+    ) -> Result<String, String> {
         let metadata = tokio::fs::metadata(file_path)
             .await
             .map_err(|e| format!("Failed to stat file '{}': {}", file_path, e))?;
@@ -764,7 +766,8 @@ mod platform {
             if let Err(e) = delete_request(&delete_path).await {
                 log::warn!(
                     "Failed to delete pending file '{}' from Tailscale: {}",
-                    name, e
+                    name,
+                    e
                 );
             }
 
@@ -886,15 +889,13 @@ mod platform {
         let binary = find_tailscale().unwrap_or("tailscale");
         // Quote binary path and each argument to handle spaces/special chars
         let escaped_binary = format!("'{}'", binary.replace('\'', "'\\''"));
-        let escaped_args: Vec<String> = args.iter().map(|a| {
-            format!("'{}'", a.replace('\'', "'\\''"))
-        }).collect();
+        let escaped_args: Vec<String> = args
+            .iter()
+            .map(|a| format!("'{}'", a.replace('\'', "'\\''")))
+            .collect();
         let shell_cmd = format!("{} {}", escaped_binary, escaped_args.join(" "));
         log::debug!("macOS shell cmd: /bin/sh -c {}", shell_cmd);
-        Command::new("/bin/sh")
-            .arg("-c")
-            .arg(&shell_cmd)
-            .output()
+        Command::new("/bin/sh").arg("-c").arg(&shell_cmd).output()
     }
 
     const SOCKET_PATH: &str = "/var/run/tailscale/tailscaled.sock";
@@ -906,11 +907,10 @@ mod platform {
     /// so read_to_end will read the complete response body without needing to
     /// parse chunked Transfer-Encoding.
     fn try_socket_get(path: &str) -> Result<Vec<u8>, String> {
-        use std::os::unix::net::UnixStream;
         use std::io::{Read, Write};
+        use std::os::unix::net::UnixStream;
 
-        let mut stream = UnixStream::connect(SOCKET_PATH)
-            .map_err(|e| format!("connect: {}", e))?;
+        let mut stream = UnixStream::connect(SOCKET_PATH).map_err(|e| format!("connect: {}", e))?;
         stream
             .set_read_timeout(Some(std::time::Duration::from_secs(3)))
             .map_err(|e| format!("timeout: {}", e))?;
@@ -918,7 +918,8 @@ mod platform {
         // Use HTTP/1.0 to guarantee non-chunked response and connection close
         let req = format!(
             "GET {} HTTP/1.0\r\nHost: {}\r\n\r\n",
-            path, super::LOCALAPI_HOST
+            path,
+            super::LOCALAPI_HOST
         );
         stream
             .write_all(req.as_bytes())
@@ -953,8 +954,15 @@ mod platform {
     /// helper with the macOS-specific `tailscale_cmd` invocation.
     fn try_cli_receive_files(save_dir: &str) -> Result<Vec<u8>, String> {
         super::cli_receive_files(save_dir, "macOS", |dir| {
-            tailscale_cmd(&["file", "get", "--wait=false", "--verbose", "--conflict=overwrite", dir])
-                .map_err(|e| format!("Failed to run tailscale file get: {}", e))
+            tailscale_cmd(&[
+                "file",
+                "get",
+                "--wait=false",
+                "--verbose",
+                "--conflict=overwrite",
+                dir,
+            ])
+            .map_err(|e| format!("Failed to run tailscale file get: {}", e))
         })
     }
 
@@ -1005,7 +1013,8 @@ mod platform {
 
         let req = format!(
             "GET {} HTTP/1.0\r\nHost: {}\r\nConnection: close\r\n\r\n",
-            path, super::LOCALAPI_HOST
+            path,
+            super::LOCALAPI_HOST
         );
         stream
             .write_all(req.as_bytes())
@@ -1109,15 +1118,15 @@ mod platform {
         use std::io::{Read, Write};
         use std::os::unix::net::UnixStream;
 
-        let mut stream = UnixStream::connect(SOCKET_PATH)
-            .map_err(|e| format!("connect: {}", e))?;
+        let mut stream = UnixStream::connect(SOCKET_PATH).map_err(|e| format!("connect: {}", e))?;
         stream
             .set_read_timeout(Some(std::time::Duration::from_secs(5)))
             .map_err(|e| format!("timeout: {}", e))?;
 
         let req = format!(
             "DELETE {} HTTP/1.0\r\nHost: {}\r\nConnection: close\r\n\r\n",
-            path, super::LOCALAPI_HOST
+            path,
+            super::LOCALAPI_HOST
         );
         stream
             .write_all(req.as_bytes())
@@ -1161,11 +1170,12 @@ mod platform {
                 let binary_path = find_tailscale().unwrap_or("tailscale");
                 log::debug!("macOS fetch_status_json: binary={}", binary_path);
 
-                let output = tailscale_cmd(&["status", "--json"])
-                    .map_err(|e| format!(
+                let output = tailscale_cmd(&["status", "--json"]).map_err(|e| {
+                    format!(
                         "Could not run tailscale CLI [tried: {}]: {}",
                         binary_path, e
-                    ))?;
+                    )
+                })?;
 
                 let stdout = String::from_utf8_lossy(&output.stdout);
                 let stderr = String::from_utf8_lossy(&output.stderr);
@@ -1198,7 +1208,11 @@ mod platform {
     }
 
     /// Send file to peer using tailscale CLI. Non-blocking via spawn_blocking.
-    pub async fn send_file(_peer_id: &str, peer_name: &str, file_path: &str) -> Result<String, String> {
+    pub async fn send_file(
+        _peer_id: &str,
+        peer_name: &str,
+        file_path: &str,
+    ) -> Result<String, String> {
         let peer_name = peer_name.to_string();
         let file_path = file_path.to_string();
         // Adaptive timeout: 120s base + 60s per MB, capped at 600s
@@ -1228,10 +1242,7 @@ mod platform {
             tokio::task::spawn_blocking(move || {
                 match try_socket_get("/localapi/v0/files/") {
                     Ok(data) => {
-                        log::debug!(
-                            "macOS: socket file listing OK ({} bytes)",
-                            data.len()
-                        );
+                        log::debug!("macOS: socket file listing OK ({} bytes)", data.len());
                         Ok(data)
                     }
                     Err(e) => {
@@ -1281,8 +1292,7 @@ mod platform {
                     .file_name()
                     .and_then(|n| n.to_str())
                     .ok_or_else(|| "Invalid filename".to_string())?;
-                let save_path =
-                    super::unique_save_path(std::path::Path::new(&save_dir), safe_name);
+                let save_path = super::unique_save_path(std::path::Path::new(&save_dir), safe_name);
                 let api_path = format!("/localapi/v0/files/{}", super::url_encode(&name));
 
                 // Try the socket first (streams large files without buffering).
@@ -1294,7 +1304,8 @@ mod platform {
                         if let Err(e) = try_socket_delete(&delete_path) {
                             log::warn!(
                                 "Failed to delete pending file '{}' from Tailscale: {}",
-                                name, e
+                                name,
+                                e
                             );
                         }
                         Ok(save_path.to_string_lossy().to_string())
@@ -1377,7 +1388,14 @@ mod platform {
     fn try_cli_receive_files(save_dir: &str) -> Result<Vec<u8>, String> {
         super::cli_receive_files(save_dir, "Windows", |dir| {
             tailscale_cmd()
-                .args(["file", "get", "--wait=false", "--verbose", "--conflict=overwrite", dir])
+                .args([
+                    "file",
+                    "get",
+                    "--wait=false",
+                    "--verbose",
+                    "--conflict=overwrite",
+                    dir,
+                ])
                 .output()
                 .map_err(|e| format!("Failed to run tailscale file get: {}", e))
         })
@@ -1390,10 +1408,18 @@ mod platform {
                 let output = tailscale_cmd()
                     .args(["status", "--json"])
                     .output()
-                    .map_err(|e| format!(
-                        "Could not run tailscale CLI. Make sure Tailscale is installed and in your PATH: {}",
-                        e
-                    ))?;
+                    .map_err(|e| {
+                        format!(
+                            "Could not run tailscale CLI. Make sure Tailscale is installed and in your PATH: {}",
+                            e
+                        )
+                    })?;
+                log::debug!(
+                    "Windows CLI result: exit={} stdout_len={} stderr_len={}",
+                    output.status,
+                    output.stdout.len(),
+                    output.stderr.len()
+                );
                 if !output.status.success() {
                     let stderr = String::from_utf8_lossy(&output.stderr);
                     return Err(format!("tailscale status failed: {}", stderr));
@@ -1407,7 +1433,11 @@ mod platform {
     }
 
     /// Send file to peer using tailscale CLI. Non-blocking via spawn_blocking.
-    pub async fn send_file(_peer_id: &str, peer_name: &str, file_path: &str) -> Result<String, String> {
+    pub async fn send_file(
+        _peer_id: &str,
+        peer_name: &str,
+        file_path: &str,
+    ) -> Result<String, String> {
         let peer_name = peer_name.to_string();
         let file_path = file_path.to_string();
         // Adaptive timeout: 120s base + 60s per MB, capped at 600s
@@ -1424,6 +1454,11 @@ mod platform {
                     let stderr = String::from_utf8_lossy(&output.stderr);
                     return Err(format!("tailscale file cp failed: {}", stderr));
                 }
+                let filename = std::path::Path::new(&file_path)
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or("file");
+                log::debug!("Sent {} to {}", filename, peer_name);
                 Ok(format!("Sent file to {}", peer_name))
             }),
         )
@@ -1451,7 +1486,8 @@ mod platform {
 
         let req = format!(
             "GET {} HTTP/1.0\r\nHost: {}\r\n\r\n",
-            path, super::LOCALAPI_HOST
+            path,
+            super::LOCALAPI_HOST
         );
         pipe.write_all(req.as_bytes())
             .map_err(|e| format!("write: {}", e))?;
@@ -1486,10 +1522,7 @@ mod platform {
             tokio::task::spawn_blocking(move || {
                 match try_pipe_get("/localapi/v0/files/") {
                     Ok(data) => {
-                        log::debug!(
-                            "Windows: pipe file listing OK ({} bytes)",
-                            data.len()
-                        );
+                        log::debug!("Windows: pipe file listing OK ({} bytes)", data.len());
                         Ok(data)
                     }
                     Err(e) => {
@@ -1572,8 +1605,8 @@ fn prettify_name(name: &str) -> String {
             // Common abbreviations that should be uppercase
             let upper = word.to_uppercase();
             match upper.as_str() {
-                "XL" | "XS" | "SE" | "TV" | "PC" | "NAS" | "VM" | "VPN"
-                | "USB" | "NUC" | "AI" | "IO" | "UK" | "US" | "EU" => upper,
+                "XL" | "XS" | "SE" | "TV" | "PC" | "NAS" | "VM" | "VPN" | "USB" | "NUC" | "AI"
+                | "IO" | "UK" | "US" | "EU" => upper,
                 _ => {
                     let mut chars = word.chars();
                     match chars.next() {
@@ -1590,14 +1623,13 @@ fn prettify_name(name: &str) -> String {
 pub async fn fetch_status() -> Result<Vec<Peer>, String> {
     let body = platform::fetch_status_json().await?;
     log::debug!("fetch_status: got {} bytes of JSON", body.len());
-    let status: TailscaleStatus =
-        serde_json::from_slice(&body).map_err(|e| {
-            log::error!("fetch_status: PARSE ERROR: {}", e);
-            // Log first 200 chars of body for diagnosis
-            let preview = String::from_utf8_lossy(&body[..body.len().min(200)]);
-            log::debug!("JSON preview: {}", preview);
-            format!("Failed to parse status: {}", e)
-        })?;
+    let status: TailscaleStatus = serde_json::from_slice(&body).map_err(|e| {
+        log::error!("fetch_status: PARSE ERROR: {}", e);
+        // Log first 200 chars of body for diagnosis
+        let preview = String::from_utf8_lossy(&body[..body.len().min(200)]);
+        log::debug!("JSON preview: {}", preview);
+        format!("Failed to parse status: {}", e)
+    })?;
 
     let mut peers = Vec::new();
 
@@ -1643,7 +1675,11 @@ pub async fn fetch_status() -> Result<Vec<Peer>, String> {
         }
     }
 
-    peers.sort_by(|a, b| a.display_name.to_lowercase().cmp(&b.display_name.to_lowercase()));
+    peers.sort_by(|a, b| {
+        a.display_name
+            .to_lowercase()
+            .cmp(&b.display_name.to_lowercase())
+    });
 
     Ok(peers)
 }
