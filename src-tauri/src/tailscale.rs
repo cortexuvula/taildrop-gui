@@ -5,6 +5,23 @@ use std::collections::HashMap;
 /// Tailscale's daemon expects this exact value.
 const LOCALAPI_HOST: &str = "local-tailscaled.sock";
 
+/// Error type for socket/pipe operations that distinguishes "transport
+/// unavailable" (socket/pipe missing — safe to fall back to CLI) from
+/// "transport connected but request failed" (HTTP error — must propagate).
+/// Used by macOS `try_socket_get`/`try_socket_get_to_file` and Windows
+/// `try_pipe_get`, and consumed by `get_incoming_files`/`accept_file` to
+/// decide whether the CLI fallback is appropriate.
+#[derive(Debug)]
+pub(crate) enum SocketGetError {
+    /// `UnixStream::connect` / pipe open failed — the socket/pipe is missing
+    /// or inaccessible. Falling back to the CLI is the intended behaviour.
+    Connect(String),
+    /// The socket/pipe connected but the HTTP request/response failed (HTTP
+    /// error status, transport failure mid-response, malformed headers, disk
+    /// write error, …). Must be propagated, not swallowed.
+    Other(String),
+}
+
 // --- Tailscale API Types ---
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -906,14 +923,15 @@ mod platform {
     /// Uses HTTP/1.0 which guarantees non-chunked responses and connection close,
     /// so read_to_end will read the complete response body without needing to
     /// parse chunked Transfer-Encoding.
-    fn try_socket_get(path: &str) -> Result<Vec<u8>, String> {
+    fn try_socket_get(path: &str) -> Result<Vec<u8>, super::SocketGetError> {
         use std::io::{Read, Write};
         use std::os::unix::net::UnixStream;
 
-        let mut stream = UnixStream::connect(SOCKET_PATH).map_err(|e| format!("connect: {}", e))?;
+        let mut stream = UnixStream::connect(SOCKET_PATH)
+            .map_err(|e| super::SocketGetError::Connect(format!("connect: {}", e)))?;
         stream
             .set_read_timeout(Some(std::time::Duration::from_secs(3)))
-            .map_err(|e| format!("timeout: {}", e))?;
+            .map_err(|e| super::SocketGetError::Other(format!("timeout: {}", e)))?;
 
         // Use HTTP/1.0 to guarantee non-chunked response and connection close
         let req = format!(
@@ -923,17 +941,17 @@ mod platform {
         );
         stream
             .write_all(req.as_bytes())
-            .map_err(|e| format!("write: {}", e))?;
+            .map_err(|e| super::SocketGetError::Other(format!("write: {}", e)))?;
 
         let mut response = Vec::new();
         stream
             .read_to_end(&mut response)
-            .map_err(|e| format!("read: {}", e))?;
+            .map_err(|e| super::SocketGetError::Other(format!("read: {}", e)))?;
 
         let header_end = response
             .windows(4)
             .position(|w| w == b"\r\n\r\n")
-            .ok_or_else(|| "Invalid HTTP response".to_string())?;
+            .ok_or_else(|| super::SocketGetError::Other("Invalid HTTP response".to_string()))?;
 
         let headers = String::from_utf8_lossy(&response[..header_end]);
         let status_line = headers.lines().next().unwrap_or("");
@@ -943,7 +961,10 @@ mod platform {
             .and_then(|s| s.parse().ok())
             .unwrap_or(0);
         if status_code != 200 {
-            return Err(format!("HTTP error: {}", status_line));
+            return Err(super::SocketGetError::Other(format!(
+                "HTTP error: {}",
+                status_line
+            )));
         }
 
         Ok(response[header_end + 4..].to_vec())
@@ -966,23 +987,9 @@ mod platform {
         })
     }
 
-    /// Outcome of [`try_socket_get_to_file`].
-    ///
-    /// Distinguishes "the Unix socket itself is unavailable" (the App Store
-    /// install case) from "the socket connected but the request failed". The
-    /// caller uses this to decide whether falling back to the `tailscale file
-    /// get` CLI is safe — a transient daemon error (HTTP 5xx, 4xx) should be
-    /// surfaced, not masked by the CLI downloading *every* pending file into
-    /// `save_dir`.
-    enum SocketGetError {
-        /// `UnixStream::connect` failed — the socket is missing or
-        /// inaccessible. Falling back to the CLI is the intended behaviour.
-        Connect(String),
-        /// The socket connected but the HTTP request/response failed (HTTP
-        /// error status, transport failure mid-response, malformed headers,
-        /// disk write error, …). Must be propagated, not swallowed.
-        Other(String),
-    }
+    // SocketGetError is defined at crate root (super::SocketGetError).
+    // It distinguishes Connect (socket unavailable → CLI fallback safe)
+    // from Other (HTTP error → must propagate).
 
     /// Stream a GET response from the Tailscale Unix socket directly to disk.
     ///
@@ -1001,15 +1008,15 @@ mod platform {
     fn try_socket_get_to_file(
         path: &str,
         save_path: &std::path::Path,
-    ) -> Result<(), SocketGetError> {
+    ) -> Result<(), super::SocketGetError> {
         use std::io::{Read, Write};
         use std::os::unix::net::UnixStream;
 
         let mut stream = UnixStream::connect(SOCKET_PATH)
-            .map_err(|e| SocketGetError::Connect(format!("connect: {}", e)))?;
+            .map_err(|e| super::SocketGetError::Connect(format!("connect: {}", e)))?;
         stream
             .set_read_timeout(Some(std::time::Duration::from_secs(30)))
-            .map_err(|e| SocketGetError::Other(format!("timeout: {}", e)))?;
+            .map_err(|e| super::SocketGetError::Other(format!("timeout: {}", e)))?;
 
         let req = format!(
             "GET {} HTTP/1.0\r\nHost: {}\r\nConnection: close\r\n\r\n",
@@ -1018,7 +1025,7 @@ mod platform {
         );
         stream
             .write_all(req.as_bytes())
-            .map_err(|e| SocketGetError::Other(format!("write: {}", e)))?;
+            .map_err(|e| super::SocketGetError::Other(format!("write: {}", e)))?;
 
         // Read headers incrementally until we find the \r\n\r\n boundary.
         // Any body bytes that arrive in the same buffer must be written to
@@ -1029,9 +1036,9 @@ mod platform {
         let header_end = loop {
             let n = stream
                 .read(&mut temp_buf)
-                .map_err(|e| SocketGetError::Other(format!("read headers: {}", e)))?;
+                .map_err(|e| super::SocketGetError::Other(format!("read headers: {}", e)))?;
             if n == 0 {
-                return Err(SocketGetError::Other(
+                return Err(super::SocketGetError::Other(
                     "Connection closed before headers received".to_string(),
                 ));
             }
@@ -1040,7 +1047,7 @@ mod platform {
                 break pos;
             }
             if header_buf.len() > 65536 {
-                return Err(SocketGetError::Other(
+                return Err(super::SocketGetError::Other(
                     "Response headers too large".to_string(),
                 ));
             }
@@ -1063,7 +1070,7 @@ mod platform {
             loop {
                 let n = stream
                     .read(&mut temp_buf)
-                    .map_err(|e| SocketGetError::Other(format!("read error body: {}", e)))?;
+                    .map_err(|e| super::SocketGetError::Other(format!("read error body: {}", e)))?;
                 if n == 0 {
                     break;
                 }
@@ -1072,7 +1079,7 @@ mod platform {
                     break;
                 }
             }
-            return Err(SocketGetError::Other(format!(
+            return Err(super::SocketGetError::Other(format!(
                 "Tailscale API error ({}): {}",
                 status_code,
                 String::from_utf8_lossy(&err_body)
@@ -1084,11 +1091,11 @@ mod platform {
         // also carries the start of the body).
         let body_start = header_end + 4;
         let mut file = std::fs::File::create(save_path).map_err(|e| {
-            SocketGetError::Other(format!("create file '{}': {}", save_path.display(), e))
+            super::SocketGetError::Other(format!("create file '{}': {}", save_path.display(), e))
         })?;
         if body_start < header_buf.len() {
             file.write_all(&header_buf[body_start..])
-                .map_err(|e| SocketGetError::Other(format!("write body to file: {}", e)))?;
+                .map_err(|e| super::SocketGetError::Other(format!("write body to file: {}", e)))?;
         }
 
         // Stream the remaining body to disk in 8 KB chunks. HTTP/1.0 + the
@@ -1097,12 +1104,12 @@ mod platform {
         loop {
             let n = stream
                 .read(&mut temp_buf)
-                .map_err(|e| SocketGetError::Other(format!("read body: {}", e)))?;
+                .map_err(|e| super::SocketGetError::Other(format!("read body: {}", e)))?;
             if n == 0 {
                 break;
             }
             file.write_all(&temp_buf[..n])
-                .map_err(|e| SocketGetError::Other(format!("write body to file: {}", e)))?;
+                .map_err(|e| super::SocketGetError::Other(format!("write body to file: {}", e)))?;
         }
 
         Ok(())
@@ -1239,34 +1246,19 @@ mod platform {
         let save_dir = save_dir.to_string();
         tokio::time::timeout(
             std::time::Duration::from_secs(120),
-            tokio::task::spawn_blocking(move || {
-                match try_socket_get("/localapi/v0/files/") {
-                    Ok(data) => {
-                        log::debug!("macOS: socket file listing OK ({} bytes)", data.len());
-                        Ok(data)
-                    }
-                    Err(e) => {
-                        // Always log (not Once-gated) so the DebugPanel shows
-                        // the real error on every poll while the panel is open.
-                        log::debug!("macOS: socket file listing failed: {}", e);
-                        if e.starts_with("connect:") {
-                            // Socket unavailable (macOS GUI install uses a TCP
-                            // loopback port, not a Unix socket). Fall back to
-                            // the CLI auto-receive: download pending files
-                            // directly to the save dir (there is no pure
-                            // "list" CLI command on macOS — file get consumes).
-                            log::debug!(
-                                "macOS: falling back to CLI auto-receive to '{}'",
-                                save_dir
-                            );
-                            try_cli_receive_files(&save_dir)
-                        } else {
-                            // HTTP/transport error — don't mask with CLI.
-                            // Return empty so the UI degrades gracefully; the
-                            // error is logged above for diagnosis.
-                            Ok(b"[]".to_vec())
-                        }
-                    }
+            tokio::task::spawn_blocking(move || match try_socket_get("/localapi/v0/files/") {
+                Ok(data) => {
+                    log::debug!("macOS: socket file listing OK ({} bytes)", data.len());
+                    Ok(data)
+                }
+                Err(super::SocketGetError::Connect(e)) => {
+                    log::debug!("macOS: socket file listing failed (connect): {}", e);
+                    log::debug!("macOS: falling back to CLI auto-receive to '{}'", save_dir);
+                    try_cli_receive_files(&save_dir)
+                }
+                Err(super::SocketGetError::Other(e)) => {
+                    log::debug!("macOS: socket file listing failed: {}", e);
+                    Ok(b"[]".to_vec())
                 }
             }),
         )
@@ -1310,7 +1302,7 @@ mod platform {
                         }
                         Ok(save_path.to_string_lossy().to_string())
                     }
-                    Err(SocketGetError::Connect(socket_err)) => {
+                    Err(super::SocketGetError::Connect(socket_err)) => {
                         // The Unix socket is missing/inaccessible (e.g. App
                         // Store install) — fall back to the `tailscale file
                         // get` CLI. This is the only case where falling back
@@ -1333,7 +1325,7 @@ mod platform {
                             Ok(())
                         })
                     }
-                    Err(SocketGetError::Other(http_err)) => {
+                    Err(super::SocketGetError::Other(http_err)) => {
                         // The socket connected but the request failed (HTTP
                         // 4xx/5xx, transport failure mid-response, disk write
                         // error, …). Propagate the real error instead of
@@ -1474,7 +1466,7 @@ mod platform {
     /// Uses HTTP/1.0 which guarantees non-chunked responses and connection close,
     /// so read_to_end will read the complete response body without needing to
     /// parse chunked Transfer-Encoding.
-    fn try_pipe_get(path: &str) -> Result<Vec<u8>, String> {
+    fn try_pipe_get(path: &str) -> Result<Vec<u8>, super::SocketGetError> {
         use std::fs::OpenOptions;
         use std::io::{Read, Write};
 
@@ -1482,7 +1474,7 @@ mod platform {
             .read(true)
             .write(true)
             .open(PIPE_PATH)
-            .map_err(|e| format!("open pipe: {}", e))?;
+            .map_err(|e| super::SocketGetError::Connect(format!("open pipe: {}", e)))?;
 
         let req = format!(
             "GET {} HTTP/1.0\r\nHost: {}\r\n\r\n",
@@ -1490,16 +1482,16 @@ mod platform {
             super::LOCALAPI_HOST
         );
         pipe.write_all(req.as_bytes())
-            .map_err(|e| format!("write: {}", e))?;
+            .map_err(|e| super::SocketGetError::Other(format!("write: {}", e)))?;
 
         let mut response = Vec::new();
         pipe.read_to_end(&mut response)
-            .map_err(|e| format!("read: {}", e))?;
+            .map_err(|e| super::SocketGetError::Other(format!("read: {}", e)))?;
 
         let header_end = response
             .windows(4)
             .position(|w| w == b"\r\n\r\n")
-            .ok_or_else(|| "Invalid HTTP response".to_string())?;
+            .ok_or_else(|| super::SocketGetError::Other("Invalid HTTP response".to_string()))?;
 
         let headers = String::from_utf8_lossy(&response[..header_end]);
         let status_line = headers.lines().next().unwrap_or("");
@@ -1509,7 +1501,10 @@ mod platform {
             .and_then(|s| s.parse().ok())
             .unwrap_or(0);
         if status_code != 200 {
-            return Err(format!("HTTP error: {}", status_line));
+            return Err(super::SocketGetError::Other(format!(
+                "HTTP error: {}",
+                status_line
+            )));
         }
 
         Ok(response[header_end + 4..].to_vec())
@@ -1519,28 +1514,22 @@ mod platform {
         let save_dir = save_dir.to_string();
         tokio::time::timeout(
             std::time::Duration::from_secs(120),
-            tokio::task::spawn_blocking(move || {
-                match try_pipe_get("/localapi/v0/files/") {
-                    Ok(data) => {
-                        log::debug!("Windows: pipe file listing OK ({} bytes)", data.len());
-                        Ok(data)
-                    }
-                    Err(e) => {
-                        // Always log (not Once-gated) so the DebugPanel shows
-                        // the real error on every poll.
-                        log::debug!("Windows: pipe file listing failed: {}", e);
-                        if e.starts_with("open pipe:") {
-                            // Named pipe unavailable — fall back to CLI auto-receive
-                            // (same approach as macOS when the socket is missing).
-                            log::debug!(
-                                "Windows: falling back to CLI auto-receive to '{}'",
-                                save_dir
-                            );
-                            try_cli_receive_files(&save_dir)
-                        } else {
-                            Ok(b"[]".to_vec())
-                        }
-                    }
+            tokio::task::spawn_blocking(move || match try_pipe_get("/localapi/v0/files/") {
+                Ok(data) => {
+                    log::debug!("Windows: pipe file listing OK ({} bytes)", data.len());
+                    Ok(data)
+                }
+                Err(super::SocketGetError::Connect(e)) => {
+                    log::debug!("Windows: pipe file listing failed (connect): {}", e);
+                    log::debug!(
+                        "Windows: falling back to CLI auto-receive to '{}'",
+                        save_dir
+                    );
+                    try_cli_receive_files(&save_dir)
+                }
+                Err(super::SocketGetError::Other(e)) => {
+                    log::debug!("Windows: pipe file listing failed: {}", e);
+                    Ok(b"[]".to_vec())
                 }
             }),
         )
