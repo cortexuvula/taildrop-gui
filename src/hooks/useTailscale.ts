@@ -9,6 +9,7 @@ import {
 import type { Peer, IncomingFile, TransferRecord, AppSettings } from "../types";
 import { logger } from "../lib/logger";
 import { toErrorMsg } from "../lib/toErrorMsg";
+import { loadStored, saveStored } from "../lib/storage";
 
 const DEFAULT_SETTINGS: AppSettings = {
   hiddenNodes: [],
@@ -39,19 +40,14 @@ export function useTailscale(options?: UseTailscaleOptions) {
   const [peers, setPeers] = useState<Peer[]>([]);
   const [incomingFiles, setIncomingFiles] = useState<IncomingFile[]>([]);
   const [transfers, setTransfers] = useState<TransferRecord[]>(() => {
-    const saved = localStorage.getItem("taildrop-transfers");
-    if (saved) {
-      try {
-        const parsed: TransferRecord[] = JSON.parse(saved);
-        // Mark stale in-progress transfers from previous session
-        return parsed.map((t) =>
-          t.status === "sending" || t.status === "pending"
-            ? { ...t, status: "error" as const, error: "Interrupted — app was closed" }
-            : t
-        );
-      } catch {
-        localStorage.removeItem("taildrop-transfers");
-      }
+    const stored = loadStored<TransferRecord[]>("taildrop-transfers");
+    if (stored) {
+      // Mark stale in-progress transfers from previous session
+      return stored.map((t) =>
+        t.status === "sending" || t.status === "pending"
+          ? { ...t, status: "error" as const, error: "Interrupted — app was closed" }
+          : t
+      );
     }
     return [];
   });
@@ -75,18 +71,13 @@ export function useTailscale(options?: UseTailscaleOptions) {
 
   // Load settings from localStorage (with validation)
   useEffect(() => {
-    const saved = localStorage.getItem("taildrop-settings");
-    if (saved) {
-      try {
-        const parsed = JSON.parse(saved);
-        // Validate critical fields to prevent crashes from corrupted data
-        if (parsed.hiddenNodes && !Array.isArray(parsed.hiddenNodes)) {
-          parsed.hiddenNodes = [];
-        }
-        setSettings({ ...DEFAULT_SETTINGS, ...parsed });
-      } catch {
-        localStorage.removeItem("taildrop-settings");
+    const stored = loadStored<AppSettings>("taildrop-settings");
+    if (stored) {
+      // Validate critical fields to prevent crashes from corrupted data
+      if (stored.hiddenNodes && !Array.isArray(stored.hiddenNodes)) {
+        stored.hiddenNodes = [];
       }
+      setSettings({ ...DEFAULT_SETTINGS, ...stored });
     }
     // Get default download dir
     invoke<string>("get_default_download_dir")
@@ -105,15 +96,13 @@ export function useTailscale(options?: UseTailscaleOptions) {
   useEffect(() => {
     const timeout = setTimeout(() => {
       try {
-        localStorage.setItem("taildrop-transfers", JSON.stringify(transfers));
+        saveStored("taildrop-transfers", transfers);
       } catch (e) {
         if (e instanceof DOMException && e.name === "QuotaExceededError") {
           logger.warn("useTailscale", "localStorage quota exceeded, pruning oldest transfers");
           const pruned = transfers.slice(0, Math.floor(transfers.length / 2));
           try {
-            localStorage.setItem("taildrop-transfers", JSON.stringify(pruned));
-            // Keep in-memory state in sync with the persisted list so the next
-            // render doesn't re-attempt to persist the full (oversized) array.
+            saveStored("taildrop-transfers", pruned);
             setTransfers(pruned);
           } catch {
             // still can't write after pruning — give up silently
@@ -128,7 +117,7 @@ export function useTailscale(options?: UseTailscaleOptions) {
   const updateSettings = useCallback((update: Partial<AppSettings>) => {
     setSettings((prev) => {
       const next = { ...prev, ...update };
-      localStorage.setItem("taildrop-settings", JSON.stringify(next));
+      saveStored("taildrop-settings", next);
       return next;
     });
   }, []);
