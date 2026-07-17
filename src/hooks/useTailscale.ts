@@ -8,6 +8,7 @@ import {
 } from "@tauri-apps/plugin-notification";
 import type { Peer, IncomingFile, TransferRecord, AppSettings } from "../types";
 import { logger } from "../lib/logger";
+import { toErrorMsg } from "../lib/toErrorMsg";
 
 const DEFAULT_SETTINGS: AppSettings = {
   hiddenNodes: [],
@@ -159,7 +160,7 @@ export function useTailscale(options?: UseTailscaleOptions) {
       setPeers(result);
       setError(null);
     } catch (e) {
-      setError(String(e));
+      setError(toErrorMsg(e));
     } finally {
       setLoading(false);
     }
@@ -204,7 +205,7 @@ export function useTailscale(options?: UseTailscaleOptions) {
                 direction: "received" as const,
                 timestamp: Date.now(),
                 status: "error" as const,
-                error: `Auto-accept failed: ${String(e)}`,
+                error: `Auto-accept failed: ${toErrorMsg(e)}`,
               },
               ...prev,
             ].slice(0, MAX_TRANSFER_HISTORY)
@@ -348,7 +349,7 @@ export function useTailscale(options?: UseTailscaleOptions) {
               )
             );
           } catch (e) {
-            const errorStr = String(e);
+            const errorStr = toErrorMsg(e);
             setTransfers((prev) =>
               prev.map((t) =>
                 t.id === record.id
@@ -400,7 +401,7 @@ export function useTailscale(options?: UseTailscaleOptions) {
         refreshIncoming();
         return savedPath;
       } catch (e) {
-        const errorStr = String(e);
+        const errorStr = toErrorMsg(e);
         setTransfers((prev) =>
           prev.map((t) =>
             t.id === id ? { ...t, status: "error", error: errorStr } : t

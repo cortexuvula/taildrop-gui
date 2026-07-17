@@ -36,3 +36,6 @@ Thumbs.db
 # Environment
 .env
 .env.*
+
+# Agent workspace
+.zcode/

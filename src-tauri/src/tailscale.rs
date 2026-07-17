@@ -917,20 +917,23 @@ mod platform {
                 return Ok(b"[]".to_vec());
             }
         };
-        // Build [{name, size}] JSON matching the IncomingFile struct shape.
-        let mut json_entries: Vec<String> = Vec::new();
-        for entry in entries {
-            let name = entry.file_name().to_string_lossy().to_string();
-            let size = entry.metadata().map(|m| m.len()).unwrap_or(0);
-            let escaped = name.replace('\\', "\\\\").replace('"', "\\\"");
-            json_entries.push(format!(r#"{{"name":"{}","size":{}}}"#, escaped, size));
-        }
+        // Build [{name, size}] JSON using serde on the IncomingFile struct
+        // (correct escaping for newlines, tabs, control chars in filenames).
+        let files: Vec<super::IncomingFile> = entries
+            .iter()
+            .map(|e| super::IncomingFile {
+                name: e.file_name().to_string_lossy().to_string(),
+                size: e.metadata().map(|m| m.len()).unwrap_or(0),
+                peer_name: None,
+            })
+            .collect();
         log::debug!(
             "macOS CLI auto-receive: returning {} file(s) already saved to '{}'",
-            json_entries.len(),
+            files.len(),
             save_dir
         );
-        let json = format!("[{}]", json_entries.join(","));
+        let json = serde_json::to_string(&files)
+            .map_err(|e| format!("Failed to serialize file list: {}", e))?;
         Ok(json.into_bytes())
     }
 
@@ -1420,19 +1423,21 @@ mod platform {
                 return Ok(b"[]".to_vec());
             }
         };
-        let mut json_entries: Vec<String> = Vec::new();
-        for entry in entries {
-            let name = entry.file_name().to_string_lossy().to_string();
-            let size = entry.metadata().map(|m| m.len()).unwrap_or(0);
-            let escaped = name.replace('\\', "\\\\").replace('"', "\\\"");
-            json_entries.push(format!(r#"{{"name":"{}","size":{}}}"#, escaped, size));
-        }
+        let files: Vec<super::IncomingFile> = entries
+            .iter()
+            .map(|e| super::IncomingFile {
+                name: e.file_name().to_string_lossy().to_string(),
+                size: e.metadata().map(|m| m.len()).unwrap_or(0),
+                peer_name: None,
+            })
+            .collect();
         log::debug!(
             "Windows CLI auto-receive: returning {} file(s) already saved to '{}'",
-            json_entries.len(),
+            files.len(),
             save_dir
         );
-        let json = format!("[{}]", json_entries.join(","));
+        let json = serde_json::to_string(&files)
+            .map_err(|e| format!("Failed to serialize file list: {}", e))?;
         Ok(json.into_bytes())
     }
 

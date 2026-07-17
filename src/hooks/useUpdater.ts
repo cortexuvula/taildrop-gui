@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { check as checkForUpdate, type Update } from "@tauri-apps/plugin-updater";
 import { relaunch } from "@tauri-apps/plugin-process";
+import { toErrorMsg } from "../lib/toErrorMsg";
 
 export type UpdateStatus =
   | "idle"
@@ -60,7 +61,7 @@ export function useUpdater(): UseUpdaterApi {
       }
     } catch (e) {
       updateRef.current = null;
-      setError(String(e));
+      setError(toErrorMsg(e));
       setStatus("error");
     } finally {
       checkingRef.current = false;
@@ -97,7 +98,7 @@ export function useUpdater(): UseUpdaterApi {
       // downloadAndInstall has written the new bundle; await relaunch.
       setStatus("ready");
     } catch (e) {
-      setError(String(e));
+      setError(toErrorMsg(e));
       setStatus("error");
     } finally {
       downloadingRef.current = false;
@@ -109,7 +110,7 @@ export function useUpdater(): UseUpdaterApi {
     try {
       await relaunch();
     } catch (e) {
-      setError(String(e));
+      setError(toErrorMsg(e));
       setStatus("error");
     }
   }, [status]);
