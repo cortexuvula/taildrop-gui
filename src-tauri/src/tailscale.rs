@@ -759,7 +759,16 @@ mod platform {
     }
 
     pub async fn get_incoming_files(_save_dir: &str) -> Result<Vec<u8>, String> {
-        get_request("/localapi/v0/files/").await
+        match get_request("/localapi/v0/files/").await {
+            Ok(data) => {
+                log::debug!("Linux: incoming files listing OK ({} bytes)", data.len());
+                Ok(data)
+            }
+            Err(e) => {
+                log::debug!("Linux: incoming files listing failed: {}", e);
+                Err(e)
+            }
+        }
     }
 
     /// Accept an incoming file. Streams response directly to disk instead of

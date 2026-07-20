@@ -7,6 +7,7 @@ import {
 } from "@tauri-apps/plugin-notification";
 import type { IncomingFile, TransferRecord, AppSettings } from "../types";
 import { toErrorMsg } from "../lib/toErrorMsg";
+import { logger } from "../lib/logger";
 
 const MAX_TRANSFER_HISTORY = 200;
 
@@ -167,8 +168,10 @@ export function useIncomingFiles(options: UseIncomingFilesOptions): UseIncomingF
       } else {
         setIncomingFiles(filtered);
       }
-    } catch {
-      // silently fail polling — daemon might be briefly unavailable
+    } catch (e) {
+      // Log but don't surface — daemon might be briefly unavailable.
+      // Using logger so it appears in the DebugPanel for diagnosis.
+      logger.debug("useIncomingFiles", "poll failed:", toErrorMsg(e));
     }
   }, [autoAcceptFiles, notifyIncoming, settingsRef]);
 
