@@ -33,6 +33,8 @@ function App() {
   useEffect(() => {
     const id = updateToastId.current;
     if (updater.status === "available") {
+      // Only create the toast once — avoid duplicates when the effect re-runs.
+      if (id) return;
       updateToastId.current = toast.info(
         `TailDrop ${updater.version} is available`,
         "Click to download and install the update.",
