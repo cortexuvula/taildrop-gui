@@ -67,7 +67,9 @@ pub struct Peer {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct IncomingFile {
+    #[serde(alias = "Name")]
     pub name: String,
+    #[serde(alias = "Size")]
     pub size: u64,
     /// Peer that sent the file, when the Tailscale localapi exposes it.
     /// Accepts both camelCase (`peerName`) and PascalCase (`PeerName`).
@@ -1694,6 +1696,12 @@ pub async fn send_file_to_peer(
 
 pub async fn fetch_incoming_files(save_dir: &str) -> Result<Vec<IncomingFile>, String> {
     let body = platform::get_incoming_files(save_dir).await?;
+    // The Tailscale daemon returns `null` (not `[]`) when no files are pending.
+    // Handle that gracefully instead of failing the parse.
+    let body_str = String::from_utf8_lossy(&body);
+    if body_str.trim() == "null" || body_str.trim().is_empty() {
+        return Ok(Vec::new());
+    }
     let files: Vec<IncomingFile> =
         serde_json::from_slice(&body).map_err(|e| format!("Failed to parse files: {}", e))?;
     Ok(files)
