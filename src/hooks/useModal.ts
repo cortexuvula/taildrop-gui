@@ -57,7 +57,7 @@ export function useModal(onClose: () => void, enabled: boolean = true) {
 
     overlay.addEventListener("keydown", handleTab);
     return () => overlay.removeEventListener("keydown", handleTab);
-  }, []);
+  }, [enabled]);
 
   const overlayProps: HTMLAttributes<HTMLDivElement> = {
     role: "dialog",

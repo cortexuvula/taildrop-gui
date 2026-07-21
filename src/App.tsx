@@ -61,7 +61,8 @@ function App() {
         updateToastId.current = null;
       }
     }
-  }, [updater.status, updater.progress, updater.version, toast, updater]);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [updater.status, updater.progress, updater.version, toast]);
 
   const {
     peers,

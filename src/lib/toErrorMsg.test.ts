@@ -10,12 +10,13 @@ describe("toErrorMsg", () => {
     expect(toErrorMsg("network timeout")).toBe("network timeout");
   });
 
-  it("does not return [object Object] for plain objects", () => {
+  it("extracts .message from Tauri IPC error objects", () => {
+    expect(toErrorMsg({ message: "daemon not running" })).toBe("daemon not running");
+    expect(toErrorMsg({ code: 403, message: "access denied" })).toBe("access denied");
+  });
+
+  it("falls back to [object Object] for objects without .message", () => {
     expect(toErrorMsg({ code: 403 })).toBe("[object Object]");
-    // This is the fallback — objects without a message get String'd.
-    // The key point: it doesn't throw, and it's not "[object Object]"
-    // for Error instances (the common case). For plain objects, the
-    // caller should stringify before throwing.
   });
 
   it("handles null gracefully", () => {

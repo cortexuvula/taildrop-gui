@@ -159,9 +159,11 @@ export function useIncomingFiles(options: UseIncomingFilesOptions): UseIncomingF
       }
       if (filtered.length > 0) {
         notifyIncoming(filtered);
-      } else {
-        seenIncomingRef.current.clear();
       }
+      // Note: do NOT clear seenIncomingRef on empty polls — a transient
+      // empty response would reset the dedup set and cause duplicate
+      // notifications on the next non-empty poll. Keys are pruned by
+      // notifyIncoming itself when files leave the list.
       if (settingsRef.current.autoAccept && filtered.length > 0) {
         setIncomingFiles([]);
         autoAcceptFiles(filtered);

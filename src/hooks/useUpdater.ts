@@ -18,7 +18,7 @@ export interface UseUpdaterApi {
   body?: string;
   progress?: number;
   error?: string;
-  check: () => Promise<void>;
+  check: () => Promise<UpdateStatus>;
   download: () => Promise<void>;
   install: () => Promise<void>;
   dismiss: () => void;
@@ -39,11 +39,12 @@ export function useUpdater(): UseUpdaterApi {
   const checkingRef = useRef(false);
   const downloadingRef = useRef(false);
 
-  const check = useCallback(async () => {
-    if (checkingRef.current) return;
+  const check = useCallback(async (): Promise<UpdateStatus> => {
+    if (checkingRef.current) return status;
     checkingRef.current = true;
     setStatus("checking");
     setError(undefined);
+    let result: UpdateStatus = "idle";
     try {
       const update = await checkForUpdate();
       if (update) {
@@ -52,20 +53,24 @@ export function useUpdater(): UseUpdaterApi {
         setDate(update.date);
         setBody(update.body);
         setStatus("available");
+        result = "available";
       } else {
         updateRef.current = null;
         setVersion(undefined);
         setDate(undefined);
         setBody(undefined);
         setStatus("idle");
+        result = "idle";
       }
     } catch (e) {
       updateRef.current = null;
       setError(toErrorMsg(e));
       setStatus("error");
+      result = "error";
     } finally {
       checkingRef.current = false;
     }
+    return result;
   }, []);
 
   const download = useCallback(async () => {

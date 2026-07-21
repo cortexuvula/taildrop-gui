@@ -1,4 +1,4 @@
-import { useRef, type RefObject } from "react";
+import { useCallback, useRef, type RefObject } from "react";
 import type { TransferRecord } from "../types";
 import { useSettings } from "./useSettings";
 import { usePeers } from "./usePeers";
@@ -56,12 +56,17 @@ export function useTailscale(options?: UseTailscaleOptions) {
     incomingBridgeRef,
   });
 
+  const appendTransfers = useCallback(
+    (records: TransferRecord[]) => {
+      setTransfers((prev) => [...records, ...prev].slice(0, MAX_TRANSFER_HISTORY));
+    },
+    [],
+  );
+
   const { incomingFiles, bridgeRef } = useIncomingFiles({
     settingsRef,
     transfers,
-    appendTransfers: (records: TransferRecord[]) => {
-      setTransfers((prev) => [...records, ...prev].slice(0, MAX_TRANSFER_HISTORY));
-    },
+    appendTransfers,
   });
   // Wire the incoming bridge into the ref useTransfers reads. The methods are
   // stable across renders; refreshIncoming is rebound each render.

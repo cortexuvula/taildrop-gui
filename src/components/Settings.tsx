@@ -56,13 +56,11 @@ export function Settings({ settings, allPeers, onUpdate, onClose, updater }: Set
   };
 
   const handleCheckUpdates = async () => {
-    const wasIdle = updater.status === "idle";
-    await updater.check();
-    // Surface terminal manual-check results via transient toasts.
+    const result = await updater.check();
     // "available" is handled by App's effect (persistent toast) — no duplicate.
-    if (updater.status === "idle" && !wasIdle) {
+    if (result === "idle") {
       toast.info("You're up to date", "TailDrop is on the latest version.");
-    } else if (updater.status === "error") {
+    } else if (result === "error") {
       toast.error("Couldn't check for updates", updater.error);
     }
   };

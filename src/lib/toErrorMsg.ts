@@ -9,5 +9,9 @@
 export function toErrorMsg(e: unknown): string {
   if (e instanceof Error) return e.message;
   if (typeof e === "string") return e;
+  // Tauri IPC errors often arrive as { message: "..." } objects.
+  if (e && typeof e === "object" && typeof (e as { message?: unknown }).message === "string") {
+    return (e as { message: string }).message;
+  }
   return String(e);
 }

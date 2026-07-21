@@ -60,7 +60,7 @@ export function useTransfers(options: UseTransfersOptions): UseTransfersResult {
 
   const [transfers, setTransfers] = useState<TransferRecord[]>(() => {
     const stored = loadStored<TransferRecord[]>("taildrop-transfers");
-    if (stored) {
+    if (stored && Array.isArray(stored)) {
       // Mark stale in-progress transfers from previous session
       return stored.map((t) =>
         t.status === "sending" || t.status === "pending"
