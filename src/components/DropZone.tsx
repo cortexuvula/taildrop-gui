@@ -30,11 +30,15 @@ export function DropZone({ selectedPeer, onSendFiles, peers }: DropZoneProps) {
       if (selectedPeer && selectedPeer.online) {
         onSendFiles(selectedPeer, paths);
       } else {
-        setPendingPaths(paths);
+        // Accumulate if the picker is already open — don't silently
+        // replace the previous drop's files.
+        setPendingPaths((prev) =>
+          showPeerPicker ? [...prev, ...paths] : paths,
+        );
         setShowPeerPicker(true);
       }
     },
-    [selectedPeer, onSendFiles]
+    [selectedPeer, onSendFiles, showPeerPicker]
   );
 
   // Keep ref in sync for the Tauri event listener

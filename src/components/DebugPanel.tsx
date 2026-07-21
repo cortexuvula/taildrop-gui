@@ -50,7 +50,9 @@ export function DebugPanel({ peers, onClose }: DebugPanelProps) {
   const handleCopy = () => {
     navigator.clipboard.writeText(jsonText).then(() => {
       setCopied(true);
-      setTimeout(() => setCopied(false), 2000);
+      window.setTimeout(() => setCopied(false), 2000);
+    }).catch(() => {
+      setCopied(false);
     });
   };
 
@@ -65,7 +67,9 @@ export function DebugPanel({ peers, onClose }: DebugPanelProps) {
     const header = `TailDrop v${appVersion} | ${envInfo}\nCaptured: ${new Date().toISOString()}\n${"=".repeat(60)}\n`;
     navigator.clipboard.writeText(header + logsText).then(() => {
       setCopiedLogs(true);
-      setTimeout(() => setCopiedLogs(false), 2000);
+      window.setTimeout(() => setCopiedLogs(false), 2000);
+    }).catch(() => {
+      setCopiedLogs(false);
     });
   };
 

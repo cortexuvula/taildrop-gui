@@ -157,13 +157,12 @@ export function useIncomingFiles(options: UseIncomingFilesOptions): UseIncomingF
       for (const [name, time] of recentlyAcceptedRef.current) {
         if (now - time > 30000) recentlyAcceptedRef.current.delete(name);
       }
-      if (filtered.length > 0) {
+      // Only notify for non-auto-accept mode — when auto-accept is on,
+      // files are handled silently and a desktop notification would be
+      // noisy for something the user doesn't need to act on.
+      if (filtered.length > 0 && !settingsRef.current.autoAccept) {
         notifyIncoming(filtered);
       }
-      // Note: do NOT clear seenIncomingRef on empty polls — a transient
-      // empty response would reset the dedup set and cause duplicate
-      // notifications on the next non-empty poll. Keys are pruned by
-      // notifyIncoming itself when files leave the list.
       if (settingsRef.current.autoAccept && filtered.length > 0) {
         setIncomingFiles([]);
         autoAcceptFiles(filtered);

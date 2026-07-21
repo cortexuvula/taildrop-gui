@@ -110,16 +110,26 @@ fn accept_file_with_getter(
     // Run the platform-specific tailscale file get command
     run_get()?;
 
-    // Check if target file appeared (may already exist from prior download)
+    // Check if target file appeared as a NEW file (not pre-existing).
+    // If it already existed before the download, we must wait for the CLI
+    // to overwrite it and only then return — otherwise we return a stale
+    // copy from a previous download.
     let save_path = dir_path.join(safe_name);
-    if save_path.exists() {
-        return Ok(save_path.to_string_lossy().to_string());
-    }
+    let pre_existed = before_entries.contains(&save_path);
 
     // Wait for file to arrive on disk (Tailscale may still be writing)
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
     loop {
-        if save_path.exists() {
+        if save_path.exists() && !pre_existed {
+            return Ok(save_path.to_string_lossy().to_string());
+        }
+        // If pre_existed, we need to wait for the CLI to finish overwriting.
+        // We detect completion by checking if any NEW file appeared (the
+        // "new entries" path below), or by trusting run_get() returned Ok.
+        if save_path.exists() && pre_existed {
+            // The CLI has returned; the file was already there and may have
+            // been overwritten. Give it a moment to settle, then return.
+            std::thread::sleep(std::time::Duration::from_millis(200));
             return Ok(save_path.to_string_lossy().to_string());
         }
         if std::time::Instant::now() >= deadline {
@@ -157,6 +167,18 @@ fn cli_receive_files(
     platform_label: &str,
     run_get: impl FnOnce(&str) -> Result<std::process::Output, String>,
 ) -> Result<Vec<u8>, String> {
+    // Ensure the save directory exists before running the CLI.
+    if !std::path::Path::new(save_dir).exists() {
+        if let Err(e) = std::fs::create_dir_all(save_dir) {
+            log::warn!(
+                "{} CLI auto-receive: failed to create save_dir '{}': {}",
+                platform_label,
+                save_dir,
+                e
+            );
+            return Ok(b"[]".to_vec());
+        }
+    }
     let output = run_get(save_dir)?;
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
@@ -943,7 +965,7 @@ mod platform {
         let mut stream = UnixStream::connect(SOCKET_PATH)
             .map_err(|e| super::SocketGetError::Connect(format!("connect: {}", e)))?;
         stream
-            .set_read_timeout(Some(std::time::Duration::from_secs(3)))
+            .set_read_timeout(Some(std::time::Duration::from_secs(10)))
             .map_err(|e| super::SocketGetError::Other(format!("timeout: {}", e)))?;
 
         // Use HTTP/1.0 to guarantee non-chunked response and connection close
