@@ -28,7 +28,6 @@ export function DebugPanel({ peers, onClose }: DebugPanelProps) {
   }, []);
 
   const debugData = {
-    timestamp: new Date().toISOString(),
     totalPeers: peers.length,
     onlinePeers: peers.filter((p) => p.online).length,
     offlinePeers: peers.filter((p) => !p.online).length,
@@ -48,7 +47,12 @@ export function DebugPanel({ peers, onClose }: DebugPanelProps) {
   const jsonText = JSON.stringify(debugData, null, 2);
 
   const handleCopy = () => {
-    navigator.clipboard.writeText(jsonText).then(() => {
+    const withTimestamp = JSON.stringify(
+      { timestamp: new Date().toISOString(), ...debugData },
+      null,
+      2,
+    );
+    navigator.clipboard.writeText(withTimestamp).then(() => {
       setCopied(true);
       window.setTimeout(() => setCopied(false), 2000);
     }).catch(() => {
