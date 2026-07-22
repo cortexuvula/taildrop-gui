@@ -132,7 +132,7 @@ export function DebugPanel({ peers, onClose }: DebugPanelProps) {
             <tbody>
               {peers.map((p) => (
                 <tr
-                  key={p.id || p.public_key}
+                  key={`${p.public_key}:${p.id}`}
                   className={`debug-row${p.online ? "" : " offline"}`}
                 >
                   <td className={`debug-td${p.is_self ? " self" : ""}`}>

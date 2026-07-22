@@ -89,7 +89,7 @@ export function Sidebar({
             </div>
             {onlinePeers.map((peer) => (
               <button
-                key={peer.id || peer.public_key}
+                key={`${peer.public_key}:${peer.id}`}
                 className={`peer-card ${selectedPeer?.id === peer.id ? "selected" : ""}`}
                 onClick={() => onSelectPeer(peer)}
               >
@@ -111,7 +111,7 @@ export function Sidebar({
             </div>
             {offlinePeers.map((peer) => (
               <button
-                key={peer.id || peer.public_key}
+                key={`${peer.public_key}:${peer.id}`}
                 className={`peer-card offline ${selectedPeer?.id === peer.id ? "selected" : ""}`}
                 onClick={() => onSelectPeer(peer)}
               >

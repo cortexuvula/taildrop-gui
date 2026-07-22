@@ -103,7 +103,12 @@ pub fn init() {
     }
     // Called once from run() at startup; single-threaded at that point.
     // Force LazyLock init, then hand set_logger a reference to the inner value.
-    let _ = log::set_logger(&*SINK);
+    if log::set_logger(&*SINK).is_err() {
+        // Another logger is already installed (e.g. a Tauri plugin called
+        // env_logger::init() first). Log to stderr directly since our sink
+        // isn't active.
+        eprintln!("debug_log: failed to install in-memory sink — another logger is already set");
+    }
     log::set_max_level(CAPTURE_LEVEL.to_level_filter());
 }
 

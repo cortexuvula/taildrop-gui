@@ -4,6 +4,7 @@ import { open } from "@tauri-apps/plugin-dialog";
 import { getVersion } from "@tauri-apps/api/app";
 import { useToast } from "./ToastProvider";
 import { useModal } from "../hooks/useModal";
+import { logger } from "../lib/logger";
 import type { UseUpdaterApi } from "../hooks/useUpdater";
 import type { Peer, AppSettings } from "../types";
 
@@ -18,6 +19,7 @@ interface SettingsProps {
 export function Settings({ settings, allPeers, onUpdate, onClose, updater }: SettingsProps) {
   const [nodeSearch, setNodeSearch] = useState("");
   const [autoStart, setAutoStart] = useState(false);
+  const [autoStartBusy, setAutoStartBusy] = useState(false);
   const [appVersion, setAppVersion] = useState("");
   const toast = useToast();
   const { overlayRef, overlayProps } = useModal(onClose);
@@ -25,7 +27,10 @@ export function Settings({ settings, allPeers, onUpdate, onClose, updater }: Set
   useEffect(() => {
     getVersion()
       .then(setAppVersion)
-      .catch(() => setAppVersion(""));
+      .catch((e) => {
+        logger.warn("Settings", "Could not get app version:", e);
+        setAppVersion("?");
+      });
   }, []);
 
   useEffect(() => {
@@ -33,6 +38,8 @@ export function Settings({ settings, allPeers, onUpdate, onClose, updater }: Set
   }, []);
 
   const toggleAutoStart = async (checked: boolean) => {
+    if (autoStartBusy) return;
+    setAutoStartBusy(true);
     try {
       if (checked) {
         await enable();
@@ -44,6 +51,8 @@ export function Settings({ settings, allPeers, onUpdate, onClose, updater }: Set
       // Revert to actual state on failure
       const actual = await isEnabled();
       setAutoStart(actual);
+    } finally {
+      setAutoStartBusy(false);
     }
   };
   const nonSelfPeers = allPeers.filter((p) => !p.is_self);
@@ -128,6 +137,7 @@ export function Settings({ settings, allPeers, onUpdate, onClose, updater }: Set
             <input
               type="checkbox"
               checked={autoStart}
+              disabled={autoStartBusy}
               onChange={(e) => toggleAutoStart(e.target.checked)}
             />
           </label>
@@ -184,7 +194,7 @@ export function Settings({ settings, allPeers, onUpdate, onClose, updater }: Set
                 );
               })
               .map((peer) => (
-                <label key={peer.id || peer.public_key} className="toggle-row">
+                <label key={`${peer.public_key}:${peer.id}`} className="toggle-row">
                   <span>
                     {peer.display_name}
                     <span className="peer-os-small">{peer.os}</span>
