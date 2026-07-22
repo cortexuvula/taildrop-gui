@@ -829,77 +829,6 @@ mod platform {
         .await
         .map_err(|_| "accept_file timed out".to_string())?
     }
-
-    #[cfg(test)]
-    mod tests {
-        use super::super::{prettify_name, unique_save_path, url_encode};
-        use super::*;
-
-        #[test]
-        fn url_encode_plain() {
-            assert_eq!(url_encode("hello"), "hello");
-        }
-
-        #[test]
-        fn url_encode_spaces() {
-            assert_eq!(url_encode("hello world"), "hello%20world");
-        }
-
-        #[test]
-        fn url_encode_slashes() {
-            assert_eq!(url_encode("path/to/file"), "path%2Fto%2Ffile");
-        }
-
-        #[test]
-        fn url_encode_unreserved() {
-            // - _ . ~ should NOT be encoded
-            assert_eq!(url_encode("-_.~"), "-_.~");
-        }
-
-        #[test]
-        fn url_encode_unicode() {
-            // UTF-8 bytes for 'é' are 0xC3 0xA9
-            assert_eq!(url_encode("é"), "%C3%A9");
-        }
-
-        #[test]
-        fn prettify_basic() {
-            assert_eq!(prettify_name("my-laptop"), "My Laptop");
-        }
-
-        #[test]
-        fn prettify_abbreviations() {
-            assert_eq!(prettify_name("pixel-10-pro-xl"), "Pixel 10 Pro XL");
-            assert_eq!(prettify_name("home-nas"), "Home NAS");
-        }
-
-        #[test]
-        fn prettify_underscores() {
-            assert_eq!(prettify_name("my_device"), "My Device");
-        }
-
-        #[test]
-        fn unique_save_path_no_conflict() {
-            let dir = std::env::temp_dir().join("taildrop_test_no_conflict");
-            let _ = std::fs::remove_dir_all(&dir);
-            std::fs::create_dir_all(&dir).unwrap();
-            let path = unique_save_path(&dir, "test.txt");
-            assert_eq!(path, dir.join("test.txt"));
-            let _ = std::fs::remove_dir_all(&dir);
-        }
-
-        #[test]
-        fn unique_save_path_with_conflict() {
-            let dir = std::env::temp_dir().join("taildrop_test_conflict");
-            let _ = std::fs::remove_dir_all(&dir);
-            std::fs::create_dir_all(&dir).unwrap();
-            std::fs::write(dir.join("test.txt"), "first").unwrap();
-            std::fs::write(dir.join("test (1).txt"), "second").unwrap();
-            let path = unique_save_path(&dir, "test.txt");
-            assert_eq!(path, dir.join("test (2).txt"));
-            let _ = std::fs::remove_dir_all(&dir);
-        }
-    }
 }
 
 // ============================================================
@@ -1731,4 +1660,142 @@ pub async fn fetch_incoming_files(save_dir: &str) -> Result<Vec<IncomingFile>, S
 
 pub async fn accept_incoming_file(name: &str, save_dir: &str) -> Result<String, String> {
     platform::accept_file(name, save_dir).await
+}
+
+// ============================================================
+// Tests — crate-root, runs on all platforms
+// ============================================================
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // --- url_encode ---
+
+    #[test]
+    fn url_encode_plain() {
+        assert_eq!(url_encode("hello"), "hello");
+    }
+
+    #[test]
+    fn url_encode_spaces() {
+        assert_eq!(url_encode("hello world"), "hello%20world");
+    }
+
+    #[test]
+    fn url_encode_slashes() {
+        assert_eq!(url_encode("path/to/file"), "path%2Fto%2Ffile");
+    }
+
+    #[test]
+    fn url_encode_unreserved() {
+        assert_eq!(url_encode("-_.~"), "-_.~");
+    }
+
+    #[test]
+    fn url_encode_unicode() {
+        assert_eq!(url_encode("é"), "%C3%A9");
+    }
+
+    // --- prettify_name ---
+
+    #[test]
+    fn prettify_basic() {
+        assert_eq!(prettify_name("my-laptop"), "My Laptop");
+    }
+
+    #[test]
+    fn prettify_abbreviations() {
+        assert_eq!(prettify_name("pixel-10-pro-xl"), "Pixel 10 Pro XL");
+        assert_eq!(prettify_name("home-nas"), "Home NAS");
+    }
+
+    #[test]
+    fn prettify_more_abbreviations() {
+        assert_eq!(prettify_name("macbook-pro-se"), "Macbook Pro SE");
+        assert_eq!(prettify_name("server-tv"), "Server TV");
+        assert_eq!(prettify_name("office-pc"), "Office PC");
+        assert_eq!(prettify_name("dev-vm"), "Dev VM");
+        assert_eq!(prettify_name("work-vpn"), "Work VPN");
+        assert_eq!(prettify_name("mini-nuc"), "Mini NUC");
+    }
+
+    #[test]
+    fn prettify_underscores() {
+        assert_eq!(prettify_name("my_device"), "My Device");
+    }
+
+    #[test]
+    fn prettify_digit_only_word() {
+        assert_eq!(prettify_name("node-100"), "Node 100");
+    }
+
+    #[test]
+    fn prettify_empty() {
+        assert_eq!(prettify_name(""), "");
+    }
+
+    // --- raw_machine_name ---
+
+    #[test]
+    fn raw_machine_name_basic() {
+        assert_eq!(
+            raw_machine_name("pixel.tail1234.ts.net."),
+            Some("pixel".to_string())
+        );
+    }
+
+    #[test]
+    fn raw_machine_name_no_dot() {
+        assert_eq!(raw_machine_name("hostname"), Some("hostname".to_string()));
+    }
+
+    #[test]
+    fn raw_machine_name_empty() {
+        assert_eq!(raw_machine_name(""), None);
+    }
+
+    #[test]
+    fn raw_machine_name_trailing_dot_only() {
+        assert_eq!(raw_machine_name("."), None);
+    }
+
+    // --- display_name_from_dns ---
+
+    #[test]
+    fn display_name_from_dns_basic() {
+        assert_eq!(
+            display_name_from_dns("my-laptop.tail9999.ts.net."),
+            Some("My Laptop".to_string())
+        );
+    }
+
+    #[test]
+    fn display_name_from_dns_none() {
+        assert_eq!(display_name_from_dns(""), None);
+    }
+
+    // --- unique_save_path ---
+
+    #[test]
+    fn unique_save_path_no_conflict() {
+        let dir = std::env::temp_dir().join("taildrop_test_no_conflict");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = unique_save_path(&dir, "test.txt");
+        assert_eq!(path, dir.join("test.txt"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn unique_save_path_with_conflict() {
+        let dir = std::env::temp_dir().join("taildrop_test_conflict");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("test.txt"), "first").unwrap();
+        std::fs::write(dir.join("test (1).txt"), "second").unwrap();
+        let path = unique_save_path(&dir, "test.txt");
+        assert_eq!(path, dir.join("test (2).txt"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }
