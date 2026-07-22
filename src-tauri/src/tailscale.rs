@@ -12,6 +12,7 @@ const LOCALAPI_HOST: &str = "local-tailscaled.sock";
 /// `try_pipe_get`, and consumed by `get_incoming_files`/`accept_file` to
 /// decide whether the CLI fallback is appropriate.
 #[derive(Debug)]
+#[allow(dead_code)] // Only used on macOS/Windows; Linux uses hyper directly
 pub(crate) enum SocketGetError {
     /// `UnixStream::connect` / pipe open failed — the socket/pipe is missing
     /// or inaccessible. Falling back to the CLI is the intended behaviour.
@@ -84,6 +85,7 @@ pub struct IncomingFile {
 /// Shared accept_file logic for CLI-based platforms.
 /// `run_get` executes the platform-specific `tailscale file get` command.
 /// Sanitizes `name` to prevent path traversal attacks.
+#[allow(dead_code)] // Only used on macOS/Windows
 fn accept_file_with_getter(
     name: &str,
     save_dir: &str,
@@ -162,6 +164,7 @@ fn accept_file_with_getter(
 /// and returns a JSON array of the received files.
 ///
 /// `platform_label` is used in log messages ("macOS" / "Windows").
+#[allow(dead_code)] // Only used on macOS/Windows
 fn cli_receive_files(
     save_dir: &str,
     platform_label: &str,
