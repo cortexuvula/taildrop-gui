@@ -39,6 +39,15 @@ export function usePeers(settings: AppSettings): UsePeersResult {
     return () => clearInterval(peerInterval);
   }, [refreshPeers]);
 
+  // Immediate refresh when the window regains visibility (un-minimize).
+  useEffect(() => {
+    const handleVisible = () => {
+      if (!document.hidden) refreshPeers();
+    };
+    document.addEventListener("visibilitychange", handleVisible);
+    return () => document.removeEventListener("visibilitychange", handleVisible);
+  }, [refreshPeers]);
+
   // Detect own tailnet domain from self node.
   const selfNode = peers.find((p) => p.is_self);
   const tailnetDomain = selfNode

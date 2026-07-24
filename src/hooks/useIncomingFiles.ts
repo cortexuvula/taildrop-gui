@@ -189,6 +189,19 @@ export function useIncomingFiles(options: UseIncomingFilesOptions): UseIncomingF
     return () => clearInterval(interval);
   }, [refreshIncoming, hasActiveTransfers]);
 
+  // When the window regains visibility (un-minimize / refocus), the WebView
+  // engine resumes throttled timers. Fire an immediate poll so pending files
+  // are detected without waiting for the next interval tick.
+  useEffect(() => {
+    const handleVisible = () => {
+      if (!document.hidden) {
+        refreshIncoming();
+      }
+    };
+    document.addEventListener("visibilitychange", handleVisible);
+    return () => document.removeEventListener("visibilitychange", handleVisible);
+  }, [refreshIncoming]);
+
   // Expose incoming-state operations via a ref so useTransfers' accept handler
   // can read/mutate incoming state without owning it. The facade hands this
   // ref to useTransfers. The methods are stable (they read from refs / use
