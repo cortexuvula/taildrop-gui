@@ -1468,10 +1468,16 @@ mod platform {
             .and_then(|s| s.parse().ok())
             .unwrap_or(0);
         if status_code != 200 {
-            return Err(super::SocketGetError::Other(format!(
-                "HTTP error: {}",
-                status_line
-            )));
+            // 401/403 means the pipe connected but the daemon rejected our
+            // request due to permissions (non-admin process). The CLI bypasses
+            // this because tailscale.exe has its own auth, so treat these as
+            // Connect errors to trigger the CLI fallback.
+            let err_type = if status_code == 401 || status_code == 403 {
+                super::SocketGetError::Connect
+            } else {
+                super::SocketGetError::Other
+            };
+            return Err(err_type(format!("HTTP error: {}", status_line)));
         }
 
         Ok(response[header_end + 4..].to_vec())
