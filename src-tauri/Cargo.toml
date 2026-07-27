@@ -1,6 +1,6 @@
 [package]
 name = "taildrop-gui"
-version = "0.12.3"
+version = "0.12.4"
 description = "TailDrop — drag-and-drop file transfer for Tailscale"
 authors = ["you"]
 edition = "2021"
