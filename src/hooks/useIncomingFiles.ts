@@ -1,5 +1,6 @@
 import { useState, useEffect, useCallback, useRef, useMemo, type RefObject } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { getCurrentWindow } from "@tauri-apps/api/window";
 import {
   isPermissionGranted,
   requestPermission,
@@ -189,17 +190,31 @@ export function useIncomingFiles(options: UseIncomingFilesOptions): UseIncomingF
     return () => clearInterval(interval);
   }, [refreshIncoming, hasActiveTransfers]);
 
-  // When the window regains visibility (un-minimize / refocus), the WebView
-  // engine resumes throttled timers. Fire an immediate poll so pending files
-  // are detected without waiting for the next interval tick.
+  // When the window regains visibility or focus, fire an immediate poll.
+  // WKWebView throttles setInterval when minimized/occluded, so we need
+  // both: visibilitychange covers minimize/un-minimize, and the Tauri
+  // window focus event covers occlusion (another window on top) — which
+  // visibilitychange does NOT fire for (known Tauri bug #6864).
   useEffect(() => {
     const handleVisible = () => {
-      if (!document.hidden) {
-        refreshIncoming();
-      }
+      if (!document.hidden) refreshIncoming();
     };
     document.addEventListener("visibilitychange", handleVisible);
-    return () => document.removeEventListener("visibilitychange", handleVisible);
+
+    let unlistenFocus: (() => void) | undefined;
+    getCurrentWindow()
+      .onFocusChanged(({ payload: focused }: { payload: boolean }) => {
+        if (focused) refreshIncoming();
+      })
+      .then((fn: () => void) => {
+        unlistenFocus = fn;
+      })
+      .catch(() => {});
+
+    return () => {
+      document.removeEventListener("visibilitychange", handleVisible);
+      unlistenFocus?.();
+    };
   }, [refreshIncoming]);
 
   // Expose incoming-state operations via a ref so useTransfers' accept handler

@@ -1,5 +1,6 @@
 import { useState, useEffect, useCallback, useMemo } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { getCurrentWindow } from "@tauri-apps/api/window";
 import type { Peer, AppSettings } from "../types";
 import { toErrorMsg } from "../lib/toErrorMsg";
 
@@ -39,13 +40,28 @@ export function usePeers(settings: AppSettings): UsePeersResult {
     return () => clearInterval(peerInterval);
   }, [refreshPeers]);
 
-  // Immediate refresh when the window regains visibility (un-minimize).
+  // Immediate refresh on window visibility/focus change (covers both
+  // minimize/un-minimize via visibilitychange and occlusion via Tauri focus).
   useEffect(() => {
     const handleVisible = () => {
       if (!document.hidden) refreshPeers();
     };
     document.addEventListener("visibilitychange", handleVisible);
-    return () => document.removeEventListener("visibilitychange", handleVisible);
+
+    let unlistenFocus: (() => void) | undefined;
+    getCurrentWindow()
+      .onFocusChanged(({ payload: focused }: { payload: boolean }) => {
+        if (focused) refreshPeers();
+      })
+      .then((fn: () => void) => {
+        unlistenFocus = fn;
+      })
+      .catch(() => {});
+
+    return () => {
+      document.removeEventListener("visibilitychange", handleVisible);
+      unlistenFocus?.();
+    };
   }, [refreshPeers]);
 
   // Detect own tailnet domain from self node.
