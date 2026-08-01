@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { formatSize, shortenError, statusIcon } from "./format";
+import { formatSize, formatTime, shortenError, statusIcon } from "./format";
 
 describe("formatSize", () => {
   it("returns 0 B for zero", () => {
@@ -53,6 +53,18 @@ describe("shortenError", () => {
 
   it("returns the full string for empty input", () => {
     expect(shortenError("")).toBe("");
+  });
+});
+
+describe("formatTime", () => {
+  it("returns a time string matching HH:MM pattern", () => {
+    const result = formatTime(new Date("2024-01-15T14:30:00").getTime());
+    expect(result).toMatch(/^\d{1,2}:\d{2}/);
+  });
+
+  it("returns a non-empty string for any timestamp", () => {
+    expect(formatTime(0)).toBeTruthy();
+    expect(formatTime(Date.now())).toBeTruthy();
   });
 });
 

@@ -1807,4 +1807,59 @@ mod tests {
         assert_eq!(path, dir.join("test (2).txt"));
         let _ = std::fs::remove_dir_all(&dir);
     }
+
+    // --- timestamp_tag ---
+
+    #[test]
+    fn timestamp_tag_is_monotonic() {
+        let a = timestamp_tag();
+        let b = timestamp_tag();
+        assert!(
+            b >= a,
+            "timestamp_tag should be monotonically non-decreasing"
+        );
+    }
+
+    #[test]
+    fn timestamp_tag_counter_increments() {
+        // Rapid calls should produce different tags (counter increments).
+        let a = timestamp_tag();
+        let b = timestamp_tag();
+        assert_ne!(a, b, "consecutive calls must produce different tags");
+    }
+
+    // --- accept_file_with_getter path traversal ---
+
+    #[test]
+    fn accept_file_rejects_path_traversal_dotdot() {
+        // The function sanitizes name via Path::file_name(), so "../etc/passwd"
+        // becomes just "passwd". We test that the function does NOT create a
+        // file outside save_dir by checking it doesn't error on a safe name
+        // but would error on a purely traversal-only name like "../".
+        let dir = std::env::temp_dir().join("taildrop_test_traversal");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        // "../" has no file_name component → should error "Invalid filename"
+        let result = accept_file_with_getter("../", dir.to_str().unwrap(), || Ok(()));
+        assert!(result.is_err(), "path traversal should be rejected");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn accept_file_accepts_normal_filename() {
+        let dir = std::env::temp_dir().join("taildrop_test_normal_name");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        // A normal filename with a no-op getter should find no file and error,
+        // but the name itself should pass sanitization (not "Invalid filename").
+        let result = accept_file_with_getter("photo.jpg", dir.to_str().unwrap(), || Ok(()));
+        assert!(result.is_err(), "should fail because file doesn't appear");
+        assert!(
+            !result.unwrap_err().contains("Invalid filename"),
+            "normal filename should pass sanitization"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

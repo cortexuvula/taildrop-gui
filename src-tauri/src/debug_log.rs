@@ -43,25 +43,8 @@ impl Log for InMemorySink {
             }
         }
         // Suppress chatty third-party debug/info from the in-app buffer.
-        // These still reach stderr (above), but don't flood the DebugPanel.
-        // Our own crates (taildrop_gui*, tailscale) are always captured.
-        let target = record.target();
-        const NOISY_PREFIXES: &[&str] = &[
-            "reqwest",
-            "rustls",
-            "hyper",
-            "tauri_plugin_updater::updater",
-            "tonic",
-            "h2",
-            "tower",
-        ];
-        let is_ours = target.starts_with("taildrop_gui") || target == "tailscale";
-        if !is_ours && record.level() > Level::Warn {
-            for prefix in NOISY_PREFIXES {
-                if target.starts_with(prefix) {
-                    return;
-                }
-            }
+        if !should_capture(record.target(), record.level()) {
+            return;
         }
         // Append to the in-memory buffer.
         let timestamp_ms = SystemTime::now()
@@ -118,4 +101,62 @@ pub fn snapshot() -> Vec<LogEntry> {
         .lock()
         .map(|buf| buf.iter().cloned().collect())
         .unwrap_or_default()
+}
+
+/// Test whether a log record should be captured in the in-memory buffer.
+/// Extracted from `Log::log` for testability.
+fn should_capture(target: &str, level: Level) -> bool {
+    const NOISY_PREFIXES: &[&str] = &[
+        "reqwest",
+        "rustls",
+        "hyper",
+        "tauri_plugin_updater::updater",
+        "tonic",
+        "h2",
+        "tower",
+    ];
+    let is_ours = target.starts_with("taildrop_gui") || target == "tailscale";
+    if level > Level::Warn {
+        // Only filter debug/info from noisy third-party crates.
+        if !is_ours {
+            for prefix in NOISY_PREFIXES {
+                if target.starts_with(prefix) {
+                    return false;
+                }
+            }
+        }
+    }
+    true
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn captures_our_crates_at_debug() {
+        assert!(should_capture("taildrop_gui_lib", Level::Debug));
+        assert!(should_capture("tailscale", Level::Debug));
+    }
+
+    #[test]
+    fn filters_noisy_crates_at_debug() {
+        assert!(!should_capture("reqwest::connect", Level::Debug));
+        assert!(!should_capture("hyper::client", Level::Info));
+        assert!(!should_capture(
+            "tauri_plugin_updater::updater",
+            Level::Debug
+        ));
+    }
+
+    #[test]
+    fn captures_noisy_crates_at_warn() {
+        assert!(should_capture("reqwest::connect", Level::Warn));
+        assert!(should_capture("hyper::client", Level::Error));
+    }
+
+    #[test]
+    fn captures_unknown_crates_at_debug() {
+        assert!(should_capture("some_random_crate", Level::Debug));
+    }
 }
