@@ -840,7 +840,7 @@ mod platform {
             {
                 Ok(file) => return Ok((file, candidate)),
                 Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
-                    candidate = super::unique_save_path(dir, name);
+                    candidate = unique_save_path(dir, name);
                 }
                 Err(e) => {
                     return Err(format!(
