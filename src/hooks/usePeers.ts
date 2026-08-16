@@ -1,8 +1,9 @@
-import { useState, useEffect, useCallback, useMemo } from "react";
+import { useState, useEffect, useCallback, useMemo, useRef } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import type { Peer, AppSettings } from "../types";
 import { toErrorMsg } from "../lib/toErrorMsg";
+import { sanitizePeers } from "../lib/guards";
 
 export interface UsePeersResult {
   peers: Peer[];
@@ -21,15 +22,29 @@ export function usePeers(settings: AppSettings): UsePeersResult {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
+  // Lifecycle guard: a slow in-flight status call must not setState after
+  // unmount (React 18+ tolerates it, but concurrent tearing is free to avoid).
+  const mountedRef = useRef(true);
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+    };
+  }, []);
+
   const refreshPeers = useCallback(async () => {
     try {
-      const result = await invoke<Peer[]>("get_tailscale_status");
-      setPeers(result);
+      const result = await invoke<unknown>("get_tailscale_status");
+      if (!mountedRef.current) return;
+      // Guard the IPC boundary: malformed entries are dropped rather than
+      // crashing renderers downstream.
+      setPeers(sanitizePeers(result));
       setError(null);
     } catch (e) {
+      if (!mountedRef.current) return;
       setError(toErrorMsg(e));
     } finally {
-      setLoading(false);
+      if (mountedRef.current) setLoading(false);
     }
   }, []);
 

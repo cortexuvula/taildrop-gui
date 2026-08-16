@@ -13,7 +13,7 @@ export function TransferHistory({
   onAcceptFile,
 }: TransferHistoryProps) {
   return (
-    <div className="transfer-panel">
+    <div className="transfer-panel" aria-live="polite" aria-label="Transfers">
       <div className="transfer-header">
         <h3>Transfers</h3>
       </div>

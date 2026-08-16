@@ -23,7 +23,9 @@ export function DropZone({ selectedPeer, onSendFiles, peers }: DropZoneProps) {
   // Keep the latest toast in a ref so the event listener (registered once on
   // mount) always calls the current one without re-registering.
   const toastRef = useRef(toast);
-  toastRef.current = toast;
+  useEffect(() => {
+    toastRef.current = toast;
+  }, [toast]);
 
   const processFiles = useCallback(
     (paths: string[]) => {
@@ -41,8 +43,11 @@ export function DropZone({ selectedPeer, onSendFiles, peers }: DropZoneProps) {
     [selectedPeer, onSendFiles, showPeerPicker]
   );
 
-  // Keep ref in sync for the Tauri event listener
-  processRef.current = processFiles;
+  // Keep ref in sync for the Tauri event listener (effect, not render-phase
+  // write — StrictMode/concurrent safe).
+  useEffect(() => {
+    processRef.current = processFiles;
+  }, [processFiles]);
 
   // Peer picker modal: useModal handles Escape + focus, onClose clears state.
   const closePeerPicker = useCallback(() => {
@@ -112,7 +117,16 @@ export function DropZone({ selectedPeer, onSendFiles, peers }: DropZoneProps) {
     <div className="dropzone-container">
       <div
         className={`dropzone ${isDragging ? "dragging" : ""} ${selectedPeer ? "has-target" : ""}`}
+        role="button"
+        tabIndex={0}
+        aria-label="Drop files here to send via Taildrop, or press Enter to browse"
         onClick={handleBrowse}
+        onKeyDown={(e) => {
+          if (e.key === "Enter" || e.key === " ") {
+            e.preventDefault();
+            void handleBrowse();
+          }
+        }}
       >
         <div className="dropzone-content">
           {isDragging ? (

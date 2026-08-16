@@ -5,7 +5,15 @@ use std::sync::{LazyLock, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 const MAX_ENTRIES: usize = 500;
+
+/// Debug records filenames and peer hostnames; retaining them in the
+/// in-memory ring buffer of a release build (exposed un-gated through the
+/// `get_debug_logs` IPC) is a privacy leak. Dev builds capture everything;
+/// release builds stop at `Info`.
+#[cfg(debug_assertions)]
 const CAPTURE_LEVEL: Level = Level::Debug;
+#[cfg(not(debug_assertions))]
+const CAPTURE_LEVEL: Level = Level::Info;
 
 #[derive(Clone, Serialize)]
 pub struct LogEntry {
@@ -158,5 +166,15 @@ mod tests {
     #[test]
     fn captures_unknown_crates_at_debug() {
         assert!(should_capture("some_random_crate", Level::Debug));
+    }
+
+    #[test]
+    fn capture_level_is_debug_only_in_dev_builds() {
+        // Privacy guard: a release build must not retain debug-level records
+        // (filenames, peer hostnames) in the ring buffer.
+        #[cfg(debug_assertions)]
+        assert_eq!(CAPTURE_LEVEL, Level::Debug);
+        #[cfg(not(debug_assertions))]
+        assert_eq!(CAPTURE_LEVEL, Level::Info);
     }
 }

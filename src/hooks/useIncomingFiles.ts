@@ -9,8 +9,13 @@ import {
 import type { IncomingFile, TransferRecord, AppSettings } from "../types";
 import { toErrorMsg } from "../lib/toErrorMsg";
 import { logger } from "../lib/logger";
+import { sanitizeIncomingFiles } from "../lib/guards";
+import { newId } from "../lib/id";
 
 const MAX_TRANSFER_HISTORY = 200;
+/** After this many consecutive failed polls, surface a persistent warning —
+ * a dead daemon must not masquerade as "no incoming files". */
+const POLL_FAILURE_THRESHOLD = 3;
 
 export interface UseIncomingFilesOptions {
   settingsRef: RefObject<AppSettings>;
@@ -34,6 +39,12 @@ export interface UseIncomingFilesResult {
   incomingFiles: IncomingFile[];
   /** Incoming-state operations exposed for useTransfers via the facade bridge. */
   bridgeRef: RefObject<IncomingBridge>;
+  /**
+   * Set when polling has failed repeatedly (daemon unreachable, unusable save
+   * dir, …). Rendered as a persistent banner so silent "no files" states are
+   * impossible.
+   */
+  pollError: string | null;
 }
 
 /**
@@ -45,13 +56,25 @@ export function useIncomingFiles(options: UseIncomingFilesOptions): UseIncomingF
   const { settingsRef, transfers, appendTransfers } = options;
 
   const [incomingFiles, setIncomingFiles] = useState<IncomingFile[]>([]);
+  const [pollError, setPollError] = useState<string | null>(null);
 
   const autoAcceptingRef = useRef(false);
   const seenIncomingRef = useRef(new Set<string>());
   const recentlyAcceptedRef = useRef(new Map<string, number>());
   // Mirror of incomingFiles for synchronous lookup from the bridge.
   const incomingFilesRef = useRef<IncomingFile[]>([]);
-  incomingFilesRef.current = incomingFiles;
+  useEffect(() => {
+    incomingFilesRef.current = incomingFiles;
+  }, [incomingFiles]);
+
+  // Lifecycle guard: async poll callbacks must not touch state after unmount.
+  const mountedRef = useRef(true);
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+    };
+  }, []);
 
   // Bug #4: auto-accept incoming files when enabled.
   const autoAcceptFiles = useCallback(
@@ -70,7 +93,7 @@ export function useIncomingFiles(options: UseIncomingFilesOptions): UseIncomingF
               saveDir: settingsRef.current.saveDirectory,
             });
             records.push({
-              id: `${Date.now()}-${Math.random().toString(36).slice(2)}`,
+              id: newId(),
               filename: file.name,
               peerName,
               direction: "received" as const,
@@ -80,7 +103,7 @@ export function useIncomingFiles(options: UseIncomingFilesOptions): UseIncomingF
           } catch (e) {
             // Surface auto-accept failures to transfer history
             errorRecords.push({
-              id: `${Date.now()}-${Math.random().toString(36).slice(2)}`,
+              id: newId(),
               filename: file.name,
               peerName,
               direction: "received" as const,
@@ -92,6 +115,7 @@ export function useIncomingFiles(options: UseIncomingFilesOptions): UseIncomingF
         }
         // Commit all auto-accept outcomes in a single capped update.
         if (records.length > 0 || errorRecords.length > 0) {
+          if (!mountedRef.current) return;
           const all = [...records, ...errorRecords];
           appendTransfers(all);
         }
@@ -140,17 +164,27 @@ export function useIncomingFiles(options: UseIncomingFilesOptions): UseIncomingF
     } catch {
       // notifications not supported or permission denied
     }
-  }, []);
+  }, [settingsRef]);
 
-  // Fetch incoming files
+  // Fetch incoming files. Tracks consecutive failures so a dead daemon or an
+  // unusable save dir surfaces as a persistent error instead of an
+  // indistinguishable-from-success empty list.
+  const consecutiveFailuresRef = useRef(0);
   const refreshIncoming = useCallback(async () => {
     try {
-      const result = await invoke<IncomingFile[]>("get_incoming_files", {
+      const result = await invoke<unknown>("get_incoming_files", {
         saveDir: settingsRef.current.saveDirectory,
       });
+      if (!mountedRef.current) return;
+      // Sanitize the IPC boundary: malformed entries are dropped, and a
+      // non-array payload becomes an empty list rather than a crash.
+      const files = sanitizeIncomingFiles(result);
+      consecutiveFailuresRef.current = 0;
+      setPollError(null);
+
       // Filter out files that were recently accepted (poll race prevention)
       const now = Date.now();
-      const filtered = result.filter((f) => {
+      const filtered = files.filter((f) => {
         const acceptedAt = recentlyAcceptedRef.current.get(f.name);
         return !(acceptedAt && now - acceptedAt < 30000);
       });
@@ -162,24 +196,34 @@ export function useIncomingFiles(options: UseIncomingFilesOptions): UseIncomingF
       // files are handled silently and a desktop notification would be
       // noisy for something the user doesn't need to act on.
       if (filtered.length > 0 && !settingsRef.current.autoAccept) {
-        notifyIncoming(filtered);
+        void notifyIncoming(filtered);
       }
       if (settingsRef.current.autoAccept && filtered.length > 0) {
         setIncomingFiles([]);
-        autoAcceptFiles(filtered);
+        void autoAcceptFiles(filtered);
       } else {
         setIncomingFiles(filtered);
       }
     } catch (e) {
-      // Log but don't surface — daemon might be briefly unavailable.
-      // Using logger so it appears in the DebugPanel for diagnosis.
-      logger.debug("useIncomingFiles", "poll failed:", toErrorMsg(e));
+      if (!mountedRef.current) return;
+      const msg = toErrorMsg(e);
+      consecutiveFailuresRef.current += 1;
+      logger.debug("useIncomingFiles", `poll failed (${consecutiveFailuresRef.current}):`, msg);
+      if (consecutiveFailuresRef.current >= POLL_FAILURE_THRESHOLD) {
+        setPollError(msg);
+      }
     }
   }, [autoAcceptFiles, notifyIncoming, settingsRef]);
 
   // Adaptive polling: faster when transfers are active, slower when idle.
   const hasActiveTransfers = useMemo(
-    () => transfers.some((t) => t.status === "sending" || t.status === "pending"),
+    () =>
+      transfers.some(
+        (t) =>
+          t.status === "sending" ||
+          t.status === "pending" ||
+          t.status === "receiving",
+      ),
     [transfers],
   );
 
@@ -220,8 +264,8 @@ export function useIncomingFiles(options: UseIncomingFilesOptions): UseIncomingF
   // Expose incoming-state operations via a ref so useTransfers' accept handler
   // can read/mutate incoming state without owning it. The facade hands this
   // ref to useTransfers. The methods are stable (they read from refs / use
-  // state setters); refreshIncoming is rebound each render to keep the closure
-  // fresh.
+  // state setters); refreshIncoming is rebound in an effect (not during
+  // render) to stay StrictMode/concurrent-safe while keeping its closure fresh.
   const bridgeRef = useRef<IncomingBridge>({
     peerNameFor: (name: string) =>
       incomingFilesRef.current.find((f) => f.name === name)?.peerName,
@@ -229,11 +273,14 @@ export function useIncomingFiles(options: UseIncomingFilesOptions): UseIncomingF
       setIncomingFiles((prev) => prev.filter((f) => f.name !== name)),
     markRecentlyAccepted: (name: string) =>
       recentlyAcceptedRef.current.set(name, Date.now()),
-    refreshIncoming: () => void refreshIncoming(),
+    refreshIncoming: () => {},
   });
-  bridgeRef.current.refreshIncoming = () => refreshIncoming();
+  const refresh = refreshIncoming;
+  useEffect(() => {
+    bridgeRef.current.refreshIncoming = () => refresh();
+  }, [refresh]);
 
-  return { incomingFiles, bridgeRef };
+  return { incomingFiles, bridgeRef, pollError };
 }
 
 export { MAX_TRANSFER_HISTORY };

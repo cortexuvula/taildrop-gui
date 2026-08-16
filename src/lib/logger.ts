@@ -22,6 +22,11 @@ function safeStringify(value: unknown): string {
 }
 
 function push(level: LogLevel, target: string, message: string, ...rest: unknown[]) {
+  // Debug entries can carry filenames and peer hostnames; production builds
+  // must not retain them in the ring buffer (exposed via the DebugPanel).
+  // Dev builds keep everything for diagnosis.
+  if (level === "debug" && !import.meta.env.DEV) return;
+
   const entry: LogEntry = {
     timestampMs: Date.now(),
     level,

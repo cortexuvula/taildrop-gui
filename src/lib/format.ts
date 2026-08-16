@@ -23,14 +23,17 @@ export function shortenError(err: string): string {
   return err;
 }
 
-export function statusIcon(status: "pending" | "sending" | "success" | "error"): string {
+export function statusIcon(status: "pending" | "sending" | "receiving" | "success" | "error" | "cancelled"): string {
   switch (status) {
     case "sending":
     case "pending":
+    case "receiving":
       return "⏳";
     case "success":
       return "✓";
     case "error":
       return "✗";
+    case "cancelled":
+      return "⊘";
   }
 }

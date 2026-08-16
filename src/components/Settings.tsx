@@ -14,9 +14,12 @@ interface SettingsProps {
   onUpdate: (update: Partial<AppSettings>) => void;
   onClose: () => void;
   updater: UseUpdaterApi;
+  /** Non-null when the configured save directory is unusable (not absolute,
+   * missing, or read-only) — validated by the backend. */
+  saveDirError?: string | null;
 }
 
-export function Settings({ settings, allPeers, onUpdate, onClose, updater }: SettingsProps) {
+export function Settings({ settings, allPeers, onUpdate, onClose, updater, saveDirError }: SettingsProps) {
   const [nodeSearch, setNodeSearch] = useState("");
   const [autoStart, setAutoStart] = useState(false);
   const [autoStartBusy, setAutoStartBusy] = useState(false);
@@ -107,6 +110,11 @@ export function Settings({ settings, allPeers, onUpdate, onClose, updater }: Set
               Browse
             </button>
           </div>
+          {saveDirError && (
+            <div className="settings-field-error" role="alert">
+              ⚠ {saveDirError}
+            </div>
+          )}
         </div>
 
         <div className="settings-section">

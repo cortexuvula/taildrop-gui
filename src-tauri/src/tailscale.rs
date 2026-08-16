@@ -82,14 +82,134 @@ pub struct IncomingFile {
 // Shared accept_file helper for CLI-based platforms (macOS/Windows)
 // ============================================================
 
+/// Per-filename accept locks. `tailscale file get` drains the WHOLE daemon
+/// inbox (it cannot fetch a single named file), so two concurrent accepts of
+/// the same name could both claim the same content and destination. Locking
+/// per name serializes that case; cross-name races are resolved safely by the
+/// staging directory + exact-name fallback in `accept_file_with_getter`.
+fn accept_lock(name: &str) -> std::sync::Arc<std::sync::Mutex<()>> {
+    use std::sync::{Arc, LazyLock, Mutex};
+    static LOCKS: LazyLock<Mutex<HashMap<String, Arc<Mutex<()>>>>> =
+        LazyLock::new(|| Mutex::new(HashMap::new()));
+    let mut map = LOCKS.lock().unwrap_or_else(|p| p.into_inner());
+    map.entry(name.to_string())
+        .or_insert_with(|| Arc::new(Mutex::new(())))
+        .clone()
+}
+
+/// Reserve a unique output path in `dir` with an exclusive create (`O_EXCL`),
+/// retrying with the next unique suffix when the name is taken. This closes
+/// the check-then-create race where `unique_save_path` picked a free name and
+/// `File::create` then TRUNCATED whoever created it in between. The returned
+/// file is empty; callers stream content into it and must remove it on failure.
+fn reserve_unique_file(
+    dir: &std::path::Path,
+    name: &str,
+) -> Result<(std::fs::File, std::path::PathBuf), String> {
+    let mut candidate = dir.join(name);
+    loop {
+        match std::fs::File::create_new(&candidate) {
+            Ok(file) => return Ok((file, candidate)),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                candidate = unique_save_path(dir, name);
+            }
+            Err(e) => {
+                return Err(format!(
+                    "Failed to create file '{}': {}",
+                    candidate.display(),
+                    e
+                ))
+            }
+        }
+    }
+}
+
+/// Whether an I/O error means "rename across filesystems" (EXDEV on Unix,
+/// ERROR_NOT_SAME_DEVICE on Windows) and needs the copy fallback.
+#[cfg(unix)]
+fn is_cross_device(e: &std::io::Error) -> bool {
+    e.raw_os_error() == Some(18) // EXDEV
+}
+
+#[cfg(windows)]
+fn is_cross_device(e: &std::io::Error) -> bool {
+    e.raw_os_error() == Some(17) // ERROR_NOT_SAME_DEVICE
+}
+
+/// Move `src` into `dir` under `name`, NEVER overwriting an existing file.
+/// The destination is first reserved with an exclusive create (so concurrent
+/// movers get the next unique suffix), then `src` is renamed over our own
+/// reservation — atomic on both Unix and Windows. Falls back to copy+delete
+/// when the staging and save directories live on different filesystems.
+/// Returns the path the content actually landed at.
+fn move_file_into_dir(
+    src: &std::path::Path,
+    dir: &std::path::Path,
+    name: &str,
+) -> Result<std::path::PathBuf, String> {
+    let (placeholder, dest) = reserve_unique_file(dir, name)?;
+    // Windows cannot replace an open file — close our reservation first.
+    // The name stays reserved on disk until the rename replaces it.
+    drop(placeholder);
+    match std::fs::rename(src, &dest) {
+        Ok(()) => Ok(dest),
+        Err(e) if is_cross_device(&e) => {
+            let copy_result = (|| -> Result<(), String> {
+                let mut input = std::fs::File::open(src)
+                    .map_err(|e| format!("Failed to read '{}': {}", src.display(), e))?;
+                let mut output = std::fs::OpenOptions::new()
+                    .write(true)
+                    .truncate(true)
+                    .open(&dest)
+                    .map_err(|e| format!("Failed to open '{}': {}", dest.display(), e))?;
+                std::io::copy(&mut input, &mut output)
+                    .map_err(|e| format!("Failed to copy '{}': {}", src.display(), e))?;
+                output
+                    .sync_all()
+                    .map_err(|e| format!("Failed to flush '{}': {}", dest.display(), e))?;
+                Ok(())
+            })();
+            match copy_result {
+                Ok(()) => {
+                    let _ = std::fs::remove_file(src);
+                    Ok(dest)
+                }
+                Err(err) => {
+                    let _ = std::fs::remove_file(&dest);
+                    Err(err)
+                }
+            }
+        }
+        Err(e) => {
+            let _ = std::fs::remove_file(&dest);
+            Err(format!(
+                "Failed to move '{}' into '{}': {}",
+                name,
+                dir.display(),
+                e
+            ))
+        }
+    }
+}
+
 /// Shared accept_file logic for CLI-based platforms.
-/// `run_get` executes the platform-specific `tailscale file get` command.
+///
+/// `run_get` executes the platform-specific `tailscale file get` command with
+/// the given target directory and must return only after the CLI finished.
 /// Sanitizes `name` to prevent path traversal attacks.
+///
+/// The CLI cannot fetch a single named file — it drains every pending inbox
+/// entry into the target directory. To keep that from ever touching the
+/// user's save directory directly (where `--conflict` handling and half-
+/// finished downloads could clobber existing files), the download runs into a
+/// private staging directory first; every drained file is then moved into the
+/// save dir with exclusive-create semantics, and the exact path the requested
+/// file landed at is returned.
 #[allow(dead_code)] // Only used on macOS/Windows
 fn accept_file_with_getter(
     name: &str,
     save_dir: &str,
-    run_get: impl FnOnce() -> Result<(), String>,
+    run_get: impl FnOnce(&std::path::Path) -> Result<(), String>,
 ) -> Result<String, String> {
     // Sanitize filename to prevent path traversal
     let safe_name = std::path::Path::new(name)
@@ -97,78 +217,126 @@ fn accept_file_with_getter(
         .and_then(|n| n.to_str())
         .ok_or_else(|| "Invalid filename".to_string())?;
 
-    // Snapshot directory before download to detect newly arrived files
-    let dir_path = std::path::Path::new(save_dir);
-    let before_entries: std::collections::HashSet<std::path::PathBuf> = {
-        if dir_path.exists() {
-            std::fs::read_dir(dir_path)
-                .map(|rd| rd.filter_map(|e| e.ok().map(|e| e.path())).collect())
-                .unwrap_or_default()
-        } else {
-            std::collections::HashSet::new()
-        }
-    };
+    let save_dir_path = std::path::Path::new(save_dir);
+    std::fs::create_dir_all(save_dir_path).map_err(|e| {
+        format!(
+            "Cannot create save directory '{}': {}",
+            save_dir_path.display(),
+            e
+        )
+    })?;
 
-    // Run the platform-specific tailscale file get command
-    run_get()?;
+    let lock = accept_lock(safe_name);
+    let _guard = lock.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
 
-    // Check if target file appeared as a NEW file (not pre-existing).
-    // If it already existed before the download, we must wait for the CLI
-    // to overwrite it and only then return — otherwise we return a stale
-    // copy from a previous download.
-    let save_path = dir_path.join(safe_name);
-    let pre_existed = before_entries.contains(&save_path);
+    // Private staging directory so the CLI's conflict renames ("name (1).ext")
+    // and collateral downloads are detected by exact name instead of the old
+    // "exactly one new entry" heuristic, and nothing in save_dir is touched
+    // until each file is atomically moved in.
+    let staging = std::env::temp_dir().join(format!("taildrop-accept-{:016x}", timestamp_tag()));
+    std::fs::create_dir_all(&staging).map_err(|e| {
+        format!(
+            "Cannot create staging directory '{}': {}",
+            staging.display(),
+            e
+        )
+    })?;
 
-    // Wait for file to arrive on disk (Tailscale may still be writing)
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
-    loop {
-        if save_path.exists() && !pre_existed {
-            return Ok(save_path.to_string_lossy().to_string());
-        }
-        // If pre_existed, we need to wait for the CLI to finish overwriting.
-        // We detect completion by checking if any NEW file appeared (the
-        // "new entries" path below), or by trusting run_get() returned Ok.
-        if save_path.exists() && pre_existed {
-            // The CLI has returned; the file was already there and may have
-            // been overwritten. Give it a moment to settle, then return.
-            std::thread::sleep(std::time::Duration::from_millis(200));
-            return Ok(save_path.to_string_lossy().to_string());
-        }
-        if std::time::Instant::now() >= deadline {
-            break;
-        }
-        std::thread::sleep(std::time::Duration::from_millis(100));
-    }
+    let result = (|| -> Result<String, String> {
+        run_get(&staging)?;
 
-    // File didn't appear — check if any new file was downloaded
-    if let Ok(after_entries) = std::fs::read_dir(dir_path) {
-        let new_entries: Vec<_> = after_entries
+        // Move every file the CLI drained out of staging into the save dir.
+        // They were already removed from the daemon's inbox, so dropping them
+        // here would lose data. Moves never overwrite existing files.
+        let mut moved_names: Vec<String> = Vec::new();
+        let mut requested_path: Option<std::path::PathBuf> = None;
+        let entries: Vec<std::path::PathBuf> = std::fs::read_dir(&staging)
+            .map_err(|e| {
+                format!(
+                    "Cannot read staging directory '{}': {}",
+                    staging.display(),
+                    e
+                )
+            })?
             .filter_map(|e| e.ok())
             .map(|e| e.path())
-            .filter(|p| !before_entries.contains(p))
             .collect();
-        if new_entries.len() == 1 {
-            return Ok(new_entries[0].to_string_lossy().to_string());
+        for path in entries {
+            if !path.is_file() {
+                continue;
+            }
+            let file_name = match path.file_name().and_then(|n| n.to_str()) {
+                Some(n) => n.to_string(),
+                None => continue,
+            };
+            match move_file_into_dir(&path, save_dir_path, &file_name) {
+                Ok(dest) => {
+                    if file_name == safe_name {
+                        requested_path = Some(dest);
+                    } else {
+                        moved_names.push(file_name);
+                    }
+                }
+                Err(e) => {
+                    // Collateral files must not fail the accept; the requested
+                    // one is surfaced below (it was never moved).
+                    log::warn!(
+                        "accept: failed to move '{}' into save dir: {}",
+                        file_name,
+                        e
+                    );
+                }
+            }
         }
-    }
+        if let Some(dest) = requested_path {
+            return Ok(dest.to_string_lossy().to_string());
+        }
 
-    Err(format!(
-        "tailscale file get succeeded but '{}' did not appear in {}",
-        safe_name, save_dir
-    ))
+        // The inbox didn't deliver the file this time. Either a concurrent
+        // accept already moved it, or the auto-receive poll saved it before
+        // the user clicked Accept. If it already sits in the save dir under
+        // the exact name, return that path.
+        let existing = save_dir_path.join(safe_name);
+        if existing.is_file() {
+            return Ok(existing.to_string_lossy().to_string());
+        }
+
+        let suffix = if moved_names.is_empty() {
+            String::new()
+        } else {
+            format!(" (found instead: {})", moved_names.join(", "))
+        };
+        Err(format!(
+            "tailscale file get succeeded but '{}' did not appear in {}{}",
+            safe_name,
+            save_dir_path.display(),
+            suffix
+        ))
+    })();
+
+    // Staging is empty by now (everything was moved); remove it best-effort.
+    let _ = std::fs::remove_dir_all(&staging);
+    result
 }
 
 /// Shared CLI auto-receive logic for macOS/Windows. Runs
-/// `tailscale file get --wait=false --conflict=overwrite <save_dir>` (via the
-/// platform-specific `run_get` closure), parses the "moved N/N files" output,
-/// and returns a JSON array of the received files.
+/// `tailscale file get --wait=false --verbose --conflict=rename <save_dir>`
+/// (via the platform-specific `run_get` closure, which receives the full
+/// argument vector), parses the "moved N/N files" output, and returns a JSON
+/// array of the received files.
+///
+/// `--conflict=rename` is load-bearing: the CLI default must never be
+/// `overwrite`, or a background poll would silently clobber same-named files
+/// already in the user's save dir. With `rename`, a conflicting incoming file
+/// is written as "name (1).ext" instead. (This is also the CLI's default
+/// conflict policy — passed explicitly so it can't silently regress.)
 ///
 /// `platform_label` is used in log messages ("macOS" / "Windows").
 #[allow(dead_code)] // Only used on macOS/Windows
 fn cli_receive_files(
     save_dir: &str,
     platform_label: &str,
-    run_get: impl FnOnce(&str) -> Result<std::process::Output, String>,
+    run_get: impl FnOnce(&[&str]) -> Result<std::process::Output, String>,
 ) -> Result<Vec<u8>, String> {
     // Ensure the save directory exists before running the CLI.
     if !std::path::Path::new(save_dir).exists() {
@@ -179,10 +347,23 @@ fn cli_receive_files(
                 save_dir,
                 e
             );
-            return Ok(b"[]".to_vec());
+            // Propagate: an unusable save dir must surface as an error in the
+            // UI, not as a silent "no incoming files".
+            return Err(format!(
+                "Cannot create save directory '{}': {}",
+                save_dir, e
+            ));
         }
     }
-    let output = run_get(save_dir)?;
+    let args: Vec<&str> = vec![
+        "file",
+        "get",
+        "--wait=false",
+        "--verbose",
+        "--conflict=rename",
+        save_dir,
+    ];
+    let output = run_get(&args)?;
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
     log::debug!(
@@ -451,9 +632,11 @@ mod platform {
             .await
             .map_err(|e| format!("Failed to connect to Tailscale daemon: {}", e))?;
 
-        // Timeout: 60s base + 60s per MB for large files
-        let timeout_secs = 60 + (file_size / (1024 * 1024)) * 60;
-        let timeout = std::time::Duration::from_secs(timeout_secs.min(600));
+        // Timeout: 60s base + 60s per MB, capped at 600s. Saturating math so
+        // the per-MB term can't overflow before the cap applies (the cap used
+        // to bind only after the multiply).
+        let timeout_secs = 60u64 + (file_size / (1024 * 1024)).saturating_mul(60).min(540);
+        let timeout = std::time::Duration::from_secs(timeout_secs);
 
         // Write HTTP/1.1 request with Content-Length
         let request = format!(
@@ -640,6 +823,36 @@ mod platform {
         }
     }
 
+    /// Async twin of the shared `reserve_unique_file`: reserves a unique
+    /// output path with an exclusive create, retrying with the next unique
+    /// suffix when the name is taken. Never truncates an existing file.
+    async fn reserve_unique_file_async(
+        dir: &std::path::Path,
+        name: &str,
+    ) -> Result<(tokio::fs::File, std::path::PathBuf), String> {
+        let mut candidate = dir.join(name);
+        loop {
+            match tokio::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&candidate)
+                .await
+            {
+                Ok(file) => return Ok((file, candidate)),
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                    candidate = super::unique_save_path(dir, name);
+                }
+                Err(e) => {
+                    return Err(format!(
+                        "Failed to create file '{}': {}",
+                        candidate.display(),
+                        e
+                    ))
+                }
+            }
+        }
+    }
+
     /// Stream a GET response from the Tailscale localapi directly to a file on disk.
     /// Avoids buffering the entire response in memory (fixes OOM for large incoming files).
     ///
@@ -651,7 +864,10 @@ mod platform {
     /// macOS `try_socket_get`/`try_socket_delete` helpers. (The Linux upload path
     /// `stream_file_to_socket` uses HTTP/1.1 instead, because PUT uploads require
     /// `Content-Length`, which needs HTTP/1.1.)
-    async fn stream_get_to_file(api_path: &str, save_path: &std::path::Path) -> Result<(), String> {
+    ///
+    /// `file` is the caller's exclusively-created destination (see
+    /// `reserve_unique_file_async`); on failure the caller removes the partial.
+    async fn stream_get_to_file(api_path: &str, file: &mut tokio::fs::File) -> Result<(), String> {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
         use tokio::net::UnixStream;
 
@@ -730,9 +946,6 @@ mod platform {
 
         // Write any body bytes already buffered after headers
         let body_start = header_end + 4;
-        let mut file = tokio::fs::File::create(save_path)
-            .await
-            .map_err(|e| format!("Failed to create file '{}': {}", save_path.display(), e))?;
         if body_start < header_buf.len() {
             file.write_all(&header_buf[body_start..])
                 .await
@@ -812,8 +1025,21 @@ mod platform {
                 .and_then(|n| n.to_str())
                 .ok_or_else(|| "Invalid filename".to_string())?;
             let api_path = format!("/localapi/v0/files/{}", url_encode(&name));
-            let save_path = unique_save_path(std::path::Path::new(&save_dir), safe_name);
-            stream_get_to_file(&api_path, &save_path).await?;
+            let dir_path = std::path::Path::new(&save_dir);
+            tokio::fs::create_dir_all(dir_path).await.map_err(|e| {
+                format!(
+                    "Cannot create save directory '{}': {}",
+                    dir_path.display(),
+                    e
+                )
+            })?;
+            let (mut file, save_path) = reserve_unique_file_async(dir_path, safe_name).await?;
+            if let Err(e) = stream_get_to_file(&api_path, &mut file).await {
+                // Remove the partial download so a half-written file doesn't
+                // linger under the reserved name.
+                let _ = tokio::fs::remove_file(&save_path).await;
+                return Err(e);
+            }
 
             // Delete from pending after successful download. Surface failures
             // so stale entries don't silently linger in the pending list.
@@ -854,32 +1080,18 @@ mod platform {
             .copied()
     }
 
-    /// Run the tailscale CLI via /bin/sh -c to ensure proper environment.
-    /// The macOS Tailscale CLI binary inside the .app bundle relies on XPC
-    /// and other macOS services that fail when the binary is exec'd directly
-    /// from a .app launched by launchd (minimal environment). Running through
-    /// a shell resolves this.
+    /// Run the tailscale CLI by exec'ing the binary with an argument vector —
+    /// no shell involved. `Command::args` passes each argument verbatim, so
+    /// paths and peer names with spaces, quotes, or shell metacharacters need
+    /// no escaping (arguments containing NUL bytes are rejected by the OS as
+    /// `InvalidInput`). This matches the Windows implementation and removes
+    /// the shell-injection surface the previous `/bin/sh -c` wrapper carried.
+    /// (The child inherits the same environment either way — the shell
+    /// intermediary added no launchd/XPC-relevant state.)
     fn tailscale_cmd(args: &[&str]) -> std::io::Result<std::process::Output> {
-        // Reject arguments containing null bytes — these can't be passed through
-        // shell interpolation and indicate malformed/malicious input.
-        for arg in args {
-            if arg.contains('\0') {
-                return Err(std::io::Error::new(
-                    std::io::ErrorKind::InvalidInput,
-                    "argument contains null byte",
-                ));
-            }
-        }
         let binary = find_tailscale().unwrap_or("tailscale");
-        // Quote binary path and each argument to handle spaces/special chars
-        let escaped_binary = format!("'{}'", binary.replace('\'', "'\\''"));
-        let escaped_args: Vec<String> = args
-            .iter()
-            .map(|a| format!("'{}'", a.replace('\'', "'\\''")))
-            .collect();
-        let shell_cmd = format!("{} {}", escaped_binary, escaped_args.join(" "));
-        log::debug!("macOS shell cmd: /bin/sh -c {}", shell_cmd);
-        Command::new("/bin/sh").arg("-c").arg(&shell_cmd).output()
+        log::debug!("macOS exec: {} {:?}", binary, args);
+        Command::new(binary).args(args).output()
     }
 
     const SOCKET_PATH: &str = "/var/run/tailscale/tailscaled.sock";
@@ -941,16 +1153,8 @@ mod platform {
     /// macOS GUI install case). Delegates to the shared `cli_receive_files`
     /// helper with the macOS-specific `tailscale_cmd` invocation.
     fn try_cli_receive_files(save_dir: &str) -> Result<Vec<u8>, String> {
-        super::cli_receive_files(save_dir, "macOS", |dir| {
-            tailscale_cmd(&[
-                "file",
-                "get",
-                "--wait=false",
-                "--verbose",
-                "--conflict=overwrite",
-                dir,
-            ])
-            .map_err(|e| format!("Failed to run tailscale file get: {}", e))
+        super::cli_receive_files(save_dir, "macOS", |args| {
+            tailscale_cmd(args).map_err(|e| format!("Failed to run tailscale file get: {}", e))
         })
     }
 
@@ -972,9 +1176,14 @@ mod platform {
     /// fails (the App Store install case). All other failures — including
     /// HTTP 4xx/5xx responses — are returned as [`SocketGetError::Other`] so
     /// callers can propagate them instead of silently falling back to the CLI.
+    ///
+    /// `file` is the caller's exclusively-reserved destination (see the
+    /// shared `reserve_unique_file`); on failure the caller removes the
+    /// partial file — including the empty reservation when falling back to
+    /// the CLI, so the CLI path gets a clean shot at the original name.
     fn try_socket_get_to_file(
         path: &str,
-        save_path: &std::path::Path,
+        file: &mut std::fs::File,
     ) -> Result<(), super::SocketGetError> {
         use std::io::{Read, Write};
         use std::os::unix::net::UnixStream;
@@ -1053,13 +1262,10 @@ mod platform {
             )));
         }
 
-        // Open the output file and flush any body bytes already sitting in the
-        // header buffer (the chunk that contained the final \r\n\r\n often
-        // also carries the start of the body).
+        // Write any body bytes already sitting in the header buffer (the chunk
+        // that contained the final \r\n\r\n often also carries the start of
+        // the body) into the caller's reserved destination file.
         let body_start = header_end + 4;
-        let mut file = std::fs::File::create(save_path).map_err(|e| {
-            super::SocketGetError::Other(format!("create file '{}': {}", save_path.display(), e))
-        })?;
         if body_start < header_buf.len() {
             file.write_all(&header_buf[body_start..])
                 .map_err(|e| super::SocketGetError::Other(format!("write body to file: {}", e)))?;
@@ -1078,6 +1284,11 @@ mod platform {
             file.write_all(&temp_buf[..n])
                 .map_err(|e| super::SocketGetError::Other(format!("write body to file: {}", e)))?;
         }
+
+        // Flush to disk before reporting success so the caller's path points
+        // at durable content.
+        file.sync_all()
+            .map_err(|e| super::SocketGetError::Other(format!("sync file: {}", e)))?;
 
         Ok(())
     }
@@ -1189,9 +1400,10 @@ mod platform {
     ) -> Result<String, String> {
         let peer_name = peer_name.to_string();
         let file_path = file_path.to_string();
-        // Adaptive timeout: 120s base + 60s per MB, capped at 600s
+        // Adaptive timeout: 120s base + 60s per MB, capped at 600s (saturating
+        // math so the multiply can't overflow before the cap applies).
         let file_size = std::fs::metadata(&file_path).map(|m| m.len()).unwrap_or(0);
-        let timeout_secs = (120 + (file_size / (1024 * 1024)) * 60).min(600);
+        let timeout_secs = 120u64 + (file_size / (1024 * 1024)).saturating_mul(60).min(480);
         tokio::time::timeout(
             std::time::Duration::from_secs(timeout_secs),
             tokio::task::spawn_blocking(move || {
@@ -1235,12 +1447,13 @@ mod platform {
     }
 
     /// Accept an incoming file. Tries the Unix socket first (streams large
-    /// files efficiently), then falls back to the `tailscale file get` CLI —
-    /// but **only** when the socket itself is unavailable (the App Store
-    /// install case). HTTP-level errors from the daemon (404, 5xx, …) are
-    /// propagated to the caller rather than masked by the CLI, which would
-    /// otherwise download *every* pending file into `save_dir`. Uses the
-    /// shared helper with path traversal sanitization for the CLI path.
+    /// files efficiently into an exclusively-reserved path), then falls back
+    /// to the `tailscale file get` CLI — but **only** when the socket itself
+    /// is unavailable (the App Store install case). HTTP-level errors from
+    /// the daemon (404, 5xx, …) are propagated to the caller rather than
+    /// masked by the CLI, which would otherwise download *every* pending
+    /// file into `save_dir`. Uses the shared helpers with path traversal
+    /// sanitization and staging-directory semantics for the CLI path.
     pub async fn accept_file(name: &str, save_dir: &str) -> Result<String, String> {
         let name = name.to_string();
         let save_dir = save_dir.to_string();
@@ -1251,11 +1464,19 @@ mod platform {
                     .file_name()
                     .and_then(|n| n.to_str())
                     .ok_or_else(|| "Invalid filename".to_string())?;
-                let save_path = super::unique_save_path(std::path::Path::new(&save_dir), safe_name);
+                let dir_path = std::path::Path::new(&save_dir);
+                std::fs::create_dir_all(dir_path).map_err(|e| {
+                    format!(
+                        "Cannot create save directory '{}': {}",
+                        dir_path.display(),
+                        e
+                    )
+                })?;
                 let api_path = format!("/localapi/v0/files/{}", super::url_encode(&name));
+                let (mut file, save_path) = super::reserve_unique_file(dir_path, safe_name)?;
 
                 // Try the socket first (streams large files without buffering).
-                match try_socket_get_to_file(&api_path, &save_path) {
+                match try_socket_get_to_file(&api_path, &mut file) {
                     Ok(()) => {
                         // Best-effort delete of the pending file from the daemon.
                         let delete_path =
@@ -1272,19 +1493,24 @@ mod platform {
                     Err(super::SocketGetError::Connect(socket_err)) => {
                         // The Unix socket is missing/inaccessible (e.g. App
                         // Store install) — fall back to the `tailscale file
-                        // get` CLI. This is the only case where falling back
-                        // is safe: the socket itself is unavailable, so the
-                        // daemon cannot be queried directly.
+                        // get` CLI. Remove our empty reservation first so the
+                        // CLI path can claim the original name.
+                        let _ = std::fs::remove_file(&save_path);
                         log::debug!(
                             "macOS: socket unavailable ({}), falling back to CLI",
                             socket_err
                         );
-                        super::accept_file_with_getter(&name, &save_dir, || {
+                        super::accept_file_with_getter(&name, &save_dir, |staging| {
                             // --wait=false: don't block if the inbox is empty
                             // (the file may have already been consumed by the
                             // auto-receive poll on macOS).
-                            let output = tailscale_cmd(&["file", "get", "--wait=false", &save_dir])
-                                .map_err(|e| format!("Failed to run tailscale file get: {}", e))?;
+                            let output = tailscale_cmd(&[
+                                "file",
+                                "get",
+                                "--wait=false",
+                                &staging.to_string_lossy(),
+                            ])
+                            .map_err(|e| format!("Failed to run tailscale file get: {}", e))?;
                             if !output.status.success() {
                                 let stderr = String::from_utf8_lossy(&output.stderr);
                                 return Err(format!("tailscale file get failed: {}", stderr));
@@ -1295,10 +1521,12 @@ mod platform {
                     Err(super::SocketGetError::Other(http_err)) => {
                         // The socket connected but the request failed (HTTP
                         // 4xx/5xx, transport failure mid-response, disk write
-                        // error, …). Propagate the real error instead of
-                        // falling back to the CLI — otherwise a transient
-                        // daemon error would cause `tailscale file get` to
-                        // download every pending file into save_dir.
+                        // error, …). Remove the partial download and propagate
+                        // the real error instead of falling back to the CLI —
+                        // otherwise a transient daemon error would cause
+                        // `tailscale file get` to download every pending file
+                        // into save_dir.
+                        let _ = std::fs::remove_file(&save_path);
                         log::debug!(
                             "macOS: socket accept failed with HTTP/transport error ({}), \
                              not falling back to CLI",
@@ -1345,16 +1573,9 @@ mod platform {
     /// Delegates to the shared `cli_receive_files` helper with the
     /// Windows-specific `tailscale_cmd` invocation.
     fn try_cli_receive_files(save_dir: &str) -> Result<Vec<u8>, String> {
-        super::cli_receive_files(save_dir, "Windows", |dir| {
+        super::cli_receive_files(save_dir, "Windows", |args| {
             tailscale_cmd()
-                .args([
-                    "file",
-                    "get",
-                    "--wait=false",
-                    "--verbose",
-                    "--conflict=overwrite",
-                    dir,
-                ])
+                .args(args)
                 .output()
                 .map_err(|e| format!("Failed to run tailscale file get: {}", e))
         })
@@ -1399,9 +1620,10 @@ mod platform {
     ) -> Result<String, String> {
         let peer_name = peer_name.to_string();
         let file_path = file_path.to_string();
-        // Adaptive timeout: 120s base + 60s per MB, capped at 600s
+        // Adaptive timeout: 120s base + 60s per MB, capped at 600s (saturating
+        // math so the multiply can't overflow before the cap applies).
         let file_size = std::fs::metadata(&file_path).map(|m| m.len()).unwrap_or(0);
-        let timeout_secs = (120 + (file_size / (1024 * 1024)) * 60).min(600);
+        let timeout_secs = 120u64 + (file_size / (1024 * 1024)).saturating_mul(60).min(480);
         tokio::time::timeout(
             std::time::Duration::from_secs(timeout_secs),
             tokio::task::spawn_blocking(move || {
@@ -1511,17 +1733,20 @@ mod platform {
         .map_err(|e| format!("Task panicked: {}", e))?
     }
 
-    /// Accept an incoming file. Uses shared helper with path traversal sanitization.
+    /// Accept an incoming file. Uses shared helper with path traversal
+    /// sanitization and staging-directory semantics (downloads drain the
+    /// whole inbox into a private staging dir, then move each file into the
+    /// save dir without ever overwriting).
     pub async fn accept_file(name: &str, save_dir: &str) -> Result<String, String> {
         let name = name.to_string();
         let save_dir = save_dir.to_string();
         tokio::time::timeout(
             std::time::Duration::from_secs(120),
             tokio::task::spawn_blocking(move || {
-                super::accept_file_with_getter(&name, &save_dir, || {
+                super::accept_file_with_getter(&name, &save_dir, |staging| {
                     // --wait=false: don't block if the inbox is empty.
                     let output = tailscale_cmd()
-                        .args(["file", "get", "--wait=false", &save_dir])
+                        .args(["file", "get", "--wait=false", &staging.to_string_lossy()])
                         .output()
                         .map_err(|e| format!("Failed to run tailscale file get: {}", e))?;
                     if !output.status.success() {
@@ -1841,7 +2066,7 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
 
         // "../" has no file_name component → should error "Invalid filename"
-        let result = accept_file_with_getter("../", dir.to_str().unwrap(), || Ok(()));
+        let result = accept_file_with_getter("../", dir.to_str().unwrap(), |_| Ok(()));
         assert!(result.is_err(), "path traversal should be rejected");
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -1854,11 +2079,299 @@ mod tests {
 
         // A normal filename with a no-op getter should find no file and error,
         // but the name itself should pass sanitization (not "Invalid filename").
-        let result = accept_file_with_getter("photo.jpg", dir.to_str().unwrap(), || Ok(()));
+        let result = accept_file_with_getter("photo.jpg", dir.to_str().unwrap(), |_| Ok(()));
         assert!(result.is_err(), "should fail because file doesn't appear");
         assert!(
             !result.unwrap_err().contains("Invalid filename"),
             "normal filename should pass sanitization"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // --- accept_file_with_getter P0 regression tests ---
+
+    /// Helper: build a `run_get` fake that simulates `tailscale file get`
+    /// delivering files into the (staging) directory it is handed.
+    fn fake_cli_delivering(
+        files: Vec<(&'static str, &'static str)>,
+    ) -> impl FnOnce(&std::path::Path) -> Result<(), String> {
+        move |staging: &std::path::Path| {
+            for (name, content) in files {
+                std::fs::write(staging.join(name), content).map_err(|e| e.to_string())?;
+            }
+            Ok(())
+        }
+    }
+
+    fn temp_test_dir(label: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("taildrop_test_{}", label));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn accept_returns_path_content_actually_landed_in() {
+        let dir = temp_test_dir("actual_path");
+        // A same-named file already exists — the move must not clobber it and
+        // must return the path the NEW content landed in.
+        std::fs::write(dir.join("report.pdf"), "old").unwrap();
+
+        let result = accept_file_with_getter(
+            "report.pdf",
+            dir.to_str().unwrap(),
+            fake_cli_delivering(vec![("report.pdf", "new")]),
+        )
+        .unwrap();
+
+        let returned = std::path::PathBuf::from(&result);
+        assert_eq!(
+            returned,
+            dir.join("report (1).pdf"),
+            "new content must land in a distinct file"
+        );
+        assert_eq!(
+            std::fs::read_to_string(returned).unwrap(),
+            "new",
+            "returned path must contain the new content"
+        );
+        assert_eq!(
+            std::fs::read_to_string(dir.join("report.pdf")).unwrap(),
+            "old",
+            "pre-existing file must never be overwritten"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn accept_concurrent_double_accept_yields_two_distinct_files() {
+        let dir = temp_test_dir("double_accept");
+        let dir_str = dir.to_str().unwrap().to_string();
+
+        let (first, second) = std::thread::scope(|s| {
+            let h1 = s.spawn(|| {
+                accept_file_with_getter(
+                    "report.pdf",
+                    &dir_str,
+                    fake_cli_delivering(vec![("report.pdf", "first")]),
+                )
+            });
+            let h2 = s.spawn(|| {
+                accept_file_with_getter(
+                    "report.pdf",
+                    &dir_str,
+                    fake_cli_delivering(vec![("report.pdf", "second")]),
+                )
+            });
+            (h1.join().unwrap(), h2.join().unwrap())
+        });
+
+        let p1 = std::path::PathBuf::from(first.expect("first accept should succeed"));
+        let p2 = std::path::PathBuf::from(second.expect("second accept should succeed"));
+        assert_ne!(p1, p2, "double accept must yield two distinct files");
+        assert_eq!(std::fs::read_to_string(&p1).unwrap(), "first");
+        assert_eq!(std::fs::read_to_string(&p2).unwrap(), "second");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn accept_moves_collateral_files_without_losing_them() {
+        let dir = temp_test_dir("collateral");
+        // The CLI drains the whole inbox: two pending files arrive even though
+        // only one was accepted. Both must end up in the save dir (the old
+        // single-new-entry heuristic lost track with 2+ pending files).
+        let result = accept_file_with_getter(
+            "wanted.txt",
+            dir.to_str().unwrap(),
+            fake_cli_delivering(vec![("wanted.txt", "wanted"), ("other.txt", "other")]),
+        )
+        .unwrap();
+
+        assert_eq!(
+            std::path::PathBuf::from(&result),
+            dir.join("wanted.txt"),
+            "must return the path of the requested file"
+        );
+        assert_eq!(
+            std::fs::read_to_string(dir.join("other.txt")).unwrap(),
+            "other"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn accept_falls_back_to_existing_file_when_inbox_empty() {
+        let dir = temp_test_dir("already_received");
+        // Auto-receive poll already saved the file; clicking Accept drains an
+        // empty inbox. The existing exact-name file is returned.
+        std::fs::write(dir.join("note.txt"), "already here").unwrap();
+        let result =
+            accept_file_with_getter("note.txt", dir.to_str().unwrap(), |_| Ok(())).unwrap();
+        assert_eq!(std::path::PathBuf::from(&result), dir.join("note.txt"));
+        assert_eq!(
+            std::fs::read_to_string(dir.join("note.txt")).unwrap(),
+            "already here"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn accept_reports_failure_when_file_never_appears() {
+        let dir = temp_test_dir("never_appeared");
+        let err =
+            accept_file_with_getter("ghost.txt", dir.to_str().unwrap(), |_| Ok(())).unwrap_err();
+        assert!(
+            err.contains("ghost.txt"),
+            "error should name the missing file: {}",
+            err
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn accept_creates_missing_save_dir() {
+        let root = temp_test_dir("create_save_dir");
+        let save = root.join("nested/save");
+        let result = accept_file_with_getter(
+            "file.txt",
+            save.to_str().unwrap(),
+            fake_cli_delivering(vec![("file.txt", "hi")]),
+        );
+        assert!(
+            result.is_ok(),
+            "missing save dir should be created: {:?}",
+            result
+        );
+        assert_eq!(
+            std::fs::read_to_string(save.join("file.txt")).unwrap(),
+            "hi"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    // --- move_file_into_dir / reserve_unique_file ---
+
+    #[test]
+    fn move_file_into_dir_never_overwrites() {
+        let dir = temp_test_dir("move_no_overwrite");
+        std::fs::write(dir.join("a.txt"), "original").unwrap();
+        let src = dir.join("src.txt");
+        std::fs::write(&src, "incoming").unwrap();
+
+        let dest = move_file_into_dir(&src, &dir, "a.txt").unwrap();
+        assert_eq!(dest, dir.join("a (1).txt"));
+        assert_eq!(
+            std::fs::read_to_string(dir.join("a.txt")).unwrap(),
+            "original"
+        );
+        assert_eq!(std::fs::read_to_string(&dest).unwrap(), "incoming");
+        assert!(!src.exists(), "source must be consumed by the move");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn reserve_unique_file_does_not_truncate() {
+        let dir = temp_test_dir("reserve_no_truncate");
+        std::fs::write(dir.join("data.bin"), "payload").unwrap();
+        let (file, path) = reserve_unique_file(&dir, "data.bin").unwrap();
+        assert_eq!(path, dir.join("data (1).bin"), "must take the next suffix");
+        drop(file);
+        assert_eq!(
+            std::fs::read_to_string(dir.join("data.bin")).unwrap(),
+            "payload",
+            "existing file must be untouched"
+        );
+        assert!(path.exists(), "reserved file must exist");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // --- cli_receive_files (P0: no --conflict=overwrite) ---
+
+    /// A successful exit status, built cross-platform via the OS-specific
+    /// `ExitStatusExt` (there is no portable constructor).
+    fn success_status() -> std::process::ExitStatus {
+        #[cfg(unix)]
+        {
+            use std::os::unix::process::ExitStatusExt;
+            std::process::ExitStatus::from_raw(0)
+        }
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::ExitStatusExt;
+            std::process::ExitStatus::from_raw(0)
+        }
+    }
+
+    /// Fake CLI output: stdout is what `tailscale file get --verbose` prints.
+    fn fake_cli_output(moved_line: &str) -> std::process::Output {
+        std::process::Output {
+            status: success_status(),
+            stdout: format!("{}\n", moved_line).into_bytes(),
+            stderr: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn cli_receive_files_uses_rename_conflict_policy() {
+        let dir = temp_test_dir("cli_rename_policy");
+        let captured_args: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+        let result = cli_receive_files(dir.to_str().unwrap(), "test", |args| {
+            *captured_args.lock().unwrap() = args.iter().map(|a| a.to_string()).collect();
+            Ok(fake_cli_output("moved 0/0 files"))
+        })
+        .unwrap();
+        assert_eq!(result, b"[]");
+
+        let args = captured_args.into_inner().unwrap();
+        assert!(
+            !args.contains(&"--conflict=overwrite".to_string()),
+            "poll must never overwrite: args = {:?}",
+            args
+        );
+        assert!(
+            args.contains(&"--conflict=rename".to_string()),
+            "rename policy must be explicit: args = {:?}",
+            args
+        );
+        assert!(args.contains(&dir.to_str().unwrap().to_string()));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn cli_receive_files_propagates_save_dir_error() {
+        // Make save_dir creation impossible: a regular file exists where the
+        // directory should be created under it.
+        let root = temp_test_dir("cli_save_dir_error");
+        let blocker = root.join("blocker");
+        std::fs::write(&blocker, "not a dir").unwrap();
+        let bad_dir = blocker.join("sub");
+
+        let result = cli_receive_files(bad_dir.to_str().unwrap(), "test", |_| {
+            Ok(fake_cli_output("moved 0/0 files"))
+        });
+        assert!(
+            result.is_err(),
+            "unusable save dir must surface an error, not an empty list"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn cli_receive_files_reports_received_files() {
+        let dir = temp_test_dir("cli_reports_files");
+        // Simulate the CLI having written one file ("moved 1/1") and list it.
+        std::fs::write(dir.join("got.txt"), "x").unwrap();
+        let result = cli_receive_files(dir.to_str().unwrap(), "test", |args| {
+            // The last arg is the save dir; pretend the CLI saved got.txt.
+            assert_eq!(args.last().copied(), Some(dir.to_str().unwrap()));
+            Ok(fake_cli_output("moved 1/1 files"))
+        })
+        .unwrap();
+        let text = String::from_utf8(result).unwrap();
+        assert!(
+            text.contains("got.txt"),
+            "should list received file: {}",
+            text
         );
         let _ = std::fs::remove_dir_all(&dir);
     }

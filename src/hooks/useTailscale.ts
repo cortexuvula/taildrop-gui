@@ -1,4 +1,4 @@
-import { useCallback, useRef, type RefObject } from "react";
+import { useCallback, useEffect, useRef, type RefObject } from "react";
 import type { TransferRecord } from "../types";
 import { useSettings } from "./useSettings";
 import { usePeers } from "./usePeers";
@@ -31,14 +31,18 @@ export interface UseTailscaleOptions {
  *   transfer history without owning that state.
  */
 export function useTailscale(options?: UseTailscaleOptions) {
-  const { settings, settingsRef, updateSettings } = useSettings();
+  const { settings, settingsRef, updateSettings, saveDirError } = useSettings();
   const { peers, loading, error, visiblePeers } = usePeers(settings);
 
   // Keep the latest onSendError callback in a ref so the send/accept closures
-  // don't need it in their dependency arrays.
+  // don't need it in their dependency arrays. Updated in an effect (not
+  // during render) to stay StrictMode/concurrent-safe.
   const onSendErrorRef: RefObject<((info: SendErrorInfoLike) => void) | undefined> =
     useRef(options?.onSendError);
-  onSendErrorRef.current = options?.onSendError;
+  const onSendError = options?.onSendError;
+  useEffect(() => {
+    onSendErrorRef.current = onSendError;
+  }, [onSendError]);
 
   // Bridge between useIncomingFiles (owner) and useTransfers (consumer).
   // Created here as a mutable ref, populated below once useIncomingFiles
@@ -63,14 +67,18 @@ export function useTailscale(options?: UseTailscaleOptions) {
     [],
   );
 
-  const { incomingFiles, bridgeRef } = useIncomingFiles({
+  const { incomingFiles, bridgeRef, pollError } = useIncomingFiles({
     settingsRef,
     transfers,
     appendTransfers,
   });
   // Wire the incoming bridge into the ref useTransfers reads. The methods are
-  // stable across renders; refreshIncoming is rebound each render.
-  incomingBridgeRef.current = bridgeRef.current;
+  // stable across renders; refreshIncoming is rebound each render, so the
+  // assignment happens in an effect rather than during render.
+  const bridge = bridgeRef.current;
+  useEffect(() => {
+    incomingBridgeRef.current = bridge;
+  }, [bridge]);
 
   return {
     peers,
@@ -83,5 +91,7 @@ export function useTailscale(options?: UseTailscaleOptions) {
     sendFile,
     acceptFile,
     updateSettings,
+    saveDirError,
+    pollError,
   };
 }

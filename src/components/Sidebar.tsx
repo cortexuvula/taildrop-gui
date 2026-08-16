@@ -8,7 +8,9 @@ interface SidebarProps {
   onSelectPeer: (peer: Peer) => void;
   incomingCount: number;
   onShowSettings: () => void;
-  onShowDebug: () => void;
+  /** Debug panel is dev-only (release builds retain no debug logs to show),
+   * so this is omitted outside development. */
+  onShowDebug?: () => void;
 }
 
 function getOsIcon(os: string): string {
@@ -55,9 +57,11 @@ export function Sidebar({
           {incomingCount > 0 && (
             <span className="badge">{incomingCount}</span>
           )}
-          <button className="icon-btn" onClick={onShowDebug} title="Debug" aria-label="Open debug panel">
-            🔍
-          </button>
+          {onShowDebug && (
+            <button className="icon-btn" onClick={onShowDebug} title="Debug" aria-label="Open debug panel">
+              🔍
+            </button>
+          )}
           <button className="icon-btn" onClick={onShowSettings} title="Settings" aria-label="Open settings">
             ⚙
           </button>

@@ -15,19 +15,28 @@ describe("toErrorMsg", () => {
     expect(toErrorMsg({ code: 403, message: "access denied" })).toBe("access denied");
   });
 
-  it("falls back to [object Object] for objects without .message", () => {
-    expect(toErrorMsg({ code: 403 })).toBe("[object Object]");
+  it("never renders [object Object] for objects without .message", () => {
+    expect(toErrorMsg({ code: 403 })).toBe('{"code":403}');
+    expect(toErrorMsg({ nested: { a: 1 } })).toBe('{"nested":{"a":1}}');
   });
 
-  it("handles null gracefully", () => {
-    expect(toErrorMsg(null)).toBe("null");
-  });
-
-  it("handles undefined gracefully", () => {
-    expect(toErrorMsg(undefined)).toBe("undefined");
+  it("handles null and undefined without leaking bare 'null'/'undefined'", () => {
+    expect(toErrorMsg(null)).toBe("Unknown error (null)");
+    expect(toErrorMsg(undefined)).toBe("Unknown error (undefined)");
   });
 
   it("handles numbers", () => {
     expect(toErrorMsg(42)).toBe("42");
+  });
+
+  it("never returns an empty message", () => {
+    expect(toErrorMsg("")).toBe("Unknown error");
+    expect(toErrorMsg("   ")).toBe("Unknown error");
+    expect(toErrorMsg(new Error(""))).toBe("Error");
+    expect(toErrorMsg({ message: "" })).toBe("Unknown error");
+  });
+
+  it("serializes arrays usefully", () => {
+    expect(toErrorMsg([1, 2])).toBe("[1,2]");
   });
 });

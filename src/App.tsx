@@ -75,6 +75,8 @@ function App() {
     sendFile,
     acceptFile,
     updateSettings,
+    saveDirError,
+    pollError,
   } = useTailscale({ onSendError });
 
   // Mount-time diagnostic: one summary log (not per-render noise).
@@ -103,10 +105,22 @@ function App() {
         onSelectPeer={(peer) => setSelectedPeerId((prev) => (prev === peer.id ? null : peer.id))}
         incomingCount={incomingFiles.length}
         onShowSettings={() => setShowSettings(true)}
-        onShowDebug={() => setShowDebug(true)}
+        onShowDebug={import.meta.env.DEV ? () => setShowDebug(true) : undefined}
       />
 
       <div className="main">
+        {pollError && (
+          <div className="poll-error-banner" role="alert">
+            <span className="poll-error-icon" aria-hidden="true">⚠</span>
+            <div>
+              <strong>Can’t check for incoming files</strong>
+              <div className="poll-error-detail">{pollError}</div>
+              <div className="poll-error-hint">
+                Make sure Tailscale is running and your save directory is reachable.
+              </div>
+            </div>
+          </div>
+        )}
         {loading ? (
           <div className="loading-state">
             <div className="spinner" />
@@ -144,6 +158,7 @@ function App() {
           onUpdate={updateSettings}
           onClose={() => setShowSettings(false)}
           updater={updater}
+          saveDirError={saveDirError}
         />
       )}
 

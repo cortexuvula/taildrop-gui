@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, type RefObject } from "react";
+import { useState, useEffect, useCallback, useRef, type RefObject } from "react";
 import type React from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
@@ -6,8 +6,13 @@ import type { Peer, TransferRecord, AppSettings } from "../types";
 import { logger } from "../lib/logger";
 import { toErrorMsg } from "../lib/toErrorMsg";
 import { loadStored, saveStored } from "../lib/storage";
+import { sanitizeTransfers } from "../lib/guards";
+import { newId } from "../lib/id";
 
 const MAX_TRANSFER_HISTORY = 200;
+/** Upper bound on simultaneous in-flight sends; extra drops queue instead of
+ * firing every file at once (which saturates the daemon and the network). */
+const MAX_CONCURRENT_SENDS = 3;
 
 export interface SendErrorInfoLike {
   filename: string;
@@ -49,8 +54,13 @@ export interface UseTransfersResult {
 /**
  * Owns transfer history state and the send/accept actions.
  *
- * - Initial state is loaded lazily via `loadStored` so interrupted transfers
- *   from a previous session are surfaced as errors.
+ * - Initial state is loaded lazily via `loadStored` and SANITIZED — corrupt
+ *   or non-conforming entries (e.g. a null element from a damaged
+ *   localStorage) are dropped instead of white-screening the app on mount.
+ * - In-flight records from a previous session are removed rather than
+ *   rewritten as errors: their real outcome is unknown (the transfer may
+ *   have completed after the app closed), and inventing a failure that may
+ *   not have happened is worse than dropping the row.
  * - Persists debounced state to localStorage on change (pruning on quota
  *   errors).
  * - Listens for backend `transfer-progress` events and updates progress.
@@ -59,17 +69,21 @@ export function useTransfers(options: UseTransfersOptions): UseTransfersResult {
   const { settingsRef, onSendErrorRef, incomingBridgeRef } = options;
 
   const [transfers, setTransfers] = useState<TransferRecord[]>(() => {
-    const stored = loadStored<TransferRecord[]>("taildrop-transfers");
-    if (stored && Array.isArray(stored)) {
-      // Mark stale in-progress transfers from previous session
-      return stored.map((t) =>
-        t.status === "sending" || t.status === "pending"
-          ? { ...t, status: "error" as const, error: "Interrupted — app was closed" }
-          : t,
-      );
-    }
-    return [];
+    const stored = loadStored<unknown>("taildrop-transfers");
+    return sanitizeTransfers(stored).filter(
+      (t) => t.status !== "sending" && t.status !== "pending" && t.status !== "receiving",
+    );
   });
+
+  // Lifecycle guard: send/accept callbacks settle asynchronously and must not
+  // touch state after unmount.
+  const mountedRef = useRef(true);
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+    };
+  }, []);
 
   // Persist transfer history (debounced to avoid jank during rapid transfers).
   useEffect(() => {
@@ -84,7 +98,10 @@ export function useTransfers(options: UseTransfersOptions): UseTransfersResult {
             saveStored("taildrop-transfers", pruned);
             setTransfers(pruned);
           } catch {
-            // still can't write after pruning — give up silently
+            logger.warn(
+              "useTransfers",
+              "localStorage quota still exceeded after pruning — history will not persist",
+            );
           }
         }
       }
@@ -120,7 +137,7 @@ export function useTransfers(options: UseTransfersOptions): UseTransfersResult {
       // Create transfer records upfront
       const records = filePaths.map((filePath) => {
         const filename = filePath.split(/[\\/]/).pop() || "file";
-        const id = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+        const id = newId();
         return {
           record: {
             id,
@@ -137,42 +154,54 @@ export function useTransfers(options: UseTransfersOptions): UseTransfersResult {
         [...records.map((r) => r.record), ...prev].slice(0, MAX_TRANSFER_HISTORY),
       );
 
-      // Send all files in parallel
-      await Promise.allSettled(
-        records.map(async ({ record, filePath }) => {
-          try {
-            await invoke("send_file", {
-              transferId: record.id,
-              peerId: peer.id,
-              peerName: peer.machine_name,
-              filePath,
-            });
-            setTransfers((prev) =>
-              prev.map((t) =>
-                t.id === record.id ? { ...t, status: "success" } : t,
-              ),
-            );
-          } catch (e) {
-            const errorStr = toErrorMsg(e);
-            setTransfers((prev) =>
-              prev.map((t) =>
-                t.id === record.id
-                  ? { ...t, status: "error", error: errorStr }
-                  : t,
-              ),
-            );
-            logger.debug(
-              "useTransfers",
-              "send catch: errorStr =",
-              errorStr,
-              "| onSendErrorRef.current is",
-              typeof onSendErrorRef.current === "function" ? "SET" : "NULL",
-            );
-            onSendErrorRef.current?.({
-              filename: record.filename,
-              error: errorStr,
-              direction: "sent",
-            });
+      const sendOne = async ({
+        record,
+        filePath,
+      }: {
+        record: TransferRecord;
+        filePath: string;
+      }) => {
+        try {
+          await invoke("send_file", {
+            transferId: record.id,
+            peerId: peer.id,
+            peerName: peer.machine_name,
+            filePath,
+          });
+          if (!mountedRef.current) return;
+          setTransfers((prev) =>
+            prev.map((t) =>
+              t.id === record.id ? { ...t, status: "success" } : t,
+            ),
+          );
+        } catch (e) {
+          if (!mountedRef.current) return;
+          const errorStr = toErrorMsg(e);
+          setTransfers((prev) =>
+            prev.map((t) =>
+              t.id === record.id
+                ? { ...t, status: "error", error: errorStr }
+                : t,
+            ),
+          );
+          onSendErrorRef.current?.({
+            filename: record.filename,
+            error: errorStr,
+            direction: "sent",
+          });
+        }
+      };
+
+      // Bounded worker pool: fire at most MAX_CONCURRENT_SENDS at once and
+      // pull the rest from the queue as slots free up.
+      let next = 0;
+      const workerCount = Math.min(MAX_CONCURRENT_SENDS, records.length);
+      await Promise.all(
+        Array.from({ length: workerCount }, async () => {
+          for (;;) {
+            const index = next++;
+            if (index >= records.length) break;
+            await sendOne(records[index]);
           }
         }),
       );
@@ -187,7 +216,7 @@ export function useTransfers(options: UseTransfersOptions): UseTransfersResult {
   const acceptFile = useCallback(
     async (name: string) => {
       const bridge = incomingBridgeRef.current;
-      const id = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+      const id = newId();
       const peerName = bridge?.peerNameFor(name) ?? "incoming";
       const record: TransferRecord = {
         id,
@@ -195,7 +224,7 @@ export function useTransfers(options: UseTransfersOptions): UseTransfersResult {
         peerName,
         direction: "received",
         timestamp: Date.now(),
-        status: "pending",
+        status: "receiving",
       };
       setTransfers((prev) => [record, ...prev].slice(0, MAX_TRANSFER_HISTORY));
       bridge?.removeIncoming(name);
@@ -206,6 +235,7 @@ export function useTransfers(options: UseTransfersOptions): UseTransfersResult {
           name,
           saveDir: settingsRef.current.saveDirectory,
         });
+        if (!mountedRef.current) return savedPath;
         setTransfers((prev) =>
           prev.map((t) => (t.id === id ? { ...t, status: "success" } : t)),
         );
@@ -213,6 +243,7 @@ export function useTransfers(options: UseTransfersOptions): UseTransfersResult {
         await bridge?.refreshIncoming();
         return savedPath;
       } catch (e) {
+        if (!mountedRef.current) return;
         const errorStr = toErrorMsg(e);
         setTransfers((prev) =>
           prev.map((t) =>

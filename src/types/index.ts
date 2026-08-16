@@ -19,13 +19,21 @@ export interface IncomingFile {
   peerName?: string;
 }
 
+export type TransferStatus =
+  | "pending"
+  | "sending"
+  | "receiving"
+  | "success"
+  | "error"
+  | "cancelled";
+
 export interface TransferRecord {
   id: string;
   filename: string;
   peerName: string;
   direction: "sent" | "received";
   timestamp: number;
-  status: "pending" | "sending" | "success" | "error";
+  status: TransferStatus;
   error?: string;
   progress?: number;
 }
