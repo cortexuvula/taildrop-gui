@@ -1,5 +1,6 @@
-import { useState, useEffect, useCallback, useRef, useMemo, type RefObject } from "react";
+import { useState, useEffect, useCallback, useRef, type RefObject } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import {
   isPermissionGranted,
@@ -13,14 +14,10 @@ import { sanitizeIncomingFiles } from "../lib/guards";
 import { newId } from "../lib/id";
 
 const MAX_TRANSFER_HISTORY = 200;
-/** After this many consecutive failed polls, surface a persistent warning —
- * a dead daemon must not masquerade as "no incoming files". */
-const POLL_FAILURE_THRESHOLD = 3;
 
 export interface UseIncomingFilesOptions {
+  settings: AppSettings;
   settingsRef: RefObject<AppSettings>;
-  /** Transfers list — used to compute `hasActiveTransfers` for adaptive polling. */
-  transfers: TransferRecord[];
   /**
    * Append received transfer records (used by the auto-accept path). The
    * caller passes a state setter wrapper so this hook needn't own transfers.
@@ -40,20 +37,25 @@ export interface UseIncomingFilesResult {
   /** Incoming-state operations exposed for useTransfers via the facade bridge. */
   bridgeRef: RefObject<IncomingBridge>;
   /**
-   * Set when polling has failed repeatedly (daemon unreachable, unusable save
-   * dir, …). Rendered as a persistent banner so silent "no files" states are
-   * impossible.
+   * Set when the backend receive loop has failed repeatedly (daemon
+   * unreachable, unusable save dir, …). Rendered as a persistent banner so
+   * silent "no files" states are impossible.
    */
   pollError: string | null;
 }
 
 /**
- * Polls the Tailscale incoming-files list (adaptive: 2s when transfers are
- * active, 8s when idle), emits desktop notifications for new files, and
- * auto-accepts when the user has enabled it.
+ * Tracks Tailscale incoming files from the backend's background receive
+ * loop: `incoming-files-changed` is the single source of truth for the list
+ * and `incoming-files-error` for persistent failures. The timed polling
+ * lives in Rust now — WKWebView suspends DOM timers in a minimized window,
+ * which used to stop the download on socket-less macOS/Windows until
+ * refocus. This hook keeps the backend's receive settings in sync, emits
+ * desktop notifications for new files, auto-accepts when enabled, and does a
+ * one-shot catch-up fetch on mount/refocus for an instant list.
  */
 export function useIncomingFiles(options: UseIncomingFilesOptions): UseIncomingFilesResult {
-  const { settingsRef, transfers, appendTransfers } = options;
+  const { settings, settingsRef, appendTransfers } = options;
 
   const [incomingFiles, setIncomingFiles] = useState<IncomingFile[]>([]);
   const [pollError, setPollError] = useState<string | null>(null);
@@ -67,7 +69,7 @@ export function useIncomingFiles(options: UseIncomingFilesOptions): UseIncomingF
     incomingFilesRef.current = incomingFiles;
   }, [incomingFiles]);
 
-  // Lifecycle guard: async poll callbacks must not touch state after unmount.
+  // Lifecycle guard: async callbacks must not touch state after unmount.
   const mountedRef = useRef(true);
   useEffect(() => {
     mountedRef.current = true;
@@ -166,20 +168,16 @@ export function useIncomingFiles(options: UseIncomingFilesOptions): UseIncomingF
     }
   }, [settingsRef]);
 
-  // Fetch incoming files. Tracks consecutive failures so a dead daemon or an
-  // unusable save dir surfaces as a persistent error instead of an
-  // indistinguishable-from-success empty list.
-  const consecutiveFailuresRef = useRef(0);
-  const refreshIncoming = useCallback(async () => {
-    try {
-      const result = await invoke<unknown>("get_incoming_files", {
-        saveDir: settingsRef.current.saveDirectory,
-      });
+  // Apply a fresh incoming-files list — from a backend
+  // `incoming-files-changed` event or a one-shot catch-up fetch. Sanitizes
+  // the boundary, drops recently-accepted names (poll race prevention), then
+  // notifies / auto-accepts / updates state.
+  const applyIncoming = useCallback(
+    (rawList: unknown) => {
       if (!mountedRef.current) return;
-      // Sanitize the IPC boundary: malformed entries are dropped, and a
+      // Sanitize the boundary: malformed entries are dropped, and a
       // non-array payload becomes an empty list rather than a crash.
-      const files = sanitizeIncomingFiles(result);
-      consecutiveFailuresRef.current = 0;
+      const files = sanitizeIncomingFiles(rawList);
       setPollError(null);
 
       // Filter out files that were recently accepted (poll race prevention)
@@ -204,51 +202,75 @@ export function useIncomingFiles(options: UseIncomingFilesOptions): UseIncomingF
       } else {
         setIncomingFiles(filtered);
       }
-    } catch (e) {
-      if (!mountedRef.current) return;
-      const msg = toErrorMsg(e);
-      consecutiveFailuresRef.current += 1;
-      logger.debug("useIncomingFiles", `poll failed (${consecutiveFailuresRef.current}):`, msg);
-      if (consecutiveFailuresRef.current >= POLL_FAILURE_THRESHOLD) {
-        setPollError(msg);
-      }
-    }
-  }, [autoAcceptFiles, notifyIncoming, settingsRef]);
-
-  // Adaptive polling: faster when transfers are active, slower when idle.
-  const hasActiveTransfers = useMemo(
-    () =>
-      transfers.some(
-        (t) =>
-          t.status === "sending" ||
-          t.status === "pending" ||
-          t.status === "receiving",
-      ),
-    [transfers],
+    },
+    [autoAcceptFiles, notifyIncoming, settingsRef],
   );
 
+  // The backend receive loop is the single source of truth for the incoming
+  // list and for persistent receive failures (emitted after repeated
+  // failures, mirroring the old 3-strike poll threshold).
   useEffect(() => {
-    refreshIncoming();
-    const incomingMs = hasActiveTransfers ? 2000 : 8000;
-    const interval = setInterval(refreshIncoming, incomingMs);
-    return () => clearInterval(interval);
-  }, [refreshIncoming, hasActiveTransfers]);
+    const unlistenChanged = listen<unknown>("incoming-files-changed", (event) => {
+      applyIncoming(event.payload);
+    });
+    const unlistenError = listen<string>("incoming-files-error", (event) => {
+      if (!mountedRef.current) return;
+      setPollError(
+        typeof event.payload === "string" ? event.payload : toErrorMsg(event.payload),
+      );
+    });
+    return () => {
+      // Swallow rejections from a failed listen() or a throwing unlisten fn.
+      unlistenChanged.then((fn) => fn()).catch(() => {});
+      unlistenError.then((fn) => fn()).catch(() => {});
+    };
+  }, [applyIncoming]);
 
-  // When the window regains visibility or focus, fire an immediate poll.
-  // WKWebView throttles setInterval when minimized/occluded, so we need
-  // both: visibilitychange covers minimize/un-minimize, and the Tauri
-  // window focus event covers occlusion (another window on top) — which
+  // Keep the backend's shared receive settings in sync — its loop uses these
+  // for every poll, including the ones that happen while this webview is
+  // suspended in a minimized window.
+  useEffect(() => {
+    invoke("set_receive_settings", {
+      saveDir: settings.saveDirectory,
+      autoAccept: settings.autoAccept,
+    }).catch((e) => {
+      logger.warn("useIncomingFiles", "set_receive_settings failed:", toErrorMsg(e));
+    });
+  }, [settings.saveDirectory, settings.autoAccept]);
+
+  // One-shot catch-up fetch: on mount and when the window regains
+  // visibility/focus, ask the backend for the current list so the UI is
+  // instant. This is NOT the periodic receive loop — that lives in Rust —
+  // but it is the same list/download call, so files the backend already
+  // received while minimized appear immediately on refocus.
+  const refreshIncoming = useCallback(async () => {
+    try {
+      const result = await invoke<unknown>("get_incoming_files", {
+        saveDir: settingsRef.current.saveDirectory,
+      });
+      applyIncoming(result);
+    } catch (e) {
+      // A single failed catch-up is not proof the daemon is dead; the
+      // backend emits the persistent error via incoming-files-error.
+      logger.debug("useIncomingFiles", "catch-up fetch failed:", toErrorMsg(e));
+    }
+  }, [applyIncoming, settingsRef]);
+
+  // When the window regains visibility or focus, fire an immediate catch-up.
+  // visibilitychange covers minimize/un-minimize, and the Tauri window focus
+  // event covers occlusion (another window on top) — which
   // visibilitychange does NOT fire for (known Tauri bug #6864).
   useEffect(() => {
+    void refreshIncoming();
     const handleVisible = () => {
-      if (!document.hidden) refreshIncoming();
+      if (!document.hidden) void refreshIncoming();
     };
     document.addEventListener("visibilitychange", handleVisible);
 
     let unlistenFocus: (() => void) | undefined;
     getCurrentWindow()
       .onFocusChanged(({ payload: focused }: { payload: boolean }) => {
-        if (focused) refreshIncoming();
+        if (focused) void refreshIncoming();
       })
       .then((fn: () => void) => {
         unlistenFocus = fn;

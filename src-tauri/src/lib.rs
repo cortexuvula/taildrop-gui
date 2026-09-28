@@ -1,7 +1,33 @@
 mod debug_log;
 mod tailscale;
 
-use tauri::Emitter;
+use std::sync::RwLock;
+
+use tauri::{Emitter, Manager};
+
+/// Shared receive settings: written by the `set_receive_settings` IPC
+/// command, read by the background receive task on every iteration.
+struct ReceiveSettings {
+    save_dir: String,
+    /// Plumbed through for completeness; auto-accept itself stays
+    /// frontend-driven (see useIncomingFiles), so the receive loop does not
+    /// read this field yet.
+    #[allow(dead_code)]
+    auto_accept: bool,
+}
+
+type SharedReceiveSettings = RwLock<ReceiveSettings>;
+
+/// Idle interval for the background receive loop when nothing changed.
+const RECEIVE_IDLE_INTERVAL: std::time::Duration = std::time::Duration::from_secs(8);
+/// Interval used for a few iterations after the incoming list changed, so an
+/// active transfer burst is picked up quickly (mirrors the old frontend poll).
+const RECEIVE_ACTIVE_INTERVAL: std::time::Duration = std::time::Duration::from_secs(2);
+/// How many iterations stay fast after a change.
+const RECEIVE_FAST_ITERATIONS: u32 = 5;
+/// Consecutive fetch failures before `incoming-files-error` is emitted — a
+/// dead daemon must not masquerade as "no incoming files".
+const RECEIVE_FAILURE_THRESHOLD: u32 = 3;
 
 #[tauri::command]
 async fn get_tailscale_status() -> Result<Vec<tailscale::Peer>, String> {
@@ -88,10 +114,14 @@ async fn accept_file(name: String, save_dir: String) -> Result<String, String> {
 
 #[tauri::command]
 fn get_default_download_dir() -> String {
+    default_download_dir().to_string_lossy().to_string()
+}
+
+/// Default save directory: the OS download dir, falling back to the home
+/// directory, then the working directory.
+fn default_download_dir() -> std::path::PathBuf {
     dirs::download_dir()
         .unwrap_or_else(|| dirs::home_dir().unwrap_or_else(|| std::path::PathBuf::from(".")))
-        .to_string_lossy()
-        .to_string()
 }
 
 /// Resolve the effective save directory: the given directory, or the default
@@ -99,8 +129,7 @@ fn get_default_download_dir() -> String {
 fn effective_save_dir(save_dir: &str) -> std::path::PathBuf {
     let save_dir = save_dir.trim();
     if save_dir.is_empty() {
-        dirs::download_dir()
-            .unwrap_or_else(|| dirs::home_dir().unwrap_or_else(|| std::path::PathBuf::from(".")))
+        default_download_dir()
     } else {
         std::path::PathBuf::from(save_dir)
     }
@@ -112,7 +141,12 @@ fn effective_save_dir(save_dir: &str) -> std::path::PathBuf {
 /// canonical path on success so callers can normalize what they display.
 #[tauri::command]
 async fn validate_save_dir(save_dir: String) -> Result<String, String> {
-    let path = effective_save_dir(&save_dir);
+    validate_save_dir_path(&save_dir).await
+}
+
+/// Body of [`validate_save_dir`], shared with `set_receive_settings`.
+async fn validate_save_dir_path(save_dir: &str) -> Result<String, String> {
+    let path = effective_save_dir(save_dir);
     if !path.is_absolute() {
         return Err(format!(
             "'{}' is not an absolute path — pick a folder via Browse",
@@ -159,6 +193,113 @@ fn timestamp_probe_tag() -> u64 {
     (ms << 20) | (n & 0xFFFFF)
 }
 
+/// Update the shared receive settings the background receive task reads.
+/// The values are stored even when validation fails so behavior matches the
+/// frontend-driven poll this replaces: an unusable dir surfaces as a
+/// persistent `incoming-files-error` event, not as a silent revert.
+#[tauri::command]
+async fn set_receive_settings(
+    state: tauri::State<'_, SharedReceiveSettings>,
+    save_dir: String,
+    auto_accept: bool,
+) -> Result<(), String> {
+    {
+        let mut settings = state
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        settings.save_dir = save_dir.clone();
+        settings.auto_accept = auto_accept;
+    }
+    validate_save_dir_path(&save_dir).await.map(|_| ())
+}
+
+/// Background receive loop. On macOS/Windows without a Tailscale socket,
+/// `fetch_incoming_files` IS the download (it runs `tailscale file get` into
+/// the save dir), so running it from Rust keeps incoming files flowing while
+/// the webview — and with it the old JS poll — is suspended in a minimized
+/// window. On Linux the call is list-only and downloading stays in
+/// `accept_file`.
+///
+/// Emits `incoming-files-changed` (payload: the current incoming-file list)
+/// when the list changed versus the previous iteration, and on recovery from
+/// an error state (even when empty — the frontend uses that to clear the
+/// error). Emits `incoming-files-error` (payload: message) once at least
+/// [`RECEIVE_FAILURE_THRESHOLD`] consecutive iterations failed. Both emits
+/// are best-effort: the task is cancelled at app shutdown and must not
+/// panic if the webview is already gone.
+async fn receive_loop(app: tauri::AppHandle) {
+    let mut prev_files: Vec<tailscale::IncomingFile> = Vec::new();
+    let mut consecutive_failures: u32 = 0;
+    let mut error_emitted = false;
+    let mut fast_iterations: u32 = 0;
+
+    loop {
+        let save_dir = {
+            let settings = app.state::<SharedReceiveSettings>();
+            let settings = settings
+                .read()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            settings.save_dir.clone()
+        };
+        let dir = effective_save_dir(&save_dir);
+
+        match tailscale::fetch_incoming_files(&dir.to_string_lossy()).await {
+            Ok(files) => {
+                let changed = incoming_lists_differ(&prev_files, &files);
+                if changed || error_emitted {
+                    if let Err(e) = app.emit("incoming-files-changed", &files) {
+                        log::debug!("receive loop: emit incoming-files-changed failed: {}", e);
+                    }
+                }
+                if changed {
+                    log::debug!(
+                        "receive loop: incoming list changed ({} file(s)), event emitted",
+                        files.len()
+                    );
+                    fast_iterations = RECEIVE_FAST_ITERATIONS;
+                }
+                prev_files = files;
+                consecutive_failures = 0;
+                error_emitted = false;
+            }
+            Err(msg) => {
+                consecutive_failures = consecutive_failures.saturating_add(1);
+                log::debug!(
+                    "receive loop: fetch failed ({}): {}",
+                    consecutive_failures,
+                    msg
+                );
+                if consecutive_failures >= RECEIVE_FAILURE_THRESHOLD {
+                    error_emitted = true;
+                    if let Err(e) = app.emit("incoming-files-error", msg) {
+                        log::debug!("receive loop: emit incoming-files-error failed: {}", e);
+                    }
+                }
+            }
+        }
+
+        let interval = if fast_iterations > 0 {
+            fast_iterations -= 1;
+            RECEIVE_ACTIVE_INTERVAL
+        } else {
+            RECEIVE_IDLE_INTERVAL
+        };
+        tokio::time::sleep(interval).await;
+    }
+}
+
+/// Compare incoming-file lists by (name, size) — the same identity the
+/// frontend's notification dedup uses. Order-insensitive so a daemon-side
+/// reshuffle doesn't spam `incoming-files-changed` events.
+fn incoming_lists_differ(a: &[tailscale::IncomingFile], b: &[tailscale::IncomingFile]) -> bool {
+    fn sorted_keys(files: &[tailscale::IncomingFile]) -> Vec<(&str, u64)> {
+        let mut keys: Vec<(&str, u64)> = files.iter().map(|f| (f.name.as_str(), f.size)).collect();
+        keys.sort_unstable();
+        keys
+    }
+    sorted_keys(a) != sorted_keys(b)
+}
+
 #[tauri::command]
 fn get_debug_logs() -> Vec<debug_log::LogEntry> {
     debug_log::snapshot()
@@ -182,6 +323,18 @@ pub fn run() {
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_process::init())
+        .manage(RwLock::new(ReceiveSettings {
+            save_dir: default_download_dir().to_string_lossy().to_string(),
+            auto_accept: false,
+        }))
+        .setup(|app| {
+            // The receive loop must live in Rust: WKWebView suspends DOM
+            // timers in a minimized window, which used to stop the JS poll
+            // that drives the CLI download on socket-less macOS/Windows.
+            let handle = app.handle().clone();
+            tauri::async_runtime::spawn(receive_loop(handle));
+            Ok(())
+        })
         .invoke_handler(tauri::generate_handler![
             get_tailscale_status,
             send_file,
@@ -189,9 +342,60 @@ pub fn run() {
             accept_file,
             get_default_download_dir,
             validate_save_dir,
+            set_receive_settings,
             get_debug_logs,
             get_env_info,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn file(name: &str, size: u64) -> tailscale::IncomingFile {
+        tailscale::IncomingFile {
+            name: name.to_string(),
+            size,
+            peer_name: None,
+        }
+    }
+
+    #[test]
+    fn lists_differ_detects_new_and_removed_files() {
+        let a = [file("a.txt", 10)];
+        assert!(incoming_lists_differ(
+            &a,
+            &[file("a.txt", 10), file("b.txt", 5)]
+        ));
+        assert!(incoming_lists_differ(
+            &[file("a.txt", 10), file("b.txt", 5)],
+            &a
+        ));
+    }
+
+    #[test]
+    fn lists_differ_detects_size_change() {
+        assert!(incoming_lists_differ(
+            &[file("a.txt", 10)],
+            &[file("a.txt", 11)]
+        ));
+    }
+
+    #[test]
+    fn lists_differ_ignores_order_and_peer_name() {
+        let a = [file("a.txt", 10), file("b.txt", 5)];
+        let mut b = [file("b.txt", 5), file("a.txt", 10)];
+        b[1].peer_name = Some("peer".to_string());
+        assert!(!incoming_lists_differ(&a, &b));
+    }
+
+    #[test]
+    fn lists_differ_counts_duplicates() {
+        assert!(incoming_lists_differ(
+            &[file("a.txt", 10)],
+            &[file("a.txt", 10), file("a.txt", 10)]
+        ));
+    }
 }

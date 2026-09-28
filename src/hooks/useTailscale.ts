@@ -68,8 +68,8 @@ export function useTailscale(options?: UseTailscaleOptions) {
   );
 
   const { incomingFiles, bridgeRef, pollError } = useIncomingFiles({
+    settings,
     settingsRef,
-    transfers,
     appendTransfers,
   });
   // Wire the incoming bridge into the ref useTransfers reads. The methods are

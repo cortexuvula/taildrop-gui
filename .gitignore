@@ -39,3 +39,4 @@ Thumbs.db
 
 # Agent workspace
 .zcode/
+.mimosa/
