@@ -54,9 +54,6 @@ export function Sidebar({
       <div className="sidebar-header">
         <h2>Nodes</h2>
         <div className="sidebar-actions">
-          {incomingCount > 0 && (
-            <span className="badge">{incomingCount}</span>
-          )}
           {onShowDebug && (
             <button className="icon-btn" onClick={onShowDebug} title="Debug" aria-label="Open debug panel">
               🔍
@@ -67,6 +64,13 @@ export function Sidebar({
           </button>
         </div>
       </div>
+
+      {incomingCount > 0 && (
+        <div className="sidebar-incoming-count" aria-label={`${incomingCount} incoming ${incomingCount === 1 ? "file" : "files"}`}>
+          <span className="section-label">Incoming</span>
+          <span className="badge">{incomingCount}</span>
+        </div>
+      )}
 
       <div className="sidebar-search">
         <div className="search-wrap">
@@ -96,6 +100,8 @@ export function Sidebar({
                 key={`${peer.public_key}:${peer.id}`}
                 className={`peer-card ${selectedPeer?.id === peer.id ? "selected" : ""}`}
                 onClick={() => onSelectPeer(peer)}
+                aria-pressed={selectedPeer?.id === peer.id}
+                title={peer.display_name}
               >
                 <span className="status-dot online" />
                 <span className="peer-os">{getOsIcon(peer.os)}</span>
@@ -118,6 +124,8 @@ export function Sidebar({
                 key={`${peer.public_key}:${peer.id}`}
                 className={`peer-card offline ${selectedPeer?.id === peer.id ? "selected" : ""}`}
                 onClick={() => onSelectPeer(peer)}
+                aria-pressed={selectedPeer?.id === peer.id}
+                title={peer.display_name}
               >
                 <span className="status-dot" />
                 <span className="peer-os">{getOsIcon(peer.os)}</span>
@@ -130,11 +138,18 @@ export function Sidebar({
           </div>
         )}
 
-        {peers.length === 0 && (
+        {peers.length === 0 && !search && (
           <div className="empty-state">
             {totalPeerCount > 0
               ? "All nodes are hidden or offline. Check Settings."
               : "No nodes found. Is Tailscale running?"}
+          </div>
+        )}
+
+        {search && filtered.length === 0 && (
+          <div className="empty-state">
+            <div>No devices match "{search}"</div>
+            <button className="search-clear-inline" onClick={() => setSearch("")}>Clear search</button>
           </div>
         )}
       </div>

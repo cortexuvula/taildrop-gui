@@ -3,7 +3,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { getVersion } from "@tauri-apps/api/app";
 import type { Peer } from "../types";
 import { useDebugLogs } from "../hooks/useDebugLogs";
-import { useModal } from "../hooks/useModal";
+import { useModalWithLabel } from "../hooks/useModal";
 import { clearFrontendLogs } from "../lib/logger";
 
 interface DebugPanelProps {
@@ -17,7 +17,7 @@ export function DebugPanel({ peers, onClose }: DebugPanelProps) {
   const [appVersion, setAppVersion] = useState("");
   const [envInfo, setEnvInfo] = useState("");
   const logs = useDebugLogs(true);
-  const { overlayRef, overlayProps } = useModal(onClose);
+  const { overlayRef, overlayProps } = useModalWithLabel(onClose, true, "debug-heading");
 
   useEffect(() => {
     getVersion().then(setAppVersion).catch(() => setAppVersion("?"));
@@ -88,7 +88,7 @@ export function DebugPanel({ peers, onClose }: DebugPanelProps) {
         onClick={(e) => e.stopPropagation()}
       >
         <div className="settings-header">
-          <h2>🔍 Debug — Peer List</h2>
+          <h2 id="debug-heading">🔍 Debug — Peer List</h2>
           <div className="debug-header-actions">
             <button className="icon-btn" onClick={handleCopy} title="Copy JSON">
               {copied ? "✓" : "📋"}

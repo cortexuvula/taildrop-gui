@@ -3,7 +3,7 @@ import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { open } from "@tauri-apps/plugin-dialog";
 import type { Peer } from "../types";
 import { useToast } from "./ToastProvider";
-import { useModal } from "../hooks/useModal";
+import { useModalWithLabel } from "../hooks/useModal";
 import { logger } from "../lib/logger";
 
 interface DropZoneProps {
@@ -54,9 +54,10 @@ export function DropZone({ selectedPeer, onSendFiles, peers }: DropZoneProps) {
     setShowPeerPicker(false);
     setPendingPaths([]);
   }, []);
-  const { overlayRef: pickerRef, overlayProps: pickerProps } = useModal(
+  const { overlayRef: pickerRef, overlayProps: pickerProps } = useModalWithLabel(
     closePeerPicker,
     showPeerPicker,
+    "peer-picker-heading",
   );
 
   // Tauri native drag-and-drop — gives file paths directly
@@ -165,7 +166,7 @@ export function DropZone({ selectedPeer, onSendFiles, peers }: DropZoneProps) {
       {showPeerPicker && pendingPaths.length > 0 && (
         <div className="peer-picker-overlay" ref={pickerRef} {...pickerProps} onClick={closePeerPicker}>
           <div className="peer-picker" onClick={(e) => e.stopPropagation()}>
-            <h3>Send {pendingPaths.length} file(s) to:</h3>
+            <h3 id="peer-picker-heading">Send {pendingPaths.length} file(s) to:</h3>
             <div className="peer-picker-list">
               {onlinePeers.map((peer) => (
                 <button
