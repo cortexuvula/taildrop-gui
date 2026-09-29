@@ -82,3 +82,44 @@ if we later want backend-side retry queue, that's v2.
   @ui-consultant, do not invent one.
 - Cross-launch persistence — receipts live in backend memory for the session;
   persisting to disk is a separate decision.
+
+## Staging recovery at startup (from the TD-01 fix)
+
+The TD-01 fix preserves `$TMPDIR/taildrop-accept-*` staging directories when a
+CLI receive or move fails partway. Those directories are **recovery data, not
+disposable cache**: they can hold the receiver's only remaining copy after the
+daemon inbox was already drained. Constraints (per repo-audititor, agreed):
+1. **Never age-delete.** No time- or size-based cleanup, ever. The bytes leave
+   temporary storage only after verified recovery or an explicit user discard.
+2. **Discover and notify at startup.** The backend scans
+   `std::env::temp_dir()` for `taildrop-accept-*` directories containing at
+   least one regular file and emits a new event:
+
+```jsonc
+// "staging-recovery-found" (backend → frontend, new)
+{
+  "dirs": [
+    {
+      "path": "/var/folders/.../taildrop-accept-1a0e...",
+      "files": [{ "name": "photo.jpg", "size": 1048576 }]
+    }
+  ]
+}
+```
+
+3. **Recovery reuses existing guarantees.** "Recover to save dir" moves each
+   file with the shared `move_file_into_dir` (exclusive-create, never
+   overwrites, collision-resolved names) and emits a normal `transfer-receipt`
+   with the actual landing `savedPath` — recovered files enter history
+   exactly-once like any other receive. The staging directory is removed only
+   after every file verifiably landed (same `count_files_in_dir` gate as the
+   accept path).
+4. **Discard is explicit and per-user-action only** (per directory, with the
+   file list shown). v1 ships no auto-discard of any kind; if unrecovered dirs
+   accumulate across launches, the notification repeats — that is the
+   intended, honest behavior until a v2 decision says otherwise.
+
+New command: `discard_staging_dir { path }` — gated to paths matching the
+`taildrop-accept-*` prefix directly under the temp dir (no arbitrary deletes);
+returns Err otherwise.
+
