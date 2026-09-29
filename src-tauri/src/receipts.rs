@@ -106,6 +106,13 @@ static STORE: LazyLock<ReceiptStore> = LazyLock::new(|| ReceiptStore {
     events: broadcast::channel(128).0,
 });
 
+/// Tests that (directly or via accept/drain code paths) touch the global
+/// store must hold this lock: parallel resets or concurrent recordings break
+/// count-based assertions. Shared across modules (tailscale tests exercise
+/// receipt-recording paths too).
+#[cfg(test)]
+pub(crate) static TEST_STORE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 fn now_ms() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -284,6 +291,17 @@ impl ReceiptStore {
         }
     }
 
+    /// Whether an identical saved receipt (same filename AND same landing
+    /// path) already exists — idempotence guard so acknowledging an
+    /// already-recorded CLI download (existing-file fallback, double accept)
+    /// does not create a duplicate receipt.
+    pub fn already_saved(filename: &str, saved_path: &str) -> bool {
+        let inner = STORE.inner.lock().unwrap_or_else(|p| p.into_inner());
+        inner.receipts.iter().any(|r| {
+            r.status == "saved" && r.filename == filename && r.saved_path == saved_path
+        })
+    }
+
     /// Classify a failed accept into its recovery kind. The TD-01/TD-04 fix
     /// messages embed the preserved staging path in quotes; when present the
     /// bytes may live ONLY there (retrying against the inbox could even
@@ -313,6 +331,13 @@ impl ReceiptStore {
         inner.next_seq = 1;
         inner.id_counter = 0;
         inner.highest_seq_ever = 0;
+    }
+
+    /// Test-only snapshot of recorded receipts in seq order.
+    #[cfg(test)]
+    pub fn snapshot_for_tests() -> Vec<TransferReceipt> {
+        let inner = STORE.inner.lock().unwrap_or_else(|p| p.into_inner());
+        inner.receipts.iter().cloned().collect()
     }
 
     #[cfg(test)]
@@ -390,10 +415,10 @@ pub fn validate_staging_path(path: &str) -> Result<std::path::PathBuf, String> {
 mod tests {
     use super::*;
 
-    // All receipt-store tests share ONE global store; without serialization a
-    // test's reset_for_tests() wipes another test's records mid-assertion
-    // (caught as a flaky pagination failure in the full suite).
-    static TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    // Receipts-module tests use the SHARED TEST_STORE_LOCK: tailscale-module
+    // tests also record into the global store, and a separate lock here let
+    // the two groups reset/record over each other (real flakes caught by
+    // repeated full-suite runs).
 
     fn fresh() {
         ReceiptStore::reset_for_tests();
@@ -401,7 +426,7 @@ mod tests {
 
     #[test]
     fn seq_is_strictly_increasing_and_ids_unique_same_ms() {
-        let _g = TEST_LOCK.lock().unwrap();
+        let _g = TEST_STORE_LOCK.lock().unwrap_or_else(|p| p.into_inner());
         fresh();
         let a = ReceiptStore::record_saved("a.txt", "/tmp/a.txt", 1, None);
         let b = ReceiptStore::record_saved("b.txt", "/tmp/b.txt", 1, None);
@@ -413,7 +438,7 @@ mod tests {
 
     #[test]
     fn pagination_never_skips_backlog() {
-        let _g = TEST_LOCK.lock().unwrap();
+        let _g = TEST_STORE_LOCK.lock().unwrap_or_else(|p| p.into_inner());
         fresh();
         for i in 0..125 {
             ReceiptStore::record_saved(&format!("f{}.txt", i), "/tmp/f.txt", 1, None);
@@ -436,7 +461,7 @@ mod tests {
 
     #[test]
     fn reset_flag_when_history_pruned() {
-        let _g = TEST_LOCK.lock().unwrap();
+        let _g = TEST_STORE_LOCK.lock().unwrap_or_else(|p| p.into_inner());
         fresh();
         let now = now_ms();
         // Two "old" receipts (beyond retention) then fresh ones.
@@ -465,7 +490,7 @@ mod tests {
 
     #[test]
     fn classify_recovery_parses_staging_path() {
-        let _g = TEST_LOCK.lock().unwrap();
+        let _g = TEST_STORE_LOCK.lock().unwrap_or_else(|p| p.into_inner());
         let r = ReceiptStore::classify_recovery(
             "tailscale file get failed: x. 1 file(s) it had already downloaded are preserved for recovery in '/var/folders/taildrop-accept-1a0e'",
         );
@@ -483,7 +508,7 @@ mod tests {
 
     #[test]
     fn validate_staging_path_rejects_escaping_paths() {
-        let _g = TEST_LOCK.lock().unwrap();
+        let _g = TEST_STORE_LOCK.lock().unwrap_or_else(|p| p.into_inner());
         assert!(validate_staging_path("/etc").is_err());
         assert!(validate_staging_path("/tmp/whatever").is_err());
         let inside = std::env::temp_dir().join("taildrop-accept-deadbeef");
@@ -494,7 +519,7 @@ mod tests {
 
     #[test]
     fn scan_finds_only_staging_dirs_with_files() {
-        let _g = TEST_LOCK.lock().unwrap();
+        let _g = TEST_STORE_LOCK.lock().unwrap_or_else(|p| p.into_inner());
         let base = std::env::temp_dir();
         let with_files = base.join("taildrop-accept-scan1");
         let empty = base.join("taildrop-accept-scan2");

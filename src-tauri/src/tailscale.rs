@@ -250,6 +250,13 @@ fn accept_file_with_getter(
             // user where it is instead of deleting it.
             let leftover = count_files_in_dir(&staging);
             if leftover > 0 {
+                // TD-05: the CLI's stdout would tell us which files completed
+                // before the failure, but the injected-getter contract gives
+                // us Output only through run_get; files present in staging
+                // after a failed run are treated as UNVERIFIED (a file
+                // sitting there is not proof it downloaded completely —
+                // repo-audititor). They stay recoverable via the staging
+                // recovery path; no "saved" receipt is recorded for them.
                 return Err(format!(
                     "tailscale file get failed: {}. {} file(s) it had already \
                      downloaded are preserved for recovery in '{}'",
@@ -286,8 +293,24 @@ fn accept_file_with_getter(
                 Some(n) => n.to_string(),
                 None => continue,
             };
+            let size = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
             match move_file_into_dir(&path, save_dir_path, &file_name) {
                 Ok(dest) => {
+                    // TD-05: every landed file gets a receipt — collateral
+                    // files too, not only the requested one (the CLI drained
+                    // the whole inbox; each file's bytes verifiably landed at
+                    // a known destination).
+                    if !crate::receipts::ReceiptStore::already_saved(
+                        &file_name,
+                        &dest.to_string_lossy(),
+                    ) {
+                        crate::receipts::ReceiptStore::record_saved(
+                            &file_name,
+                            &dest.to_string_lossy(),
+                            size,
+                            None,
+                        );
+                    }
                     if file_name == safe_name {
                         requested_path = Some(dest);
                     } else {
@@ -326,6 +349,20 @@ fn accept_file_with_getter(
         // the exact name, return that path.
         let existing = save_dir_path.join(safe_name);
         if existing.is_file() {
+            // TD-05: idempotent — if this exact landing was already recorded
+            // (auto-drain receipt from the poll loop), do not duplicate it.
+            if !crate::receipts::ReceiptStore::already_saved(
+                safe_name,
+                &existing.to_string_lossy(),
+            ) {
+                let size = std::fs::metadata(&existing).map(|m| m.len()).unwrap_or(0);
+                crate::receipts::ReceiptStore::record_saved(
+                    safe_name,
+                    &existing.to_string_lossy(),
+                    size,
+                    None,
+                );
+            }
             return Ok(existing.to_string_lossy().to_string());
         }
 
@@ -403,6 +440,16 @@ pub fn staging_is_empty(dir: &std::path::Path) -> bool {
 /// conflict policy — passed explicitly so it can't silently regress.)
 ///
 /// `platform_label` is used in log messages ("macOS" / "Windows").
+///
+/// TD-05: the drain runs into a private staging directory (same scheme as
+/// `accept_file_with_getter`) so received-file identity is EXACT, not
+/// inferred: every file that lands is one the CLI verifiably delivered this
+/// invocation. The previous implementation picked the N newest files in
+/// save_dir by modification time, which an unrelated browser download (or a
+/// future-dated file) could hijack (repo-audititor). Receipts are recorded
+/// per landed file here — the receive loop and the catch-up both route
+/// through this function, so both get durable receipts without duplicated
+/// recording logic.
 #[allow(dead_code)] // Only used on macOS/Windows
 fn cli_receive_files(
     save_dir: &str,
@@ -426,13 +473,143 @@ fn cli_receive_files(
             ));
         }
     }
+    // Private staging dir: the CLI drains here first, then each file moves
+    // into save_dir with exclusive-create semantics.
+    let staging = std::env::temp_dir().join(format!(
+        "taildrop-accept-{:016x}",
+        timestamp_tag()
+    ));
+    if let Err(e) = std::fs::create_dir_all(&staging) {
+        return Err(format!(
+            "Cannot create staging directory '{}': {}",
+            staging.display(),
+            e
+        ));
+    }
+    let drain_result = cli_drain_into_staging(save_dir, &staging, platform_label, |args| {
+        run_get(&args)
+    });
+    match drain_result {
+        Ok(()) => {}
+        Err(e) => {
+            // TD-01/TD-05: preserve any files the CLI managed to deliver
+            // before failing — they are unverified but recoverable; the
+            // staging recovery path owns them. No saved receipts for them.
+            if count_files_in_dir(&staging) > 0 {
+                log::warn!(
+                    "{} CLI auto-receive failed with staged file(s) preserved \
+                     for recovery in '{}': {}",
+                    platform_label,
+                    staging.display(),
+                    e
+                );
+            } else {
+                let _ = std::fs::remove_dir_all(&staging);
+            }
+            return Err(e);
+        }
+    }
+
+    // Move every staged file into the save dir; each landing is a verified
+    // completed download → durable receipt with the actual collision-resolved
+    // destination. The returned list (frontend "pending" display) contains
+    // only these newly landed files.
+    let save_dir_path = std::path::Path::new(save_dir);
+    let mut landed: Vec<IncomingFile> = Vec::new();
+    let mut move_failures: Vec<String> = Vec::new();
+    let entries: Vec<std::path::PathBuf> = match std::fs::read_dir(&staging) {
+        Ok(rd) => rd
+            .filter_map(|e| e.ok())
+            .filter(|e| e.file_type().map(|t| t.is_file()).unwrap_or(false))
+            .map(|e| e.path())
+            .collect(),
+        Err(e) => {
+            let _ = std::fs::remove_dir_all(&staging);
+            return Err(format!(
+                "Cannot list staged files in '{}': {}",
+                staging.display(),
+                e
+            ));
+        }
+    };
+    for path in entries {
+        let name = match path.file_name().and_then(|n| n.to_str()) {
+            Some(n) => n.to_string(),
+            None => continue,
+        };
+        let size = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
+        match move_file_into_dir(&path, save_dir_path, &name) {
+            Ok(dest) => {
+                let dest_str = dest.to_string_lossy().to_string();
+                if !crate::receipts::ReceiptStore::already_saved(&name, &dest_str) {
+                    crate::receipts::ReceiptStore::record_saved(
+                        &name,
+                        &dest_str,
+                        size,
+                        None,
+                    );
+                }
+                landed.push(IncomingFile {
+                    name,
+                    size,
+                    peer_name: None,
+                });
+            }
+            Err(e) => move_failures.push(format!("{} ({})", name, e)),
+        }
+    }
+    // TD-01 cleanup gate: remove staging only when provably empty.
+    if count_files_in_dir(&staging) == 0 {
+        let _ = std::fs::remove_dir_all(&staging);
+    } else {
+        log::warn!(
+            "{} CLI auto-receive: preserving staging '{}' for recovery ({} \
+             failed move(s): {})",
+            platform_label,
+            staging.display(),
+            move_failures.len(),
+            move_failures.join("; ")
+        );
+    }
+    if !move_failures.is_empty() {
+        // Files that moved are recorded above (partial success preserved);
+        // the failure still surfaces so the loop's error state can trigger.
+        return Err(format!(
+            "Failed to move received file(s) into '{}': {}; preserved for \
+             recovery in '{}'",
+            save_dir_path.display(),
+            move_failures.join("; "),
+            staging.display()
+        ));
+    }
+    log::debug!(
+        "{} CLI auto-receive: landed {} file(s) in '{}'",
+        platform_label,
+        landed.len(),
+        save_dir
+    );
+    let json = serde_json::to_string(&landed)
+        .map_err(|e| format!("Failed to serialize file list: {}", e))?;
+    Ok(json.into_bytes())
+}
+
+/// Run the CLI drain into `staging`, propagating a non-zero exit as an error
+/// (TD-04). Split from `cli_receive_files` so tests can exercise the staging
+/// semantics independently.
+fn cli_drain_into_staging(
+    _save_dir: &str,
+    staging: &std::path::Path,
+    platform_label: &str,
+    run_get: impl FnOnce(&[&str]) -> Result<std::process::Output, String>,
+) -> Result<(), String> {
+    let staging_str = staging.to_string_lossy().to_string();
     let args: Vec<&str> = vec![
         "file",
         "get",
         "--wait=false",
         "--verbose",
         "--conflict=rename",
-        save_dir,
+        &staging_str,
     ];
     let output = run_get(&args)?;
     let stdout = String::from_utf8_lossy(&output.stdout);
@@ -455,95 +632,7 @@ fn cli_receive_files(
             stderr.trim()
         ));
     }
-    // Parse "moved X/Y files" from stdout.
-    let moved_line = stdout
-        .lines()
-        .find(|l| l.contains("moved") && l.contains("files"));
-    let count = match moved_line {
-        Some(line) => {
-            let nums: Vec<&str> = line
-                .split_whitespace()
-                .filter(|w| w.chars().all(|c| c.is_ascii_digit() || c == '/'))
-                .collect();
-            if let Some(fraction) = nums.first() {
-                let moved = fraction
-                    .split('/')
-                    .next()
-                    .and_then(|n| n.parse::<usize>().ok());
-                log::debug!(
-                    "{} CLI auto-receive: parsed '{}' → {} files",
-                    platform_label,
-                    line,
-                    moved.unwrap_or(0)
-                );
-                moved.unwrap_or(0)
-            } else {
-                0
-            }
-        }
-        None => {
-            if !stdout.trim().is_empty() {
-                log::debug!(
-                    "{} CLI auto-receive: unexpected stdout: {:?}",
-                    platform_label,
-                    stdout.lines().take(3).collect::<Vec<_>>()
-                );
-            }
-            0
-        }
-    };
-    if count == 0 {
-        return Ok(b"[]".to_vec());
-    }
-    // List the most recently modified files in save_dir matching the count.
-    let entries = match std::fs::read_dir(save_dir) {
-        Ok(entries) => {
-            let mut files: Vec<_> = entries
-                .filter_map(|e| e.ok())
-                .filter(|e| e.file_type().map(|t| t.is_file()).unwrap_or(false))
-                .collect();
-            files.sort_by(|a, b| {
-                let ma = a.metadata().and_then(|m| m.modified()).ok();
-                let mb = b.metadata().and_then(|m| m.modified()).ok();
-                mb.cmp(&ma)
-            });
-            files.into_iter().take(count).collect::<Vec<_>>()
-        }
-        Err(e) => {
-            // TD-04: an unreadable save directory after a successful CLI run
-            // means received files exist but cannot be enumerated. Report it
-            // as an error rather than "no files", so the receive loop's
-            // failure state (and the UI banner) can trigger.
-            log::debug!(
-                "{} CLI auto-receive: can't read save_dir '{}': {}",
-                platform_label,
-                save_dir,
-                e
-            );
-            return Err(format!(
-                "Cannot list received files in '{}': {}",
-                save_dir, e
-            ));
-        }
-    };
-    // Build [{name, size}] JSON using serde (correct escaping).
-    let files: Vec<IncomingFile> = entries
-        .iter()
-        .map(|e| IncomingFile {
-            name: e.file_name().to_string_lossy().to_string(),
-            size: e.metadata().map(|m| m.len()).unwrap_or(0),
-            peer_name: None,
-        })
-        .collect();
-    log::debug!(
-        "{} CLI auto-receive: returning {} file(s) already saved to '{}'",
-        platform_label,
-        files.len(),
-        save_dir
-    );
-    let json = serde_json::to_string(&files)
-        .map_err(|e| format!("Failed to serialize file list: {}", e))?;
-    Ok(json.into_bytes())
+    Ok(())
 }
 
 // ============================================================
@@ -1299,6 +1388,14 @@ mod platform {
                 // Remove the partial download so a half-written file doesn't
                 // linger under the reserved name.
                 let _ = tokio::fs::remove_file(&save_path).await;
+                // TD-05: failed accept must leave a durable receipt — the
+                // socket path never drained the inbox (DELETE only happens
+                // after success), so an inbox retry is valid recovery.
+                crate::receipts::ReceiptStore::record_failed(
+                    safe_name,
+                    &e,
+                    crate::receipts::ReceiptStore::classify_recovery(&e),
+                );
                 return Err(e);
             }
 
@@ -1681,6 +1778,18 @@ mod platform {
                                 e
                             );
                         }
+                        // TD-05: durable receipt with the actual landing path
+                        // (the socket path is the common macOS case — this
+                        // receipt was missing, so most macOS users never saw
+                        // "Saved / Show in folder").
+                        let size =
+                            std::fs::metadata(&save_path).map(|m| m.len()).unwrap_or(0);
+                        crate::receipts::ReceiptStore::record_saved(
+                            safe_name,
+                            &save_path.to_string_lossy(),
+                            size,
+                            None,
+                        );
                         Ok(save_path.to_string_lossy().to_string())
                     }
                     Err(super::SocketGetError::Connect(socket_err)) => {
@@ -1745,6 +1854,14 @@ mod platform {
                             "macOS: socket accept failed with HTTP/transport error ({}), \
                              not falling back to CLI",
                             http_err
+                        );
+                        // TD-05: failed accept leaves a durable receipt; the
+                        // inbox entry survives (no DELETE ran), so retry from
+                        // inbox is valid recovery.
+                        crate::receipts::ReceiptStore::record_failed(
+                            safe_name,
+                            &http_err,
+                            crate::receipts::ReceiptStore::classify_recovery(&http_err),
                         );
                         Err(http_err)
                     }
@@ -2569,7 +2686,18 @@ mod tests {
             "rename policy must be explicit: args = {:?}",
             args
         );
-        assert!(args.contains(&dir.to_str().unwrap().to_string()));
+        // TD-05: the drain targets a private staging dir (identity is exact —
+        // never the mtime heuristic over save_dir), under the temp dir.
+        let last = args.last().expect("drain target must be the last arg");
+        assert!(
+            last.starts_with(
+                std::env::temp_dir()
+                    .to_string_lossy()
+                    .trim_end_matches('/')
+            ) && last.contains("taildrop-accept-"),
+            "drain must target a private staging dir, got: {}",
+            last
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -2594,21 +2722,178 @@ mod tests {
 
     #[test]
     fn cli_receive_files_reports_received_files() {
+        let _g = crate::receipts::TEST_STORE_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        crate::receipts::ReceiptStore::reset_for_tests();
         let dir = temp_test_dir("cli_reports_files");
-        // Simulate the CLI having written one file ("moved 1/1") and list it.
-        std::fs::write(dir.join("got.txt"), "x").unwrap();
         let result = cli_receive_files(dir.to_str().unwrap(), "test", |args| {
-            // The last arg is the save dir; pretend the CLI saved got.txt.
-            assert_eq!(args.last().copied(), Some(dir.to_str().unwrap()));
+            // The CLI drains into the staging dir (last arg); write the file
+            // it "received" there — exact identity, not save_dir mtime.
+            let staging = std::path::Path::new(args.last().unwrap());
+            std::fs::write(staging.join("got.txt"), "x").unwrap();
             Ok(fake_cli_output("moved 1/1 files"))
         })
         .unwrap();
+        // The landed list reports the file, which now verifiably sits in the
+        // save dir under its original name.
         let text = String::from_utf8(result).unwrap();
         assert!(
             text.contains("got.txt"),
             "should list received file: {}",
             text
         );
+        assert_eq!(
+            std::fs::read_to_string(dir.join("got.txt")).unwrap(),
+            "x",
+            "file must have landed in the save dir"
+        );
+        // TD-05: a durable receipt with the actual landing path exists.
+        let receipts: Vec<_> = crate::receipts::ReceiptStore::snapshot_for_tests()
+            .into_iter()
+            .filter(|r| r.saved_path.starts_with(dir.to_str().unwrap()))
+            .collect();
+        assert_eq!(receipts.len(), 1, "one receipt per landed file");
+        assert_eq!(receipts[0].filename, "got.txt");
+        assert_eq!(receipts[0].status, "saved");
+        assert!(receipts[0].saved_path.ends_with("got.txt"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// TD-05 (repo-audititor acceptance): an unrelated NEWER file in the save
+    /// dir must never be reported or receipted as a received file. The old
+    /// mtime heuristic picked the N newest — this is its regression test.
+    #[test]
+    fn cli_receive_files_ignores_unrelated_newer_files() {
+        let _g = crate::receipts::TEST_STORE_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        crate::receipts::ReceiptStore::reset_for_tests();
+        let dir = temp_test_dir("cli_newer_unrelated");
+        // A pre-existing unrelated file, modified NOW (newer than anything
+        // the CLI delivers in this test).
+        std::fs::write(dir.join("browser-download.txt"), "unrelated").unwrap();
+        let result = cli_receive_files(dir.to_str().unwrap(), "test", |args| {
+            let staging = std::path::Path::new(args.last().unwrap());
+            std::fs::write(staging.join("actual-receive.txt"), "received").unwrap();
+            Ok(fake_cli_output("moved 1/1 files"))
+        })
+        .unwrap();
+        let text = String::from_utf8(result).unwrap();
+        assert!(
+            !text.contains("browser-download.txt"),
+            "unrelated file must not be reported as received: {}",
+            text
+        );
+        assert!(text.contains("actual-receive.txt"));
+        let receipts: Vec<_> = crate::receipts::ReceiptStore::snapshot_for_tests()
+            .into_iter()
+            .filter(|r| r.saved_path.starts_with(dir.to_str().unwrap()))
+            .collect();
+        assert_eq!(receipts.len(), 1);
+        assert_eq!(receipts[0].filename, "actual-receive.txt");
+        assert_eq!(
+            std::fs::read_to_string(dir.join("browser-download.txt")).unwrap(),
+            "unrelated",
+            "unrelated file untouched"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// TD-05: a collision-renamed landing gets a receipt pointing at the
+    /// ACTUAL destination ("got (1).txt"), never the requested name.
+    #[test]
+    fn cli_receive_files_receipts_collision_resolved_path() {
+        let _g = crate::receipts::TEST_STORE_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        crate::receipts::ReceiptStore::reset_for_tests();
+        let dir = temp_test_dir("cli_collision_receipt");
+        std::fs::write(dir.join("got.txt"), "original").unwrap();
+        cli_receive_files(dir.to_str().unwrap(), "test", |args| {
+            let staging = std::path::Path::new(args.last().unwrap());
+            std::fs::write(staging.join("got.txt"), "new").unwrap();
+            Ok(fake_cli_output("moved 1/1 files"))
+        })
+        .unwrap();
+        assert_eq!(
+            std::fs::read_to_string(dir.join("got.txt")).unwrap(),
+            "original",
+            "existing file must never be overwritten"
+        );
+        assert_eq!(
+            std::fs::read_to_string(dir.join("got (1).txt")).unwrap(),
+            "new",
+            "new content lands collision-resolved"
+        );
+        let receipts: Vec<_> = crate::receipts::ReceiptStore::snapshot_for_tests()
+            .into_iter()
+            .filter(|r| r.saved_path.starts_with(dir.to_str().unwrap()))
+            .collect();
+        assert_eq!(receipts.len(), 1);
+        assert!(
+            receipts[0].saved_path.ends_with("got (1).txt"),
+            "receipt must point at the actual landing path: {}",
+            receipts[0].saved_path
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// TD-05 (repo-audititor acceptance): a partially-failed batch preserves
+    /// successfully landed receipts while surfacing the failure; staged
+    /// leftovers are NOT marked saved (unverified).
+    #[test]
+    fn cli_receive_files_partial_failure_preserves_landed_receipts() {
+        let _g = crate::receipts::TEST_STORE_LOCK
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        crate::receipts::ReceiptStore::reset_for_tests();
+        let dir = temp_test_dir("cli_partial_failure");
+        let staging_seen = std::sync::Mutex::new(None::<std::path::PathBuf>);
+        let result = cli_receive_files(dir.to_str().unwrap(), "test", |args| {
+            // First file completes into staging; then the CLI dies non-zero
+            // before the second finishes.
+            let staging = std::path::Path::new(args.last().unwrap());
+            *staging_seen.lock().unwrap() = Some(staging.to_path_buf());
+            std::fs::write(staging.join("done.txt"), "complete").unwrap();
+            std::fs::write(staging.join("partial.bin"), "half").unwrap();
+            Ok(std::process::Output {
+                status: failure_status(),
+                stdout: b"moved 1/2 files\n".to_vec(),
+                stderr: b"second file failed\n".to_vec(),
+            })
+        });
+        assert!(result.is_err(), "batch failure must surface");
+        // Nothing verifiably completed (both files are unverified in staging
+        // after a non-zero exit) — no saved receipts, but bytes preserved.
+        let receipts: Vec<_> = crate::receipts::ReceiptStore::snapshot_for_tests()
+            .into_iter()
+            .filter(|r| r.saved_path.starts_with(dir.to_str().unwrap()))
+            .collect();
+        assert!(
+            receipts.is_empty(),
+            "unverified staged files must not be receipted as saved: {:?}",
+            receipts
+        );
+        assert!(
+            !dir.join("done.txt").exists(),
+            "unverified files must not land in the save dir"
+        );
+        // Both staged files survive in THIS call's staging dir (identified
+        // from the closure, not by scanning the shared temp dir — leftovers
+        // from other runs' crashed tests live there too).
+        let staging = staging_seen
+            .into_inner()
+            .unwrap()
+            .expect("closure must have run");
+        let names: Vec<String> = std::fs::read_dir(&staging)
+            .map(|rd| {
+                rd.filter_map(|f| f.ok())
+                    .map(|f| f.file_name().to_string_lossy().to_string())
+                    .collect()
+            })
+            .unwrap_or_default();
+        assert!(names.contains(&"done.txt".to_string()), "names: {:?}", names);
+        assert!(
+            names.contains(&"partial.bin".to_string()),
+            "names: {:?}",
+            names
+        );
+        let _ = std::fs::remove_dir_all(&staging);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
