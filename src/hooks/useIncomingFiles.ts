@@ -19,6 +19,15 @@ export interface UseIncomingFilesOptions {
   settings: AppSettings;
   settingsRef: RefObject<AppSettings>;
   /**
+   * TD-03: false until `useSettings` has applied persisted settings. While
+   * false, this hook neither pushes receive settings to the backend nor
+   * fires the destructive `get_incoming_files` catch-up: `settings` may
+   * still hold DEFAULT_SETTINGS, and on CLI-fallback platforms that call
+   * IS the download — draining pending inbox files into the default
+   * Downloads dir instead of the user's persisted custom destination.
+   */
+  hydrated: boolean;
+  /**
    * Append received transfer records (used by the auto-accept path). The
    * caller passes a state setter wrapper so this hook needn't own transfers.
    */
@@ -55,7 +64,7 @@ export interface UseIncomingFilesResult {
  * one-shot catch-up fetch on mount/refocus for an instant list.
  */
 export function useIncomingFiles(options: UseIncomingFilesOptions): UseIncomingFilesResult {
-  const { settings, settingsRef, appendTransfers } = options;
+  const { settings, settingsRef, hydrated, appendTransfers } = options;
 
   const [incomingFiles, setIncomingFiles] = useState<IncomingFile[]>([]);
   const [pollError, setPollError] = useState<string | null>(null);
@@ -229,21 +238,35 @@ export function useIncomingFiles(options: UseIncomingFilesOptions): UseIncomingF
   // Keep the backend's shared receive settings in sync — its loop uses these
   // for every poll, including the ones that happen while this webview is
   // suspended in a minimized window.
+  //
+  // TD-03: gated on `hydrated` — the FIRST push must carry the persisted
+  // save directory, not DEFAULT_SETTINGS, or the backend loop could start
+  // draining into the default Downloads dir before hydration lands.
   useEffect(() => {
+    if (!hydrated) return;
     invoke("set_receive_settings", {
       saveDir: settings.saveDirectory,
       autoAccept: settings.autoAccept,
     }).catch((e) => {
       logger.warn("useIncomingFiles", "set_receive_settings failed:", toErrorMsg(e));
     });
-  }, [settings.saveDirectory, settings.autoAccept]);
+  }, [hydrated, settings.saveDirectory, settings.autoAccept]);
 
   // One-shot catch-up fetch: on mount and when the window regains
   // visibility/focus, ask the backend for the current list so the UI is
   // instant. This is NOT the periodic receive loop — that lives in Rust —
   // but it is the same list/download call, so files the backend already
   // received while minimized appear immediately on refocus.
+  //
+  // TD-03: `hydratedRef` gates the catch-up fetch — before settings hydration
+  // the saveDir would be the default, and on CLI-fallback platforms this
+  // call drains pending inbox files into it. A ref (not state) so the
+  // callback identity stays stable and focus/visibility handlers read the
+  // latest value without re-subscribing.
+  const hydratedRef = useRef(false);
+
   const refreshIncoming = useCallback(async () => {
+    if (!hydratedRef.current) return;
     try {
       const result = await invoke<unknown>("get_incoming_files", {
         saveDir: settingsRef.current.saveDirectory,
@@ -255,6 +278,12 @@ export function useIncomingFiles(options: UseIncomingFilesOptions): UseIncomingF
       logger.debug("useIncomingFiles", "catch-up fetch failed:", toErrorMsg(e));
     }
   }, [applyIncoming, settingsRef]);
+
+  useEffect(() => {
+    hydratedRef.current = hydrated;
+    // Fire the deferred catch-up as soon as settings become authoritative.
+    if (hydrated) void refreshIncoming();
+  }, [hydrated, refreshIncoming]);
 
   // When the window regains visibility or focus, fire an immediate catch-up.
   // visibilitychange covers minimize/un-minimize, and the Tauri window focus

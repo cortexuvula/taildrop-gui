@@ -18,6 +18,15 @@ struct ReceiveSettings {
 
 type SharedReceiveSettings = RwLock<ReceiveSettings>;
 
+/// TD-03: the receive loop must not run a single destructive iteration until
+/// the frontend has hydrated persisted settings and pushed them via
+/// `set_receive_settings`. The initial `ReceiveSettings` holds the *default*
+/// download directory; on CLI-fallback platforms `fetch_incoming_files` IS
+/// the download, so an ungated first poll can drain pending inbox files into
+/// Downloads before the user's persisted custom destination arrives over
+/// IPC. Set once, never cleared.
+static RECEIVE_READY: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
 /// Idle interval for the background receive loop when nothing changed.
 const RECEIVE_IDLE_INTERVAL: std::time::Duration = std::time::Duration::from_secs(8);
 /// Interval used for a few iterations after the incoming list changed, so an
@@ -210,7 +219,18 @@ async fn set_receive_settings(
         settings.save_dir = save_dir.clone();
         settings.auto_accept = auto_accept;
     }
+    // TD-03: settings have arrived from the (hydrated) frontend — the receive
+    // loop may start draining into the authoritative destination now.
+    RECEIVE_READY.store(true, std::sync::atomic::Ordering::Release);
     validate_save_dir_path(&save_dir).await.map(|_| ())
+}
+
+/// TD-03: readiness probe for the frontend/tests — true once the receive
+/// loop is permitted to poll. Purely informational; the loop enforces the
+/// gate itself.
+#[tauri::command]
+fn receive_ready() -> bool {
+    RECEIVE_READY.load(std::sync::atomic::Ordering::Acquire)
 }
 
 /// Background receive loop. On macOS/Windows without a Tailscale socket,
@@ -234,6 +254,12 @@ async fn receive_loop(app: tauri::AppHandle) {
     let mut fast_iterations: u32 = 0;
 
     loop {
+        // TD-03: block until the frontend has pushed hydrated settings.
+        // Sleep in short intervals rather than awaiting a notify so a crash
+        // before the first set_receive_settings can't spin the CPU.
+        while !RECEIVE_READY.load(std::sync::atomic::Ordering::Acquire) {
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
         let save_dir = {
             let settings = app.state::<SharedReceiveSettings>();
             let settings = settings
@@ -343,6 +369,7 @@ pub fn run() {
             get_default_download_dir,
             validate_save_dir,
             set_receive_settings,
+            receive_ready,
             get_debug_logs,
             get_env_info,
         ])

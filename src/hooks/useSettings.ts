@@ -20,6 +20,14 @@ export interface UseSettingsResult {
   settingsRef: RefObject<AppSettings>;
   updateSettings: (update: Partial<AppSettings>) => void;
   /**
+   * False until the mount effect has loaded persisted settings (or determined
+   * none exist). Consumers that push settings to the backend must wait for
+   * this: the initial state is DEFAULT_SETTINGS, and sending those defaults
+   * before hydration would overwrite a persisted custom save directory in
+   * whatever backend state consumes them (TD-03).
+   */
+  hydrated: boolean;
+  /**
    * Non-null when the configured save directory is unusable (not absolute,
    * missing, or read-only). Surfaced as a visible error in Settings so an
    * invalid saveDirectory is rejected instead of silently receiving files
@@ -35,6 +43,11 @@ export interface UseSettingsResult {
 export function useSettings(): UseSettingsResult {
   const [settings, setSettings] = useState<AppSettings>(DEFAULT_SETTINGS);
   const [saveDirError, setSaveDirError] = useState<string | null>(null);
+  // TD-03: false until the mount effect has applied persisted settings (or
+  // found none). Effects that push settings downstream (backend receive
+  // settings, destructive catch-up fetches) must gate on this so DEFAULT_
+  // SETTINGS values are never treated as authoritative before hydration.
+  const [hydrated, setHydrated] = useState(false);
 
   // Mirror settings into a ref so peer/transfer/incoming closures can read
   // the latest values without joining their dependency arrays. Updated in an
@@ -52,6 +65,11 @@ export function useSettings(): UseSettingsResult {
     if (stored != null) {
       setSettings(sanitizeAppSettings(stored, DEFAULT_SETTINGS));
     }
+    // Mark hydrated in the same tick as the apply above so the first
+    // downstream push carries persisted values (TD-03). Note the default
+    // download dir below may still resolve a tick later; that only fills an
+    // EMPTY saveDirectory, it never overwrites a persisted one.
+    setHydrated(true);
     // Get default download dir
     invoke<string>("get_default_download_dir")
       .then((dir) => {
@@ -103,5 +121,5 @@ export function useSettings(): UseSettingsResult {
     return () => window.clearTimeout(timer);
   }, [settings]);
 
-  return { settings, settingsRef, updateSettings, saveDirError };
+  return { settings, settingsRef, updateSettings, hydrated, saveDirError };
 }

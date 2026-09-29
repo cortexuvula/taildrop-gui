@@ -31,7 +31,7 @@ export interface UseTailscaleOptions {
  *   transfer history without owning that state.
  */
 export function useTailscale(options?: UseTailscaleOptions) {
-  const { settings, settingsRef, updateSettings, saveDirError } = useSettings();
+  const { settings, settingsRef, updateSettings, hydrated, saveDirError } = useSettings();
   const { peers, loading, error, visiblePeers } = usePeers(settings);
 
   // Keep the latest onSendError callback in a ref so the send/accept closures
@@ -70,6 +70,7 @@ export function useTailscale(options?: UseTailscaleOptions) {
   const { incomingFiles, bridgeRef, pollError } = useIncomingFiles({
     settings,
     settingsRef,
+    hydrated,
     appendTransfers,
   });
   // Wire the incoming bridge into the ref useTransfers reads. The methods are
