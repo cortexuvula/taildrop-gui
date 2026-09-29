@@ -22,11 +22,17 @@ export function useModal(onClose: () => void, enabled: boolean = true) {
     return () => document.removeEventListener("keydown", handleKey);
   }, [onClose, enabled]);
 
-  // Focus the overlay on mount; restore focus to the trigger on unmount.
+  // Focus the first focusable element on mount; restore focus to the trigger on unmount.
   useEffect(() => {
     if (!enabled) return;
     previouslyFocused.current = document.activeElement as HTMLElement;
-    overlayRef.current?.focus();
+    const overlay = overlayRef.current;
+    if (overlay) {
+      const first = overlay.querySelector<HTMLElement>(
+        'button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])',
+      );
+      (first || overlay).focus();
+    }
     return () => {
       previouslyFocused.current?.focus();
     };
@@ -46,10 +52,12 @@ export function useModal(onClose: () => void, enabled: boolean = true) {
       if (focusable.length === 0) return;
       const first = focusable[0];
       const last = focusable[focusable.length - 1];
-      if (e.shiftKey && document.activeElement === first) {
+      const active = document.activeElement;
+      // Handle backward navigation from the overlay container itself or first child
+      if (e.shiftKey && (active === overlay || active === first)) {
         e.preventDefault();
         last.focus();
-      } else if (!e.shiftKey && document.activeElement === last) {
+      } else if (!e.shiftKey && active === last) {
         e.preventDefault();
         first.focus();
       }
@@ -62,6 +70,7 @@ export function useModal(onClose: () => void, enabled: boolean = true) {
   const overlayProps: HTMLAttributes<HTMLDivElement> = {
     role: "dialog",
     "aria-modal": true,
+    "aria-labelledby": "modal-heading",
     tabIndex: -1,
   };
 

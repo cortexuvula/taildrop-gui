@@ -108,7 +108,7 @@ function App() {
         onShowDebug={import.meta.env.DEV ? () => setShowDebug(true) : undefined}
       />
 
-      <div className="main">
+      <div className={`main ${incomingFiles.length > 0 || transfers.some(t => t.status === "sending" || t.status === "receiving" || t.status === "pending") ? "has-activity" : ""}`}>
         {pollError && (
           <div className="poll-error-banner" role="alert">
             <span className="poll-error-icon" aria-hidden="true">⚠</span>

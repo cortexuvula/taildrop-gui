@@ -1,5 +1,5 @@
 import type { TransferRecord, IncomingFile } from "../types";
-import { formatTime, formatSize, shortenError, statusIcon } from "../lib/format";
+import { formatTime, formatSize, shortenError, statusIcon, getStatusLabel } from "../lib/format";
 
 interface TransferHistoryProps {
   transfers: TransferRecord[];
@@ -51,7 +51,7 @@ export function TransferHistory({
             <div className="transfer-info">
               <div className="transfer-filename">{t.filename}</div>
               <div className="transfer-meta">
-                {t.direction === "sent" ? "→" : "←"} {t.peerName} ·{" "}
+                {getStatusLabel(t.status)} · {t.direction === "sent" ? "→" : "←"} {t.peerName} ·{" "}
                 {formatTime(t.timestamp)}
               </div>
               {t.error && <div className="transfer-error" title={t.error}>{shortenError(t.error)}</div>}

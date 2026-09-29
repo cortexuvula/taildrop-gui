@@ -81,16 +81,17 @@ export function Settings({ settings, allPeers, onUpdate, onClose, updater, saveD
     <div className="settings-overlay" ref={overlayRef} {...overlayProps} onClick={onClose}>
       <div className="settings-panel" onClick={(e) => e.stopPropagation()}>
         <div className="settings-header">
-          <h2>Settings</h2>
-          <button className="icon-btn" onClick={onClose}>
+          <h2 id="modal-heading">Settings</h2>
+          <button className="icon-btn" onClick={onClose} aria-label="Close settings">
             ✕
           </button>
         </div>
 
         <div className="settings-section">
-          <label className="settings-label">Save Directory</label>
+          <label className="settings-label" htmlFor="save-directory">Save Directory</label>
           <div style={{ display: "flex", gap: 8 }}>
             <input
+              id="save-directory"
               type="text"
               className="settings-input"
               value={settings.saveDirectory}
@@ -174,9 +175,10 @@ export function Settings({ settings, allPeers, onUpdate, onClose, updater, saveD
         </div>
 
         <div className="settings-section">
-          <label className="settings-label">Node Visibility</label>
+          <label className="settings-label" htmlFor="node-visibility-search">Node Visibility</label>
           <div className="search-wrap" style={{ marginTop: 6 }}>
             <input
+              id="node-visibility-search"
               type="text"
               className="settings-input"
               value={nodeSearch}
@@ -184,7 +186,7 @@ export function Settings({ settings, allPeers, onUpdate, onClose, updater, saveD
               placeholder="Search nodes..."
             />
             {nodeSearch && (
-              <button className="search-clear" onClick={() => setNodeSearch("")}>
+              <button className="search-clear" onClick={() => setNodeSearch("")} aria-label="Clear search">
                 ✕
               </button>
             )}

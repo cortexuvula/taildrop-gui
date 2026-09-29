@@ -2,6 +2,8 @@
  * Pure formatting utilities extracted from TransferHistory for testability.
  */
 
+import type { TransferStatus } from "../types";
+
 export function formatTime(ts: number): string {
   const d = new Date(ts);
   return d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
@@ -21,6 +23,23 @@ export function shortenError(err: string): string {
   const match2 = err.match(/tailscale file cp failed: (.+)/);
   if (match2) return match2[1];
   return err;
+}
+
+export function getStatusLabel(status: TransferStatus): string {
+  switch (status) {
+    case "pending":
+      return "Queued";
+    case "sending":
+      return "Sending";
+    case "receiving":
+      return "Receiving";
+    case "success":
+      return "Completed";
+    case "error":
+      return "Failed";
+    case "cancelled":
+      return "Cancelled";
+  }
 }
 
 export function statusIcon(status: "pending" | "sending" | "receiving" | "success" | "error" | "cancelled"): string {
