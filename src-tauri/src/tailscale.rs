@@ -372,6 +372,24 @@ fn count_files_in_dir(dir: &std::path::Path) -> usize {
         .unwrap_or(0)
 }
 
+// --- TD-05: pub wrappers for the receipt-recovery command layer ---
+
+/// Move a preserved staging file into the save dir with the full
+/// `move_file_into_dir` guarantees (exclusive-create, never overwrites,
+/// collision-resolved). Returns the actual landing path.
+pub fn move_file_for_recovery(
+    src: &std::path::Path,
+    dir: &std::path::Path,
+    name: &str,
+) -> Result<std::path::PathBuf, String> {
+    move_file_into_dir(src, dir, name)
+}
+
+/// Whether a staging directory holds no recoverable files.
+pub fn staging_is_empty(dir: &std::path::Path) -> bool {
+    count_files_in_dir(dir) == 0
+}
+
 /// Shared CLI auto-receive logic for macOS/Windows. Runs
 /// `tailscale file get --wait=false --verbose --conflict=rename <save_dir>`
 /// (via the platform-specific `run_get` closure, which receives the full
@@ -1296,6 +1314,14 @@ mod platform {
             }
 
             log::debug!("Accepted file '{}' to '{}'", name, save_path.display());
+            let size = tokio::fs::metadata(&save_path).await.map(|m| m.len()).unwrap_or(0);
+            // TD-05: durable receipt with the actual landing path.
+            crate::receipts::ReceiptStore::record_saved(
+                safe_name,
+                &save_path.to_string_lossy(),
+                size,
+                None,
+            );
             Ok(save_path.to_string_lossy().to_string())
         })
         .await
@@ -1667,7 +1693,9 @@ mod platform {
                             "macOS: socket unavailable ({}), falling back to CLI",
                             socket_err
                         );
-                        super::accept_file_with_getter(&name, &save_dir, |staging| {
+                        // TD-05: record the CLI-path outcome (saved with the
+                        // actual landing path, or failed with recovery kind).
+                        let result = super::accept_file_with_getter(&name, &save_dir, |staging| {
                             // --wait=false: don't block if the inbox is empty
                             // (the file may have already been consumed by the
                             // auto-receive poll on macOS).
@@ -1683,7 +1711,26 @@ mod platform {
                                 return Err(format!("tailscale file get failed: {}", stderr));
                             }
                             Ok(())
-                        })
+                        });
+                        // TD-05: durable receipt — saved (actual landing path)
+                        // or failed (recovery classified from the error: a
+                        // preserved staging dir yields kind=staging).
+                        match &result {
+                            Ok(path) => {
+                                let size = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
+                                crate::receipts::ReceiptStore::record_saved(
+                                    safe_name, path, size, None,
+                                );
+                            }
+                            Err(e) => {
+                                crate::receipts::ReceiptStore::record_failed(
+                                    safe_name,
+                                    e,
+                                    crate::receipts::ReceiptStore::classify_recovery(e),
+                                );
+                            }
+                        }
+                        result
                     }
                     Err(super::SocketGetError::Other(http_err)) => {
                         // The socket connected but the request failed (HTTP
@@ -1913,7 +1960,11 @@ mod platform {
         tokio::time::timeout(
             std::time::Duration::from_secs(120),
             tokio::task::spawn_blocking(move || {
-                super::accept_file_with_getter(&name, &save_dir, |staging| {
+                let safe_name = std::path::Path::new(&name)
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .ok_or_else(|| "Invalid filename".to_string())?;
+                let result = super::accept_file_with_getter(&name, &save_dir, |staging| {
                     // --wait=false: don't block if the inbox is empty.
                     let output = tailscale_cmd()
                         .args(["file", "get", "--wait=false", &staging.to_string_lossy()])
@@ -1924,7 +1975,22 @@ mod platform {
                         return Err(format!("tailscale file get failed: {}", stderr));
                     }
                     Ok(())
-                })
+                });
+                // TD-05: durable receipt for the outcome.
+                match &result {
+                    Ok(path) => {
+                        let size = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
+                        crate::receipts::ReceiptStore::record_saved(safe_name, path, size, None);
+                    }
+                    Err(e) => {
+                        crate::receipts::ReceiptStore::record_failed(
+                            safe_name,
+                            e,
+                            crate::receipts::ReceiptStore::classify_recovery(e),
+                        );
+                    }
+                }
+                result
             }),
         )
         .await

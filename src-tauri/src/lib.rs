@@ -1,4 +1,5 @@
 mod debug_log;
+mod receipts;
 mod tailscale;
 
 use std::sync::RwLock;
@@ -233,6 +234,105 @@ fn receive_ready() -> bool {
     RECEIVE_READY.load(std::sync::atomic::Ordering::Acquire)
 }
 
+// ============================================================
+// TD-05: transfer receipts
+// ============================================================
+
+/// Page through the receipt store (contract: get_recent_receipts).
+#[tauri::command]
+fn get_recent_receipts(since_seq: u64, limit: usize) -> receipts::ReceiptPage {
+    receipts::page_public(since_seq, limit)
+}
+
+/// Recover preserved staging files into the current save dir (contract:
+/// recover_staging_files). Moves reuse move_file_into_dir guarantees —
+/// exclusive-create, never overwrites, collision-resolved names — and the
+/// staging dir is removed only once verifiably empty. Each landed file
+/// records a normal "saved" receipt with its actual landing path.
+#[tauri::command]
+async fn recover_staging_files(path: String) -> Result<Vec<String>, String> {
+    let staging = receipts::validate_staging_path(&path)?;
+    let save_dir = {
+        let app = APP_HANDLE
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .clone()
+            .expect("recover_staging_files called before app setup");
+        let state = app.state::<SharedReceiveSettings>();
+        let settings = state.read().unwrap_or_else(|p| p.into_inner());
+        effective_save_dir(&settings.save_dir)
+    };
+    let mut landed = Vec::new();
+    let entries: Vec<_> = std::fs::read_dir(&staging)
+        .map_err(|e| format!("Cannot read staging dir '{}': {}", staging.display(), e))?
+        .filter_map(|e| e.ok())
+        .filter(|e| e.file_type().map(|t| t.is_file()).unwrap_or(false))
+        .map(|e| e.path())
+        .collect();
+    for file_path in entries {
+        let name = file_path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .ok_or_else(|| "Invalid filename in staging".to_string())?
+            .to_string();
+        let dest = tailscale::move_file_for_recovery(&file_path, &save_dir, &name)?;
+        let size = std::fs::metadata(&dest).map(|m| m.len()).unwrap_or(0);
+        receipts::ReceiptStore::record_saved(&name, &dest.to_string_lossy(), size, None);
+        landed.push(dest.to_string_lossy().to_string());
+    }
+    // Remove the staging dir only when provably empty (TD-01 guarantee).
+    if tailscale::staging_is_empty(&staging) {
+        let _ = std::fs::remove_dir_all(&staging);
+    }
+    Ok(landed)
+}
+
+/// Explicitly discard a preserved staging directory (contract:
+/// discard_staging_dir — user action only, never automatic).
+#[tauri::command]
+async fn discard_staging_dir(path: String) -> Result<(), String> {
+    let staging = receipts::validate_staging_path(&path)?;
+    std::fs::remove_dir_all(&staging).map_err(|e| {
+        format!(
+            "Failed to discard staging dir '{}': {}",
+            staging.display(),
+            e
+        )
+    })
+}
+
+/// Re-scan for preserved staging dirs on demand (contract:
+/// staging_recovery_found event; the same scan runs at startup).
+#[tauri::command]
+fn staging_recovery_scan() -> Vec<receipts::StagingDir> {
+    receipts::scan_staging_dirs()
+}
+
+/// Forward receipt-store broadcasts to the webview as `transfer-receipt`
+/// events (contract). Laggy/absent receivers are fine — the frontend
+/// re-syncs via get_recent_receipts.
+async fn receipt_emitter(app: tauri::AppHandle) {
+    let mut rx = receipts::ReceiptStore::subscribe_global();
+    loop {
+        match rx.recv().await {
+            Ok(receipt) => {
+                if let Err(e) = app.emit("transfer-receipt", &receipt) {
+                    log::debug!("receipt emitter: emit failed: {}", e);
+                }
+            }
+            Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {
+                log::warn!("receipt emitter lagged, skipped {}", skipped);
+            }
+            Err(tokio::sync::broadcast::error::RecvError::Closed) => return,
+        }
+    }
+}
+
+/// Global app handle for commands that need state outside their Tauri
+/// injection (set once at setup; the receipt recovery path reads receive
+/// settings).
+static APP_HANDLE: std::sync::Mutex<Option<tauri::AppHandle>> = std::sync::Mutex::new(None);
+
 /// Background receive loop. On macOS/Windows without a Tailscale socket,
 /// `fetch_incoming_files` IS the download (it runs `tailscale file get` into
 /// the save dir), so running it from Rust keeps incoming files flowing while
@@ -359,6 +459,24 @@ pub fn run() {
             // that drives the CLI download on socket-less macOS/Windows.
             let handle = app.handle().clone();
             tauri::async_runtime::spawn(receive_loop(handle));
+            // TD-05: forward receipt-store broadcasts to the webview.
+            let handle = app.handle().clone();
+            tauri::async_runtime::spawn(receipt_emitter(handle));
+            // TD-05: global handle for commands reading shared state outside
+            // Tauri injection (staging recovery needs the save dir).
+            *APP_HANDLE
+                .lock()
+                .unwrap_or_else(|p| p.into_inner()) = Some(app.handle().clone());
+            // TD-05: discover preserved staging dirs from a previous crashed
+            // run and notify (discover-and-notify — never auto-delete).
+            let dirs = receipts::scan_staging_dirs();
+            if !dirs.is_empty() {
+                log::warn!(
+                    "startup: {} preserved staging dir(s) found — emitting staging-recovery-found",
+                    dirs.len()
+                );
+                let _ = app.emit("staging-recovery-found", &dirs);
+            }
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -370,6 +488,10 @@ pub fn run() {
             validate_save_dir,
             set_receive_settings,
             receive_ready,
+            get_recent_receipts,
+            recover_staging_files,
+            discard_staging_dir,
+            staging_recovery_scan,
             get_debug_logs,
             get_env_info,
         ])

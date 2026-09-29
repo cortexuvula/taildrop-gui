@@ -22,6 +22,8 @@ tauri-plugin-process = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tokio = { version = "1", features = ["fs", "io-util", "net", "time", "rt", "macros", "sync"] }
+# "sync" provides the broadcast channel used by the TD-05 receipt store.
+# Do not remove without replacing the receipt emitter transport.
 tokio-util = "0.7"
 dirs = "6"
 log = "0.4"
