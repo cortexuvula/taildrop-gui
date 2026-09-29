@@ -277,7 +277,12 @@ async fn recover_staging_files(path: String) -> Result<Vec<String>, String> {
             .to_string();
         let dest = tailscale::move_file_for_recovery(&file_path, &save_dir, &name)?;
         let size = std::fs::metadata(&dest).map(|m| m.len()).unwrap_or(0);
-        receipts::ReceiptStore::record_saved(&name, &dest.to_string_lossy(), size, None);
+        // TD05-B: salvage is NOT a verified download. These bytes were
+        // preserved from a FAILED batch — moving them to safety proves
+        // nothing about download completeness (a deliberately shortened file
+        // moves just as well). Record an explicit "salvaged" status, never an
+        // ordinary successful-download receipt.
+        receipts::ReceiptStore::record_salvaged(&name, &dest.to_string_lossy(), size);
         landed.push(dest.to_string_lossy().to_string());
     }
     // Remove the staging dir only when provably empty (TD-01 guarantee).

@@ -211,6 +211,38 @@ fn accept_file_with_getter(
     save_dir: &str,
     run_get: impl FnOnce(&std::path::Path) -> Result<(), String>,
 ) -> Result<String, String> {
+    accept_file_inner(name, save_dir, run_get, false)
+}
+
+/// TD05-A: acknowledgement fast path. Checks whether this exact file was
+/// already received and recorded (within the duplicate-suppression window)
+/// BEFORE invoking the CLI — acknowledging must not re-drain the inbox
+/// (which would consume pending files the user hasn't acted on). Only when
+/// no recorded landing matches does the caller fall through to a real
+/// accept.
+#[allow(dead_code)] // Only used on macOS/Windows
+fn acknowledge_already_received(name: &str, save_dir: &str) -> Option<String> {
+    let safe_name = std::path::Path::new(name)
+        .file_name()
+        .and_then(|n| n.to_str())?;
+    let existing = std::path::Path::new(save_dir).join(safe_name);
+    if !existing.is_file() {
+        return None;
+    }
+    let path_str = existing.to_string_lossy().to_string();
+    if crate::receipts::ReceiptStore::already_saved(safe_name, &path_str) {
+        return Some(path_str);
+    }
+    None
+}
+
+#[allow(dead_code)] // Only used on macOS/Windows
+fn accept_file_inner(
+    name: &str,
+    save_dir: &str,
+    run_get: impl FnOnce(&std::path::Path) -> Result<(), String>,
+    _retain_staging_for_salvage: bool,
+) -> Result<String, String> {
     // Sanitize filename to prevent path traversal
     let safe_name = std::path::Path::new(name)
         .file_name()
@@ -487,7 +519,7 @@ fn cli_receive_files(
         ));
     }
     let drain_result = cli_drain_into_staging(save_dir, &staging, platform_label, |args| {
-        run_get(&args)
+        run_get(args)
     });
     match drain_result {
         Ok(()) => {}
@@ -1802,9 +1834,19 @@ mod platform {
                             "macOS: socket unavailable ({}), falling back to CLI",
                             socket_err
                         );
-                        // TD-05: record the CLI-path outcome (saved with the
-                        // actual landing path, or failed with recovery kind).
-                        let result = super::accept_file_with_getter(&name, &save_dir, |staging| {
+                        // TD05-A: acknowledgement fast path — if this exact
+                        // landing is already recorded (the auto-receive poll
+                        // drained it), return it WITHOUT invoking the CLI:
+                        // acknowledging must not re-drain the inbox.
+                        if let Some(recorded) =
+                            super::acknowledge_already_received(&name, &save_dir)
+                        {
+                            return Ok(recorded);
+                        }
+                        // accept_file_inner records exactly one receipt for
+                        // the requested file AND every landed collateral file
+                        // (single authoritative recording point — TD05-A).
+                        super::accept_file_inner(&name, &save_dir, |staging| {
                             // --wait=false: don't block if the inbox is empty
                             // (the file may have already been consumed by the
                             // auto-receive poll on macOS).
@@ -1820,26 +1862,16 @@ mod platform {
                                 return Err(format!("tailscale file get failed: {}", stderr));
                             }
                             Ok(())
-                        });
-                        // TD-05: durable receipt — saved (actual landing path)
-                        // or failed (recovery classified from the error: a
-                        // preserved staging dir yields kind=staging).
-                        match &result {
-                            Ok(path) => {
-                                let size = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
-                                crate::receipts::ReceiptStore::record_saved(
-                                    safe_name, path, size, None,
-                                );
-                            }
-                            Err(e) => {
-                                crate::receipts::ReceiptStore::record_failed(
-                                    safe_name,
-                                    e,
-                                    crate::receipts::ReceiptStore::classify_recovery(e),
-                                );
-                            }
-                        }
-                        result
+                        }, false)
+                        .inspect_err(|e| {
+                            // Failure receipts stay here (one recording point
+                            // per outcome; the helper records successes).
+                            crate::receipts::ReceiptStore::record_failed(
+                                safe_name,
+                                e,
+                                crate::receipts::ReceiptStore::classify_recovery(e),
+                            );
+                        })
                     }
                     Err(super::SocketGetError::Other(http_err)) => {
                         // The socket connected but the request failed (HTTP
@@ -2081,7 +2113,16 @@ mod platform {
                     .file_name()
                     .and_then(|n| n.to_str())
                     .ok_or_else(|| "Invalid filename".to_string())?;
-                let result = super::accept_file_with_getter(&name, &save_dir, |staging| {
+                // TD05-A: acknowledgement fast path — a recorded landing is
+                // returned without invoking the CLI (no inbox re-drain).
+                if let Some(recorded) =
+                    super::acknowledge_already_received(&name, &save_dir)
+                {
+                    return Ok(recorded);
+                }
+                // Single authoritative recording point: the helper records
+                // successes (requested + collateral); failures recorded here.
+                super::accept_file_inner(&name, &save_dir, |staging| {
                     // --wait=false: don't block if the inbox is empty.
                     let output = tailscale_cmd()
                         .args(["file", "get", "--wait=false", &staging.to_string_lossy()])
@@ -2092,22 +2133,15 @@ mod platform {
                         return Err(format!("tailscale file get failed: {}", stderr));
                     }
                     Ok(())
-                });
-                // TD-05: durable receipt for the outcome.
-                match &result {
-                    Ok(path) => {
-                        let size = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
-                        crate::receipts::ReceiptStore::record_saved(safe_name, path, size, None);
-                    }
-                    Err(e) => {
-                        crate::receipts::ReceiptStore::record_failed(
-                            safe_name,
-                            e,
-                            crate::receipts::ReceiptStore::classify_recovery(e),
-                        );
-                    }
-                }
-                result
+                }, false)
+                .map_err(|e| {
+                    crate::receipts::ReceiptStore::record_failed(
+                        safe_name,
+                        &e,
+                        crate::receipts::ReceiptStore::classify_recovery(&e),
+                    );
+                    e
+                })
             }),
         )
         .await
@@ -2400,6 +2434,9 @@ mod tests {
 
     #[test]
     fn timestamp_tag_counter_increments() {
+        let _g = crate::receipts::TEST_STORE_LOCK
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
         // Rapid calls should produce different tags (counter increments).
         let a = timestamp_tag();
         let b = timestamp_tag();
@@ -2410,6 +2447,9 @@ mod tests {
 
     #[test]
     fn accept_file_rejects_path_traversal_dotdot() {
+        let _g = crate::receipts::TEST_STORE_LOCK
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
         // The function sanitizes name via Path::file_name(), so "../etc/passwd"
         // becomes just "passwd". We test that the function does NOT create a
         // file outside save_dir by checking it doesn't error on a safe name
@@ -2426,6 +2466,9 @@ mod tests {
 
     #[test]
     fn accept_file_accepts_normal_filename() {
+        let _g = crate::receipts::TEST_STORE_LOCK
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
         let dir = std::env::temp_dir().join("taildrop_test_normal_name");
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
@@ -2465,6 +2508,9 @@ mod tests {
 
     #[test]
     fn accept_returns_path_content_actually_landed_in() {
+        let _g = crate::receipts::TEST_STORE_LOCK
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
         let dir = temp_test_dir("actual_path");
         // A same-named file already exists — the move must not clobber it and
         // must return the path the NEW content landed in.
@@ -2498,6 +2544,9 @@ mod tests {
 
     #[test]
     fn accept_concurrent_double_accept_yields_two_distinct_files() {
+        let _g = crate::receipts::TEST_STORE_LOCK
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
         let dir = temp_test_dir("double_accept");
         let dir_str = dir.to_str().unwrap().to_string();
 
@@ -2529,6 +2578,9 @@ mod tests {
 
     #[test]
     fn accept_moves_collateral_files_without_losing_them() {
+        let _g = crate::receipts::TEST_STORE_LOCK
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
         let dir = temp_test_dir("collateral");
         // The CLI drains the whole inbox: two pending files arrive even though
         // only one was accepted. Both must end up in the save dir (the old
@@ -2554,6 +2606,9 @@ mod tests {
 
     #[test]
     fn accept_falls_back_to_existing_file_when_inbox_empty() {
+        let _g = crate::receipts::TEST_STORE_LOCK
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
         let dir = temp_test_dir("already_received");
         // Auto-receive poll already saved the file; clicking Accept drains an
         // empty inbox. The existing exact-name file is returned.
@@ -2570,6 +2625,9 @@ mod tests {
 
     #[test]
     fn accept_reports_failure_when_file_never_appears() {
+        let _g = crate::receipts::TEST_STORE_LOCK
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
         let dir = temp_test_dir("never_appeared");
         let err =
             accept_file_with_getter("ghost.txt", dir.to_str().unwrap(), |_| Ok(())).unwrap_err();
@@ -2583,6 +2641,9 @@ mod tests {
 
     #[test]
     fn accept_creates_missing_save_dir() {
+        let _g = crate::receipts::TEST_STORE_LOCK
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
         let root = temp_test_dir("create_save_dir");
         let save = root.join("nested/save");
         let result = accept_file_with_getter(
@@ -2624,6 +2685,9 @@ mod tests {
 
     #[test]
     fn reserve_unique_file_does_not_truncate() {
+        let _g = crate::receipts::TEST_STORE_LOCK
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
         let dir = temp_test_dir("reserve_no_truncate");
         std::fs::write(dir.join("data.bin"), "payload").unwrap();
         let (file, path) = reserve_unique_file(&dir, "data.bin").unwrap();
@@ -2666,6 +2730,9 @@ mod tests {
 
     #[test]
     fn cli_receive_files_uses_rename_conflict_policy() {
+        let _g = crate::receipts::TEST_STORE_LOCK
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
         let dir = temp_test_dir("cli_rename_policy");
         let captured_args: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
         let result = cli_receive_files(dir.to_str().unwrap(), "test", |args| {
@@ -2703,6 +2770,9 @@ mod tests {
 
     #[test]
     fn cli_receive_files_propagates_save_dir_error() {
+        let _g = crate::receipts::TEST_STORE_LOCK
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
         // Make save_dir creation impossible: a regular file exists where the
         // directory should be created under it.
         let root = temp_test_dir("cli_save_dir_error");
@@ -2907,6 +2977,9 @@ mod tests {
 
     #[test]
     fn accept_preserves_staged_files_when_cli_fails_partway() {
+        let _g = crate::receipts::TEST_STORE_LOCK
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
         let _guard = STAGING_TESTS_LOCK.lock().unwrap();
         let dir = temp_test_dir("td01_cli_fail");
         // The CLI drains a file out of the daemon inbox into staging, then
@@ -2963,6 +3036,9 @@ mod tests {
 
     #[test]
     fn accept_removes_staging_when_cli_fails_cleanly() {
+        let _g = crate::receipts::TEST_STORE_LOCK
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
         // The CLI fails without draining anything — no recovery value, so the
         // staging directory must not survive the call. Assert on the exact
         // staging path (captured from the closure) rather than scanning the
@@ -3159,10 +3235,94 @@ mod tests {
         TempFileForTest { path, file }
     }
 
+    // --- TD05-A: idempotent acknowledgement and windowed suppression ---
+
+    /// Acknowledging an already-recorded landing must not invoke the CLI at
+    /// all (no inbox re-drain) — the fast path returns the recorded path.
+    #[test]
+    fn acknowledge_returns_recorded_path_without_draining() {
+        let _g = crate::receipts::TEST_STORE_LOCK
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        crate::receipts::ReceiptStore::reset_for_tests();
+        let dir = temp_test_dir("td05a_ack_no_drain");
+        std::fs::write(dir.join("photo.jpg"), "recorded").unwrap();
+        crate::receipts::ReceiptStore::record_saved(
+            "photo.jpg",
+            &dir.join("photo.jpg").to_string_lossy(),
+            8,
+            None,
+        );
+
+        // The fast path alone finds it:
+        let acked = acknowledge_already_received("photo.jpg", dir.to_str().unwrap())
+            .expect("recorded landing must be acknowledged");
+        assert_eq!(acked, dir.join("photo.jpg").to_string_lossy());
+
+        // And via the production sequence (what the macOS/Windows callers
+        // run): fast path first, accept_file_inner only on a miss. run_get
+        // must NOT be invoked.
+        let drained = std::sync::atomic::AtomicBool::new(false);
+        let result = match acknowledge_already_received("photo.jpg", dir.to_str().unwrap()) {
+            Some(recorded) => recorded,
+            None => accept_file_inner("photo.jpg", dir.to_str().unwrap(), |staging| {
+                drained.store(true, std::sync::atomic::Ordering::SeqCst);
+                let _ = staging;
+                Ok(())
+            }, false)
+            .expect("accept must succeed"),
+        };
+        assert_eq!(result, dir.join("photo.jpg").to_string_lossy());
+        assert!(
+            !drained.load(std::sync::atomic::Ordering::SeqCst),
+            "acknowledging a recorded landing must not drain the inbox"
+        );
+        // Still exactly one receipt for this file.
+        let receipts: Vec<_> = crate::receipts::ReceiptStore::snapshot_for_tests()
+            .into_iter()
+            .filter(|r| r.filename == "photo.jpg")
+            .collect();
+        assert_eq!(receipts.len(), 1, "no duplicate receipt on ack");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A same-name landing OUTSIDE the suppression window is a NEW transfer:
+    /// the receipt must not be suppressed (path is not transfer identity).
+    #[test]
+    fn window_suppression_expires_for_new_transfer() {
+        let _g = crate::receipts::TEST_STORE_LOCK
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        crate::receipts::ReceiptStore::reset_for_tests();
+        let dir = temp_test_dir("td05a_window");
+        let path = dir.join("report.pdf");
+        std::fs::write(&path, "old transfer").unwrap();
+        // Record a receipt timestamped well before the window.
+        crate::receipts::ReceiptStore::record_saved_at(
+            "report.pdf",
+            &path.to_string_lossy(),
+            crate::receipts::ReceiptStore::record_saved("x", "/tmp/x", 0, None)
+                .timestamp
+                .saturating_sub(crate::receipts::ReceiptStore::DUPLICATE_SUPPRESSION_WINDOW_MS + 60_000),
+        );
+        // Outside the window: already_saved is false → a new landing records.
+        assert!(
+            !crate::receipts::ReceiptStore::already_saved(
+                "report.pdf",
+                &path.to_string_lossy()
+            ),
+            "expired suppression must allow a new receipt"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     // --- TD-04: receive failures must surface, not look like "no files" ---
 
     #[test]
     fn cli_receive_files_propagates_nonzero_exit() {
+        let _g = crate::receipts::TEST_STORE_LOCK
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
         let dir = temp_test_dir("td04_nonzero_exit");
         let result = cli_receive_files(dir.to_str().unwrap(), "test", |_| {
             Ok(std::process::Output {
@@ -3180,6 +3340,9 @@ mod tests {
 
     #[test]
     fn cli_receive_files_propagates_unreadable_save_dir() {
+        let _g = crate::receipts::TEST_STORE_LOCK
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
         let dir = temp_test_dir("td04_unreadable");
         let blocker = dir.join("blocker");
         std::fs::write(&blocker, "not a dir").unwrap();

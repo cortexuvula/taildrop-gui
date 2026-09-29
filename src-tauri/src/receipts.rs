@@ -291,15 +291,62 @@ impl ReceiptStore {
         }
     }
 
+    /// Record a salvaged receive: bytes recovered from a preserved staging
+    /// directory (TD05-B). Salvage moves the data to safety but CANNOT prove
+    /// the download completed before the CLI failed — a deliberately
+    /// shortened file salvages just as successfully as a complete one. It
+    /// must never be reported as an ordinary successful download.
+    pub fn record_salvaged(filename: &str, saved_path: &str, size: u64) -> TransferReceipt {
+        let receipt = Self::record_with_timestamp(
+            filename,
+            saved_path,
+            size,
+            None,
+            "salvaged",
+            None,
+            None,
+            now_ms(),
+        );
+        let _ = STORE.events.send(receipt.clone());
+        receipt
+    }
+
     /// Whether an identical saved receipt (same filename AND same landing
-    /// path) already exists — idempotence guard so acknowledging an
-    /// already-recorded CLI download (existing-file fallback, double accept)
-    /// does not create a duplicate receipt.
-    pub fn already_saved(filename: &str, saved_path: &str) -> bool {
+    /// path) was recorded within the suppression window — idempotence guard
+    /// so acknowledging an already-recorded CLI download (existing-file
+    /// fallback, double accept) does not create a duplicate receipt.
+    ///
+    /// TD05-A: the window matters. A filesystem path is NOT a stable
+    /// transfer identity: the user can delete a received file and legitimately
+    /// receive another under the same name, which lands at the same path. An
+    /// unwindowed name+path match would suppress that new transfer's receipt
+    /// forever. The ack race (poll-loop drains, user clicks Accept seconds
+    /// later) resolves well inside one poll cycle, so suppression applies
+    /// only within the window; anything later is a new transfer.
+    pub fn recently_saved_within(
+        filename: &str,
+        saved_path: &str,
+        window_ms: u64,
+    ) -> bool {
+        let cutoff = now_ms().saturating_sub(window_ms);
         let inner = STORE.inner.lock().unwrap_or_else(|p| p.into_inner());
         inner.receipts.iter().any(|r| {
-            r.status == "saved" && r.filename == filename && r.saved_path == saved_path
+            r.status == "saved"
+                && r.filename == filename
+                && r.saved_path == saved_path
+                && r.timestamp >= cutoff
         })
+    }
+
+    /// Production suppression window: comfortably larger than the receive
+    /// loop's fastest poll interval, far smaller than any plausible
+    /// delete-and-receive-again sequence.
+    pub const DUPLICATE_SUPPRESSION_WINDOW_MS: u64 = 30_000;
+
+    /// Whether an identical saved receipt exists within the production
+    /// suppression window (see [`ReceiptStore::recently_saved_within`]).
+    pub fn already_saved(filename: &str, saved_path: &str) -> bool {
+        Self::recently_saved_within(filename, saved_path, Self::DUPLICATE_SUPPRESSION_WINDOW_MS)
     }
 
     /// Classify a failed accept into its recovery kind. The TD-01/TD-04 fix
@@ -486,6 +533,22 @@ mod tests {
         let page = page_public(kept.seq - 1, 10);
         assert!(!page.reset);
         assert_eq!(page.receipts.first().map(|r| r.seq), Some(kept.seq));
+    }
+
+    #[test]
+    fn salvaged_receipts_are_distinct_from_saved() {
+        let _g = TEST_STORE_LOCK
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        ReceiptStore::reset_for_tests();
+        // TD05-B: a deliberately SHORTENED staged file, "recovered" — the
+        // move succeeds, but it must never emerge as a verified download.
+        ReceiptStore::record_salvaged("half-file.bin", "/tmp/save/half-file.bin", 512);
+        let page = page_public(0, 10);
+        assert_eq!(page.receipts.len(), 1);
+        assert_eq!(page.receipts[0].status, "salvaged");
+        // Salvaged is not "saved": suppression/verified-history checks skip it.
+        assert!(!ReceiptStore::already_saved("half-file.bin", "/tmp/save/half-file.bin"));
     }
 
     #[test]

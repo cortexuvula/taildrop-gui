@@ -68,7 +68,13 @@ export interface TransferReceipt {
   /** Peer that sent the file, when the daemon exposes it. */
   peerName: string | null;
   direction: "received";
-  status: "saved" | "failed";
+  /**
+   * "salvaged": bytes recovered from a preserved staging dir after a failed
+   * batch (TD05-B) — the move succeeded but download completeness could not
+   * be verified. NOT a successful download; render differently and never
+   * treat as verified history.
+   */
+  status: "saved" | "failed" | "salvaged";
   /** Present only when status === "failed". */
   error?: string;
   /** Completion time, ms since epoch. */
