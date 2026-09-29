@@ -70,6 +70,14 @@ jobs:
         if: matrix.os == 'ubuntu-24.04'
         run: npm test
 
+      - name: Install Playwright browsers
+        if: matrix.os == 'ubuntu-24.04'
+        run: npx playwright install --with-deps chromium
+
+      - name: End-to-end tests
+        if: matrix.os == 'ubuntu-24.04'
+        run: npm run test:e2e
+
       - name: Rust formatting check
         if: matrix.os == 'ubuntu-24.04'
         run: cargo fmt --all -- --check

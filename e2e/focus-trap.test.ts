@@ -5,6 +5,14 @@ import { fileURLToPath } from 'url';
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const fixturePath = path.join(__dirname, 'fixture-settings.html');
 
+/**
+ * NOTE: These tests verify focus-trap *behavior* using a static HTML fixture
+ * that implements the same trap logic as useModal. This catches CSS/HTML
+ * regressions (aria attributes, focusable element order) but does NOT verify
+ * the actual useModal hook. For hook regression testing, add React Testing
+ * Library unit tests in src/hooks/__tests__/useModal.test.ts.
+ */
+
 test('Settings dialog: Shift+Tab from overlay wraps to last focusable', async ({ page }) => {
   await page.goto(`file://${fixturePath}`);
 

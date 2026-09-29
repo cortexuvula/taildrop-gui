@@ -74,6 +74,10 @@ test('Accept button hover state meets WCAG AA 4.5:1 contrast', async ({ page }) 
   const btn = page.locator('.btn-accept').first();
   await btn.hover();
 
+  // CSS transition on background is 0.15s — wait for it to complete before sampling
+  await page.waitForTimeout(400);
+
+  // Also assert the expected hover color to catch transition-not-applied regressions
   const styles = await btn.evaluate((el) => {
     const computed = window.getComputedStyle(el);
     return {
@@ -91,6 +95,11 @@ test('Accept button hover state meets WCAG AA 4.5:1 contrast', async ({ page }) 
   const [bgR, bgG, bgB] = bgMatch!.slice(1).map(Number);
   const [fgR, fgG, fgB] = fgMatch!.slice(1).map(Number);
 
+  // Assert we've reached the hover state (#2558b0 = rgb(37,88,176)), not still in base
+  expect(bgR).toBe(37);
+  expect(bgG).toBe(88);
+  expect(bgB).toBe(176);
+
   const bgLum = relativeLuminance(bgR, bgG, bgB);
   const fgLum = relativeLuminance(fgR, fgG, fgB);
   const ratio = contrastRatio(bgLum, fgLum);
@@ -99,17 +108,21 @@ test('Accept button hover state meets WCAG AA 4.5:1 contrast', async ({ page }) 
   expect(ratio).toBeGreaterThanOrEqual(4.5);
 });
 
-test('Muted text meets WCAG AA 4.5:1 contrast', async ({ page }) => {
+test('Muted text meets WCAG AA 4.5:1 contrast against transfer-panel background', async ({ page }) => {
   await page.goto(`file://${fixturePath}`);
 
-  // Check .transfer-meta which uses --text-muted
+  // Check .transfer-meta which uses --text-muted, rendered on .transfer-panel background
   const meta = page.locator('.transfer-meta').first();
   const styles = await meta.evaluate((el) => {
     const computed = window.getComputedStyle(el);
-    const bodyBg = window.getComputedStyle(document.body).backgroundColor;
+    // Walk up to .transfer-panel for the actual rendered background, not body
+    const panel = el.closest('.transfer-panel');
+    const panelBg = panel
+      ? window.getComputedStyle(panel).backgroundColor
+      : window.getComputedStyle(document.body).backgroundColor;
     return {
       color: computed.color,
-      backgroundColor: bodyBg,
+      backgroundColor: panelBg,
     };
   });
 
