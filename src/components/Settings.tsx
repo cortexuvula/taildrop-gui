@@ -3,7 +3,7 @@ import { enable, disable, isEnabled } from "@tauri-apps/plugin-autostart";
 import { open } from "@tauri-apps/plugin-dialog";
 import { getVersion } from "@tauri-apps/api/app";
 import { useToast } from "./ToastProvider";
-import { useModal } from "../hooks/useModal";
+import { useModalWithLabel } from "../hooks/useModal";
 import { logger } from "../lib/logger";
 import type { UseUpdaterApi } from "../hooks/useUpdater";
 import type { Peer, AppSettings } from "../types";
@@ -25,7 +25,7 @@ export function Settings({ settings, allPeers, onUpdate, onClose, updater, saveD
   const [autoStartBusy, setAutoStartBusy] = useState(false);
   const [appVersion, setAppVersion] = useState("");
   const toast = useToast();
-  const { overlayRef, overlayProps } = useModal(onClose);
+  const { overlayRef, overlayProps } = useModalWithLabel(onClose, true, "modal-heading");
 
   useEffect(() => {
     getVersion()

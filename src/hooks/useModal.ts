@@ -70,9 +70,24 @@ export function useModal(onClose: () => void, enabled: boolean = true) {
   const overlayProps: HTMLAttributes<HTMLDivElement> = {
     role: "dialog",
     "aria-modal": true,
-    "aria-labelledby": "modal-heading",
     tabIndex: -1,
   };
 
   return { overlayRef, overlayProps };
+}
+
+/**
+ * Extended variant accepting an optional labelledBy ID for aria-labelledby.
+ * Callers with a heading element pass its ID; others omit it (no broken ref).
+ */
+export function useModalWithLabel(
+  onClose: () => void,
+  enabled: boolean = true,
+  labelledBy?: string,
+) {
+  const base = useModal(onClose, enabled);
+  if (labelledBy) {
+    base.overlayProps["aria-labelledby"] = labelledBy;
+  }
+  return base;
 }

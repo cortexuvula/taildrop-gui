@@ -522,7 +522,11 @@ body {
   border-bottom: 1px solid var(--border);
   background: rgba(79, 143, 247, 0.03);
   overflow-y: auto;
-  flex-shrink: 0;
+  /* Bounded: cap at 40% of transfer panel, shrinkable if transfer-list needs space.
+     At 700×500 with 12 files, this keeps the Accept buttons scrollable within
+     ~152px while leaving ~229px for active/completed transfers below. */
+  max-height: 40%;
+  flex-shrink: 1;
 }
 
 .section-label {
@@ -562,7 +566,9 @@ body {
 }
 
 .btn-accept {
-  background: var(--accent);
+  /* Darkened from --accent (#4f8ff7) to meet WCAG AA 4.5:1 for small text.
+     White on #2f6fd8 = 4.79:1. Original was 3.18:1 (fail). */
+  background: #2f6fd8;
   color: #fff;
   border: none;
   border-radius: var(--radius);
@@ -576,7 +582,8 @@ body {
 }
 
 .btn-accept:hover {
-  background: var(--accent-hover);
+  /* Hover darkens further: white on #2558b0 = 5.76:1. */
+  background: #2558b0;
 }
 
 .transfer-list {
