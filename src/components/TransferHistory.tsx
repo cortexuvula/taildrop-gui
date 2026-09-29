@@ -51,8 +51,15 @@ export function TransferHistory({
             <div className="transfer-info">
               <div className="transfer-filename">{t.filename}</div>
               <div className="transfer-meta">
-                {getStatusLabel(t.status)} · {t.direction === "sent" ? "→" : "←"} {t.peerName} ·{" "}
-                {formatTime(t.timestamp)}
+                {getStatusLabel(t.status)} · {t.direction === "sent" ? "→" : "←"}{" "}
+                {/* peerName === "incoming" means the incoming-file listing didn't
+                    expose a sender; don't display that sentinel as if it were real.
+                    Per UI Consultant, show "Sender unavailable" rather than joining
+                    on filename (ambiguous under collision renames). */}
+                {t.peerName && t.peerName !== "incoming"
+                  ? t.peerName
+                  : "Sender unavailable"}{" "}
+                · {formatTime(t.timestamp)}
               </div>
               {t.error && <div className="transfer-error" title={t.error}>{shortenError(t.error)}</div>}
             </div>

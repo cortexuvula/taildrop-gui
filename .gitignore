@@ -40,3 +40,7 @@ Thumbs.db
 # Agent workspace
 .zcode/
 .mimosa/
+
+# Playwright artifacts
+test-results/
+playwright-report/
