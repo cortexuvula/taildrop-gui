@@ -28,6 +28,7 @@ terminally fails. Payload:
 
 ```jsonc
 {
+  "seq": 148,                          // backend-assigned, unique, increasing
   "id": "recv-1727654321000-a1b2c3",   // backend-generated, stable, unique
   "filename": "report.pdf",            // name as it appeared in the inbox
   "savedName": "report (1).pdf",       // name it landed under (collision-resolved)
@@ -53,26 +54,80 @@ collisions intentionally produce distinct receipts.
 
 ## Command: `get_recent_receipts` (frontend → backend, new)
 
-Returns receipts newer than a cursor, plus the cursor to persist:
+Returns receipts strictly newer than a cursor, in stable order, plus the
+cursor to persist. **The cursor is a monotonically increasing sequence
+number owned by the backend — not a timestamp.** A timestamp-only cursor is
+rejected because (a) receipts can complete in the same millisecond, making
+them indistinguishable, and (b) "newest N up to a limit" pagination can
+advance the cursor past older unseen records when the backlog exceeds the
+limit, permanently skipping them (repo-audititor finding, 2026-09-29).
+
+- Every receipt carries `seq: number` — unique, strictly increasing across
+  the session, assigned at completion time.
+- `sinceSeq` is exclusive: the response contains only `seq > sinceSeq`.
+  `sinceSeq: 0` (or omitted) means "from the beginning of the session".
+- `limit` caps the page size; when more records remain, the response sets
+  `hasMore: true`. The frontend must keep paging (`nextSinceSeq` → next
+  call) until `hasMore: false` before rendering "up to date" — records are
+  never skipped, only delivered across multiple pages.
+- Retention: the backend may prune receipts older than 24h. If the frontend
+  presents a `sinceSeq` that predates the oldest retained receipt, the
+  response includes `reset: true` and returns from the oldest retained `seq`
+  — the client treats this as "history was compacted", re-syncs from the
+  returned page, and (already having merged by `id`/`seq`) loses nothing it
+  already displayed.
 
 ```jsonc
-// invoke("get_recent_receipts", { sinceMs: 1727654000000, limit: 50 })
+// invoke("get_recent_receipts", { sinceSeq: 0, limit: 50 })
 {
-  "receipts": [ /* TransferReceipt as above, newest first */ ],
-  "nextCursorMs": 1727654321000
+  "receipts": [ /* TransferReceipt as above, ascending seq */ ],
+  "nextSinceSeq": 148,     // = highest seq in this page; 0 if page empty
+  "hasMore": false,
+  "reset": false           // true when sinceSeq predates retained history
 }
 ```
 
-Called on mount and on window refocus. `nextCursorMs` is what the frontend
-stores; passing it as the next `sinceMs` yields exactly the missed events.
-Receipts older than 24h may be pruned by the backend.
+Called on mount and on window refocus. Persist `nextSinceSeq` per session
+(in-memory is fine — receipts are session-scoped in v1).
 
-## Retry affordance (failed receipts)
+## Retry and recovery are two different actions (v1.1)
 
-Failed receipts carry enough to retry: `filename` + the inbox entry still
-existing (TD-01/TD-02 fixes preserve it now). Retry = existing
-`accept_file` invoke with the current save dir. No new command needed in v1;
-if we later want backend-side retry queue, that's v2.
+A failed receipt is not always recoverable the same way, and TD-01 changed
+the landscape: after a partial CLI receive, the downloaded bytes may live
+**only in a preserved staging directory**, not in the daemon inbox. Re-running
+`accept_file(filename)` against the inbox can silently succeed by falling
+back to an *old same-named file already in the save dir* — reporting success
+while the new bytes stay marooned in staging. So failed receipts carry a
+backend-owned discriminator, and the UI offers exactly one action:
+
+```jsonc
+{
+  // ...TransferReceipt fields...
+  "status": "failed",
+  "recovery": {
+    "kind": "inbox",      // "inbox" | "staging" | "none"
+    // kind === "staging": backend-owned absolute path to the preserved dir
+    "stagingPath": "/var/folders/.../taildrop-accept-1a0e...",
+    // kind === "inbox": absent; retry = existing accept_file invoke
+  }
+}
+```
+
+- `kind: "inbox"` → UI offers **Retry** → plain `accept_file(filename,
+  saveDir)` invoke. Valid when the daemon inbox still lists the file.
+- `kind: "staging"` → UI offers **Recover from preserved copy** → new command
+  `recover_staging_files { path }` (backend moves files out with the same
+  `move_file_into_dir` guarantees: exclusive-create, never overwrites,
+  collision-resolved names; emits a `transfer-receipt` with the actual
+  landing `savedPath`; removes the staging dir only when verifiably empty).
+  The frontend never constructs this path itself — `stagingPath` is opaque.
+- `kind: "none"` → no action offered; show the error detail only.
+
+Which `kind` a failed receipt gets: CLI receive failures with a preserved
+staging dir → `staging`; inbox-listed files whose accept failed before any
+drain → `inbox`; anything else (listing failures, timeouts with no staged
+bytes) → `none`. The backend decides at failure time and re-evaluates on
+retry (a staging recovery may downgrade to `none` once recovered).
 
 ## Out of scope for v1 (flag now, not later)
 
