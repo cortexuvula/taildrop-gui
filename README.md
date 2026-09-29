@@ -52,6 +52,30 @@ npm run tauri build
 
 The production build output will be in `src-tauri/target/release/bundle/`.
 
+## Testing
+
+```bash
+# Run unit tests (Vitest)
+npm test
+
+# Run end-to-end tests (Playwright)
+npm run test:e2e
+
+# Run E2E tests with UI mode
+npm run test:e2e:ui
+```
+
+### Unit Tests
+Vitest runs all `*.test.ts` files in the `src/` directory. These tests cover hooks, utilities, and component logic using jsdom for DOM simulation.
+
+### End-to-End Tests
+Playwright tests verify critical UI behaviors that require real browser rendering:
+- **Layout constraints** — 700×500 viewport with 12 incoming files
+- **Focus trap** — Settings dialog keyboard navigation
+- **Accessibility** — WCAG AA contrast ratios for buttons and muted text
+
+E2E tests use static HTML fixtures in the `e2e/` directory to test CSS and layout without requiring the full Tauri runtime.
+
 ## Architecture
 
 ```

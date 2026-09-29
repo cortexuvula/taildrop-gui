@@ -1,0 +1,204 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Layout Fixture: 12 incoming files</title>
+  <link rel="stylesheet" href="../src/App.css">
+</head>
+<body>
+  <div class="app">
+    <div class="sidebar">
+      <div class="sidebar-header">
+        <h2>Devices</h2>
+        <div class="sidebar-actions">
+          <button class="icon-btn" aria-label="Settings">⚙️</button>
+        </div>
+      </div>
+      <div class="sidebar-search">
+        <div class="search-wrap">
+          <input type="text" class="search-input" placeholder="Search devices...">
+        </div>
+      </div>
+      <div class="sidebar-incoming-count">
+        <span style="font-size: 12px; color: var(--text-secondary);">Incoming</span>
+        <span class="badge">12</span>
+      </div>
+      <div class="peer-list">
+        <div class="peer-group">
+          <div class="peer-group-label">Online · 3</div>
+          <button class="peer-card" aria-pressed="false">
+            <span class="status-dot online"></span>
+            <span class="peer-os">🖥️</span>
+            <div class="peer-info">
+              <div class="peer-name">Studio Mac</div>
+              <div class="peer-ip">100.79.10.43</div>
+            </div>
+          </button>
+          <button class="peer-card" aria-pressed="false">
+            <span class="status-dot online"></span>
+            <span class="peer-os">📱</span>
+            <div class="peer-info">
+              <div class="peer-name">iPhone 15 Pro</div>
+              <div class="peer-ip">100.76.52.18</div>
+            </div>
+          </button>
+          <button class="peer-card" aria-pressed="false">
+            <span class="status-dot online"></span>
+            <span class="peer-os">💻</span>
+            <div class="peer-info">
+              <div class="peer-name">Work Laptop</div>
+              <div class="peer-ip">100.125.167.8</div>
+            </div>
+          </button>
+        </div>
+      </div>
+    </div>
+
+    <div class="main has-activity">
+      <div class="dropzone-container">
+        <div class="dropzone has-target">
+          <div class="dropzone-content">
+            <div class="dropzone-icon">📤</div>
+            <div class="dropzone-text">Drop files to send to Studio Mac</div>
+            <div class="dropzone-hint">or click to browse</div>
+          </div>
+        </div>
+      </div>
+
+      <div class="transfer-panel">
+        <div class="transfer-header">
+          <h3>Transfers</h3>
+        </div>
+
+        <div class="incoming-section">
+          <div class="section-label">Incoming Files</div>
+
+          <div class="incoming-item">
+            <div class="incoming-info">
+              <span class="incoming-name">document-1.pdf</span>
+              <span class="incoming-size">2.4 MB</span>
+            </div>
+            <button class="btn-accept">Accept</button>
+          </div>
+
+          <div class="incoming-item">
+            <div class="incoming-info">
+              <span class="incoming-name">image-2.png</span>
+              <span class="incoming-size">1.8 MB</span>
+            </div>
+            <button class="btn-accept">Accept</button>
+          </div>
+
+          <div class="incoming-item">
+            <div class="incoming-info">
+              <span class="incoming-name">spreadsheet-3.xlsx</span>
+              <span class="incoming-size">3.1 MB</span>
+            </div>
+            <button class="btn-accept">Accept</button>
+          </div>
+
+          <div class="incoming-item">
+            <div class="incoming-info">
+              <span class="incoming-name">presentation-4.pptx</span>
+              <span class="incoming-size">5.2 MB</span>
+            </div>
+            <button class="btn-accept">Accept</button>
+          </div>
+
+          <div class="incoming-item">
+            <div class="incoming-info">
+              <span class="incoming-name">video-5.mp4</span>
+              <span class="incoming-size">42.8 MB</span>
+            </div>
+            <button class="btn-accept">Accept</button>
+          </div>
+
+          <div class="incoming-item">
+            <div class="incoming-info">
+              <span class="incoming-name">archive-6.zip</span>
+              <span class="incoming-size">18.3 MB</span>
+            </div>
+            <button class="btn-accept">Accept</button>
+          </div>
+
+          <div class="incoming-item">
+            <div class="incoming-info">
+              <span class="incoming-name">text-7.txt</span>
+              <span class="incoming-size">24 KB</span>
+            </div>
+            <button class="btn-accept">Accept</button>
+          </div>
+
+          <div class="incoming-item">
+            <div class="incoming-info">
+              <span class="incoming-name">code-8.js</span>
+              <span class="incoming-size">8.7 KB</span>
+            </div>
+            <button class="btn-accept">Accept</button>
+          </div>
+
+          <div class="incoming-item">
+            <div class="incoming-info">
+              <span class="incoming-name">data-9.json</span>
+              <span class="incoming-size">156 KB</span>
+            </div>
+            <button class="btn-accept">Accept</button>
+          </div>
+
+          <div class="incoming-item">
+            <div class="incoming-info">
+              <span class="incoming-name">notes-10.md</span>
+              <span class="incoming-size">4.2 KB</span>
+            </div>
+            <button class="btn-accept">Accept</button>
+          </div>
+
+          <div class="incoming-item">
+            <div class="incoming-info">
+              <span class="incoming-name">diagram-11.svg</span>
+              <span class="incoming-size">892 KB</span>
+            </div>
+            <button class="btn-accept">Accept</button>
+          </div>
+
+          <div class="incoming-item">
+            <div class="incoming-info">
+              <span class="incoming-name">backup-12.tar.gz</span>
+              <span class="incoming-size">67.4 MB</span>
+            </div>
+            <button class="btn-accept" data-testid="last-accept-btn">Accept</button>
+          </div>
+        </div>
+
+        <div class="transfer-list">
+          <div class="transfer-item success">
+            <span class="transfer-status success">✓</span>
+            <div class="transfer-info">
+              <div class="transfer-filename">previous-file.pdf</div>
+              <div class="transfer-meta">Saved · ← Studio Mac · 2m ago</div>
+            </div>
+          </div>
+
+          <div class="transfer-item success">
+            <span class="transfer-status success">✓</span>
+            <div class="transfer-info">
+              <div class="transfer-filename">another-image.png</div>
+              <div class="transfer-meta">Saved · ← iPhone 15 Pro · 5m ago</div>
+            </div>
+          </div>
+
+          <div class="transfer-item error">
+            <span class="transfer-status error">✗</span>
+            <div class="transfer-info">
+              <div class="transfer-filename">failed-upload.zip</div>
+              <div class="transfer-meta">Failed · → Work Laptop · 8m ago</div>
+              <div class="transfer-error">Network timeout</div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</body>
+</html>

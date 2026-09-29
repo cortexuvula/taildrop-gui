@@ -1,0 +1,130 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Settings Fixture: Focus trap</title>
+  <link rel="stylesheet" href="../src/App.css">
+</head>
+<body>
+  <div class="app">
+    <div class="sidebar">
+      <div class="sidebar-header">
+        <h2>Devices</h2>
+      </div>
+    </div>
+    <div class="main">
+      <button id="trigger-settings">Open Settings</button>
+    </div>
+  </div>
+
+  <div class="settings-overlay" role="dialog" aria-modal="true" aria-labelledby="modal-heading" tabindex="-1">
+    <div class="settings-panel">
+      <div class="settings-header">
+        <h2 id="modal-heading">Settings</h2>
+        <button class="icon-btn" aria-label="Close settings">✕</button>
+      </div>
+
+      <div class="settings-section">
+        <label class="settings-label" for="save-dir-input">Save Directory</label>
+        <input id="save-dir-input" type="text" class="settings-input" value="/Users/cortexuvula/Downloads">
+      </div>
+
+      <div class="settings-section">
+        <label class="settings-label">
+          <span class="toggle-row">
+            Auto-accept incoming files
+            <input type="checkbox">
+          </span>
+        </label>
+      </div>
+
+      <div class="settings-section">
+        <label class="settings-label">
+          <span class="toggle-row">
+            Show offline nodes
+            <input type="checkbox" checked>
+          </span>
+        </label>
+      </div>
+
+      <div class="settings-section">
+        <label class="settings-label">
+          <span class="toggle-row">
+            Show exit nodes
+            <input type="checkbox">
+          </span>
+        </label>
+      </div>
+
+      <div class="settings-section">
+        <label class="settings-label">
+          <span class="toggle-row">
+            Desktop notifications
+            <input type="checkbox" checked>
+          </span>
+        </label>
+      </div>
+
+      <div class="settings-section">
+        <label class="settings-label">Hidden Nodes</label>
+        <div class="node-visibility-list" style="font-size: 12px; color: var(--text-secondary);">
+          No hidden nodes
+        </div>
+      </div>
+
+      <div class="settings-footer">
+        <span class="settings-version">v0.13.1</span>
+        <button class="btn-secondary">Check for Updates</button>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    // Simulate focus trap behavior
+    const overlay = document.querySelector('.settings-overlay');
+    const focusableSelector = 'button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])';
+
+    function getFocusableElements() {
+      return Array.from(overlay.querySelectorAll(focusableSelector));
+    }
+
+    overlay.addEventListener('keydown', (e) => {
+      if (e.key === 'Escape') {
+        overlay.remove();
+        return;
+      }
+
+      if (e.key === 'Tab') {
+        const focusable = getFocusableElements();
+        if (focusable.length === 0) return;
+
+        const first = focusable[0];
+        const last = focusable[focusable.length - 1];
+
+        if (e.shiftKey) {
+          // Shift+Tab: wrap from first to last, or from overlay to last
+          if (document.activeElement === first || document.activeElement === overlay) {
+            e.preventDefault();
+            last.focus();
+          }
+        } else {
+          // Tab: wrap from last to first
+          if (document.activeElement === last) {
+            e.preventDefault();
+            first.focus();
+          }
+        }
+      }
+    });
+
+    // Initial focus
+    const firstFocusable = getFocusableElements()[0];
+    if (firstFocusable) {
+      firstFocusable.focus();
+    } else {
+      overlay.focus();
+    }
+  </script>
+</body>
+</html>
