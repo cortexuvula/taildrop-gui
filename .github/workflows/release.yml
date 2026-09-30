@@ -55,11 +55,30 @@ jobs:
           RELEASE_VERSION: ${{ steps.get_version.outputs.VERSION }}
         with:
           script: |
+            const tag = process.env.RELEASE_VERSION;
+            // Dedupe: a prior run (or a tag re-move) may have left a draft or
+            // published release for this tag. Delete it first so we never
+            // accumulate orphan drafts — otherwise every re-run leaks one.
+            try {
+              const existing = await github.rest.repos.getReleaseByTag({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                tag
+              });
+              await github.rest.repos.deleteRelease({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                release_id: existing.data.id
+              });
+              console.log(`Deleted superseded release ${existing.data.id} for ${tag}`);
+            } catch (e) {
+              if (e.status !== 404) throw e;
+            }
             const { data } = await github.rest.repos.createRelease({
               owner: context.repo.owner,
               repo: context.repo.repo,
-              tag_name: process.env.RELEASE_VERSION,
-              name: `TailDrop ${process.env.RELEASE_VERSION}`,
+              tag_name: tag,
+              name: `TailDrop ${tag}`,
               draft: true,
               prerelease: false
             });
