@@ -729,6 +729,10 @@ fn unique_save_path(dir: &std::path::Path, name: &str) -> std::path::PathBuf {
 /// the subsequent `wait()` reaps the zombie so no resources leak. If the
 /// child exited between cap-expiry and kill, `kill` reports `InvalidInput`
 /// / "no such process", which is success for our purposes.
+// Used in production only on macOS/Windows (CLI-based platforms); on Linux the
+// socket API is used instead, so it is dead in the Linux lib build but still
+// exercised by the shared tests below.
+#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn run_command_with_cap(
     mut command: std::process::Command,
     cap: std::time::Duration,
@@ -1411,7 +1415,7 @@ mod platform {
     /// `file` is the caller's exclusively-created destination (see
     /// `reserve_unique_file_async`); on failure the caller removes the partial.
     async fn stream_get_to_file(api_path: &str, file: &mut tokio::fs::File) -> Result<(), String> {
-        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::io::AsyncWriteExt;
         use tokio::net::UnixStream;
 
         let mut stream = UnixStream::connect(SOCKET_PATH)
