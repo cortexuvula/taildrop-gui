@@ -2,7 +2,7 @@ import { useState, useEffect, useCallback, useRef } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
-import type { TransferReceipt, ReceiptPage, StagingRecoveryFoundEvent, Settings } from "../types";
+import type { TransferReceipt, ReceiptPage, StagingRecoveryFoundEvent, AppSettings } from "../types";
 import { mergeReceipts, isTransferReceipt, isStagingRecoveryEvent } from "../lib/receipts";
 import { logger } from "../lib/logger";
 import { toErrorMsg } from "../lib/toErrorMsg";
@@ -10,7 +10,7 @@ import { toErrorMsg } from "../lib/toErrorMsg";
 const RECEIPT_PAGE_LIMIT = 50;
 
 export interface UseReceiptsOptions {
-  settings: Settings;
+  settings: AppSettings;
 }
 
 export interface UseReceiptsResult {

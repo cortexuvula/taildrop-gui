@@ -2,20 +2,20 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { renderHook, waitFor, act } from "@testing-library/react";
 import { useReceipts } from "../useReceipts";
-import type { Settings } from "../../types";
+import type { AppSettings } from "../../types";
 
 const mockInvoke = vi.fn();
 const mockListen = vi.fn();
 
 // Per-test overridable settings (distinct from Downloads to catch the saveDir bug)
 const CUSTOM_SAVE_DIR = "/Users/me/Documents/TailDrop";
-let testSettings: Settings = {
+let testSettings: AppSettings = {
   saveDirectory: CUSTOM_SAVE_DIR,
   showDesktopNotifications: true,
   acceptedPeers: [],
   autoAcceptFrom: [],
   theme: "dark",
-} as unknown as Settings;
+} as unknown as AppSettings;
 
 vi.mock("@tauri-apps/api/core", () => ({
   invoke: (...args: unknown[]) => mockInvoke(...args),
@@ -45,7 +45,7 @@ beforeEach(() => {
     acceptedPeers: [],
     autoAcceptFrom: [],
     theme: "dark",
-  } as unknown as Settings;
+  } as unknown as AppSettings;
 
   // Default: listen() captures the handler and returns an unlisten fn
   mockListen.mockImplementation((event: string, handler: (e: { payload: unknown }) => void) => {
