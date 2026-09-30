@@ -2047,7 +2047,9 @@ mod platform {
         args: &[&str],
         cap: std::time::Duration,
     ) -> Result<std::process::Output, String> {
-        super::run_command_with_cap(tailscale_cmd().args(args), cap)
+        let mut cmd = tailscale_cmd();
+        cmd.args(args);
+        super::run_command_with_cap(cmd, cap)
     }
 
     /// CLI auto-receive fallback for when the named pipe is unavailable.
@@ -2486,7 +2488,7 @@ mod tests {
 
     #[test]
     fn capped_command_captures_nonzero_exit() {
-        let mut cmd = std::process::Command::new("false");
+        let cmd = std::process::Command::new("false");
         let out = run_command_with_cap(cmd, std::time::Duration::from_secs(10)).unwrap();
         assert!(!out.status.success(), "nonzero exit must be visible");
     }
