@@ -719,6 +719,69 @@ fn unique_save_path(dir: &std::path::Path, name: &str) -> std::path::PathBuf {
     dir.join(fallback_name)
 }
 
+// ============================================================
+// TD-07: cancellable child-process execution
+// ============================================================
+
+/// Run a child process to completion on the blocking pool with a hard
+/// wall-clock cap, TERMINATING and REAPING the child when the cap expires —
+/// unlike `tokio::time::timeout(.., spawn_blocking(.. Command::output()))`,
+/// which drops the future on elapse and orphans both the blocked thread and
+/// the still-running process (TD-07: "timeouts leave operations running").
+///
+/// Kill-then-wait: `kill()` is async-signal-safe and always issued first;
+/// the subsequent `wait()` reaps the zombie so no resources leak. If the
+/// child exited between cap-expiry and kill, `kill` reports `InvalidInput`
+/// / "no such process", which is success for our purposes.
+pub(crate) fn run_command_with_cap(
+    mut command: std::process::Command,
+    cap: std::time::Duration,
+) -> Result<std::process::Output, String> {
+    command
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
+    let mut child = command
+        .spawn()
+        .map_err(|e| format!("Failed to run {}: {}", command.get_program().to_string_lossy(), e))?;
+    let deadline = std::time::Instant::now() + cap;
+    // wait_timeout-style poll: std has no timed wait, so poll at a modest
+    // interval — the cap granularity is seconds, so 50ms is negligible.
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                let mut stdout: Vec<u8> = Vec::new();
+                let mut stderr: Vec<u8> = Vec::new();
+                use std::io::Read;
+                if let Some(mut out) = child.stdout.take() {
+                    let _ = out.read_to_end(&mut stdout);
+                }
+                if let Some(mut err) = child.stderr.take() {
+                    let _ = err.read_to_end(&mut stderr);
+                }
+                return Ok(std::process::Output { status, stdout, stderr });
+            }
+            Ok(None) => {
+                if std::time::Instant::now() >= deadline {
+                    log::warn!(
+                        "TD-07: command {:?} exceeded {:?}s cap — terminating",
+                        command.get_program(),
+                        cap
+                    );
+                    let _ = child.kill();
+                    let _ = child.wait(); // reap
+                    return Err(format!(
+                        "command '{}' timed out after {:?} (process terminated)",
+                        command.get_program().to_string_lossy(),
+                        cap
+                    ));
+                }
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
+            Err(e) => return Err(format!("Failed to wait for child: {}", e)),
+        }
+    }
+}
+
 /// RFC 3986 percent-encoding (encode all non-unreserved characters).
 fn url_encode(s: &str) -> String {
     let mut encoded = String::with_capacity(s.len() * 3);
@@ -1487,6 +1550,21 @@ mod platform {
         Command::new(binary).args(args).output()
     }
 
+    /// TD-07: capped CLI execution. Same binary discovery/args as
+    /// `tailscale_cmd`, but the child is terminated and reaped when the cap
+    /// expires instead of being orphaned by a dropped timeout future. Callers
+    /// already wrap in `spawn_blocking`; the cap runs inside that thread.
+    fn tailscale_cmd_capped(
+        args: &[&str],
+        cap: std::time::Duration,
+    ) -> Result<std::process::Output, String> {
+        let binary = find_tailscale().unwrap_or("tailscale");
+        log::debug!("macOS exec (capped {:?}): {} {:?}", cap, binary, args);
+        let mut cmd = Command::new(binary);
+        cmd.args(args);
+        super::run_command_with_cap(cmd, cap)
+    }
+
     const SOCKET_PATH: &str = "/var/run/tailscale/tailscaled.sock";
 
     /// Try an HTTP/1.0 GET via the Tailscale Unix socket.
@@ -1667,12 +1745,16 @@ mod platform {
                 let binary_path = find_tailscale().unwrap_or("tailscale");
                 log::debug!("macOS fetch_status_json: binary={}", binary_path);
 
-                let output = tailscale_cmd(&["status", "--json"]).map_err(|e| {
-                    format!(
-                        "Could not run tailscale CLI [tried: {}]: {}",
-                        binary_path, e
-                    )
-                })?;
+                // TD-07: capped — a hung CLI is terminated and reaped, not
+                // orphaned when the outer timeout drops this future.
+                let output =
+                    tailscale_cmd_capped(&["status", "--json"], std::time::Duration::from_secs(110))
+                        .map_err(|e| {
+                            format!(
+                                "Could not run tailscale CLI [tried: {}]: {}",
+                                binary_path, e
+                            )
+                        })?;
 
                 let stdout = String::from_utf8_lossy(&output.stdout);
                 let stderr = String::from_utf8_lossy(&output.stderr);
@@ -1719,8 +1801,13 @@ mod platform {
         tokio::time::timeout(
             std::time::Duration::from_secs(timeout_secs),
             tokio::task::spawn_blocking(move || {
-                let output = tailscale_cmd(&["file", "cp", &file_path, &format!("{}:", peer_name)])
-                    .map_err(|e| format!("Failed to run tailscale file cp: {}", e))?;
+                // TD-07: cap sits just under the outer adaptive timeout so
+                // the child is terminated here, not orphaned by the drop.
+                let output = tailscale_cmd_capped(
+                    &["file", "cp", &file_path, &format!("{}:", peer_name)],
+                    std::time::Duration::from_secs(timeout_secs.saturating_sub(5).max(10)),
+                )
+                .map_err(|e| format!("Failed to run tailscale file cp: {}", e))?;
                 if !output.status.success() {
                     let stderr = String::from_utf8_lossy(&output.stderr);
                     return Err(format!("tailscale file cp failed: {}", stderr));
@@ -1845,12 +1932,16 @@ mod platform {
                             // --wait=false: don't block if the inbox is empty
                             // (the file may have already been consumed by the
                             // auto-receive poll on macOS).
-                            let output = tailscale_cmd(&[
-                                "file",
-                                "get",
-                                "--wait=false",
-                                &staging.to_string_lossy(),
-                            ])
+                            // TD-07: capped under the 120s outer wrapper.
+                            let output = tailscale_cmd_capped(
+                                &[
+                                    "file",
+                                    "get",
+                                    "--wait=false",
+                                    &staging.to_string_lossy(),
+                                ],
+                                std::time::Duration::from_secs(110),
+                            )
                             .map_err(|e| format!("Failed to run tailscale file get: {}", e))?;
                             if !output.status.success() {
                                 let stderr = String::from_utf8_lossy(&output.stderr);
@@ -1927,15 +2018,22 @@ mod platform {
         cmd
     }
 
+    /// TD-07: run the CLI with terminate-and-reap on cap expiry. CREATE_NO_WINDOW
+    /// is preserved; stdout/stderr are piped by the runner.
+    fn tailscale_cmd_capped(
+        args: &[&str],
+        cap: std::time::Duration,
+    ) -> Result<std::process::Output, String> {
+        super::run_command_with_cap(tailscale_cmd().args(args), cap)
+    }
+
     /// CLI auto-receive fallback for when the named pipe is unavailable.
     /// Delegates to the shared `cli_receive_files` helper with the
     /// Windows-specific `tailscale_cmd` invocation.
     fn try_cli_receive_files(save_dir: &str) -> Result<Vec<u8>, String> {
         super::cli_receive_files(save_dir, "Windows", |args| {
-            tailscale_cmd()
-                .args(args)
-                .output()
-                .map_err(|e| format!("Failed to run tailscale file get: {}", e))
+            // TD-07: capped under the 120s outer wrapper.
+            tailscale_cmd_capped(args, std::time::Duration::from_secs(110))
         })
     }
 
@@ -1943,15 +2041,15 @@ mod platform {
         tokio::time::timeout(
             std::time::Duration::from_secs(120),
             tokio::task::spawn_blocking(|| {
-                let output = tailscale_cmd()
-                    .args(["status", "--json"])
-                    .output()
-                    .map_err(|e| {
-                        format!(
-                            "Could not run tailscale CLI. Make sure Tailscale is installed and in your PATH: {}",
-                            e
-                        )
-                    })?;
+                // TD-07: capped — hung CLI is terminated and reaped.
+                let output =
+                    tailscale_cmd_capped(&["status", "--json"], std::time::Duration::from_secs(110))
+                        .map_err(|e| {
+                            format!(
+                                "Could not run tailscale CLI. Make sure Tailscale is installed and in your PATH: {}",
+                                e
+                            )
+                        })?;
                 log::debug!(
                     "Windows CLI result: exit={} stdout_len={} stderr_len={}",
                     output.status,
@@ -1985,10 +2083,12 @@ mod platform {
         tokio::time::timeout(
             std::time::Duration::from_secs(timeout_secs),
             tokio::task::spawn_blocking(move || {
-                let output = tailscale_cmd()
-                    .args(["file", "cp", &file_path, &format!("{}:", peer_name)])
-                    .output()
-                    .map_err(|e| format!("Failed to run tailscale file cp: {}", e))?;
+                // TD-07: cap sits just under the outer adaptive timeout.
+                let output = tailscale_cmd_capped(
+                    &["file", "cp", &file_path, &format!("{}:", peer_name)],
+                    std::time::Duration::from_secs(timeout_secs.saturating_sub(5).max(10)),
+                )
+                .map_err(|e| format!("Failed to run tailscale file cp: {}", e))?;
                 if !output.status.success() {
                     let stderr = String::from_utf8_lossy(&output.stderr);
                     return Err(format!("tailscale file cp failed: {}", stderr));
@@ -2119,10 +2219,12 @@ mod platform {
                 // successes (requested + collateral); failures recorded here.
                 super::accept_file_inner(&name, &save_dir, |staging| {
                     // --wait=false: don't block if the inbox is empty.
-                    let output = tailscale_cmd()
-                        .args(["file", "get", "--wait=false", &staging.to_string_lossy()])
-                        .output()
-                        .map_err(|e| format!("Failed to run tailscale file get: {}", e))?;
+                    // TD-07: capped under the 120s outer wrapper.
+                    let output = tailscale_cmd_capped(
+                        &["file", "get", "--wait=false", &staging.to_string_lossy()],
+                        std::time::Duration::from_secs(110),
+                    )
+                    .map_err(|e| format!("Failed to run tailscale file get: {}", e))?;
                     if !output.status.success() {
                         let stderr = String::from_utf8_lossy(&output.stderr);
                         return Err(format!("tailscale file get failed: {}", stderr));
@@ -2285,6 +2387,47 @@ pub async fn accept_incoming_file(name: &str, save_dir: &str) -> Result<String, 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // --- TD-07: run_command_with_cap ---
+
+    #[test]
+    fn capped_command_returns_output_on_success() {
+        let mut cmd = std::process::Command::new("echo");
+        cmd.arg("hello-td07");
+        let out = run_command_with_cap(cmd, std::time::Duration::from_secs(10)).unwrap();
+        assert!(out.status.success());
+        assert!(String::from_utf8_lossy(&out.stdout).contains("hello-td07"));
+    }
+
+    #[test]
+    fn capped_command_terminates_and_errors_past_deadline() {
+        // `sleep 30` would hold a thread for 30s if orphaned. The cap must
+        // terminate the child AND return a timeout error promptly.
+        let mut cmd = std::process::Command::new("sleep");
+        cmd.arg("30");
+        let start = std::time::Instant::now();
+        let result = run_command_with_cap(cmd, std::time::Duration::from_millis(300));
+        let elapsed = start.elapsed();
+        assert!(result.is_err(), "cap expiry must be an error");
+        let msg = result.unwrap_err();
+        assert!(
+            msg.contains("timed out"),
+            "error must name the timeout: {}",
+            msg
+        );
+        assert!(
+            elapsed < std::time::Duration::from_secs(5),
+            "must return promptly after the cap (took {:?})",
+            elapsed
+        );
+    }
+
+    #[test]
+    fn capped_command_captures_nonzero_exit() {
+        let mut cmd = std::process::Command::new("false");
+        let out = run_command_with_cap(cmd, std::time::Duration::from_secs(10)).unwrap();
+        assert!(!out.status.success(), "nonzero exit must be visible");
+    }
 
     // --- url_encode ---
 
