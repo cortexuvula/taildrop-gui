@@ -311,42 +311,26 @@ impl ReceiptStore {
         receipt
     }
 
-    /// Whether an identical saved receipt (same filename AND same landing
-    /// path) was recorded within the suppression window — idempotence guard
-    /// so acknowledging an already-recorded CLI download (existing-file
-    /// fallback, double accept) does not create a duplicate receipt.
+    /// Whether a saved receipt exists for this exact landing (filename AND
+    /// path), regardless of age. This is the TD05-A correction: identity is
+    /// per-completed-landing, not elapsed time.
     ///
-    /// TD05-A: the window matters. A filesystem path is NOT a stable
-    /// transfer identity: the user can delete a received file and legitimately
-    /// receive another under the same name, which lands at the same path. An
-    /// unwindowed name+path match would suppress that new transfer's receipt
-    /// forever. The ack race (poll-loop drains, user clicks Accept seconds
-    /// later) resolves well inside one poll cycle, so suppression applies
-    /// only within the window; anything later is a new transfer.
-    pub fn recently_saved_within(
-        filename: &str,
-        saved_path: &str,
-        window_ms: u64,
-    ) -> bool {
-        let cutoff = now_ms().saturating_sub(window_ms);
+    /// Two distinct roles, and the distinction is the fix:
+    /// - **Acknowledgement** (no drain): time-unconditional. A delayed ack
+    ///   must still find the recorded landing and return it — a window here
+    ///   made old acks fall through to a redundant CLI drain.
+    /// - **Recording suppression**: REMOVED from the drain/accept paths.
+    ///   Every newly completed landing records its own receipt — receiving,
+    ///   deleting, and receiving the same name again (inside any window)
+    ///   produces two receipts, because they are two transfers. The only
+    ///   remaining suppression is the existing-file FALLBACK in
+    ///   `accept_file_inner`, which fires when the inbox delivered nothing
+    ///   and must not re-record a landing that was already recorded.
+    pub fn saved_landing_recorded(filename: &str, saved_path: &str) -> bool {
         let inner = STORE.inner.lock().unwrap_or_else(|p| p.into_inner());
         inner.receipts.iter().any(|r| {
-            r.status == "saved"
-                && r.filename == filename
-                && r.saved_path == saved_path
-                && r.timestamp >= cutoff
+            r.status == "saved" && r.filename == filename && r.saved_path == saved_path
         })
-    }
-
-    /// Production suppression window: comfortably larger than the receive
-    /// loop's fastest poll interval, far smaller than any plausible
-    /// delete-and-receive-again sequence.
-    pub const DUPLICATE_SUPPRESSION_WINDOW_MS: u64 = 30_000;
-
-    /// Whether an identical saved receipt exists within the production
-    /// suppression window (see [`ReceiptStore::recently_saved_within`]).
-    pub fn already_saved(filename: &str, saved_path: &str) -> bool {
-        Self::recently_saved_within(filename, saved_path, Self::DUPLICATE_SUPPRESSION_WINDOW_MS)
     }
 
     /// Classify a failed accept into its recovery kind. The TD-01/TD-04 fix
@@ -547,8 +531,8 @@ mod tests {
         let page = page_public(0, 10);
         assert_eq!(page.receipts.len(), 1);
         assert_eq!(page.receipts[0].status, "salvaged");
-        // Salvaged is not "saved": suppression/verified-history checks skip it.
-        assert!(!ReceiptStore::already_saved("half-file.bin", "/tmp/save/half-file.bin"));
+        // Salvaged is not "saved": verified-history checks skip it.
+        assert!(!ReceiptStore::saved_landing_recorded("half-file.bin", "/tmp/save/half-file.bin"));
     }
 
     #[test]

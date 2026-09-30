@@ -230,7 +230,7 @@ fn acknowledge_already_received(name: &str, save_dir: &str) -> Option<String> {
         return None;
     }
     let path_str = existing.to_string_lossy().to_string();
-    if crate::receipts::ReceiptStore::already_saved(safe_name, &path_str) {
+    if crate::receipts::ReceiptStore::saved_landing_recorded(safe_name, &path_str) {
         return Some(path_str);
     }
     None
@@ -328,21 +328,18 @@ fn accept_file_inner(
             let size = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
             match move_file_into_dir(&path, save_dir_path, &file_name) {
                 Ok(dest) => {
-                    // TD-05: every landed file gets a receipt — collateral
-                    // files too, not only the requested one (the CLI drained
-                    // the whole inbox; each file's bytes verifiably landed at
-                    // a known destination).
-                    if !crate::receipts::ReceiptStore::already_saved(
+                    // TD-05/TD05-A: every landed file records its OWN receipt
+                    // — collateral files too, and with NO suppression: a new
+                    // landing is a new transfer even when an old receipt for
+                    // the same name/path exists (receive → delete → receive
+                    // again must produce two receipts). Identity is the
+                    // landing event, not the filesystem path.
+                    crate::receipts::ReceiptStore::record_saved(
                         &file_name,
                         &dest.to_string_lossy(),
-                    ) {
-                        crate::receipts::ReceiptStore::record_saved(
-                            &file_name,
-                            &dest.to_string_lossy(),
-                            size,
-                            None,
-                        );
-                    }
+                        size,
+                        None,
+                    );
                     if file_name == safe_name {
                         requested_path = Some(dest);
                     } else {
@@ -381,9 +378,12 @@ fn accept_file_inner(
         // the exact name, return that path.
         let existing = save_dir_path.join(safe_name);
         if existing.is_file() {
-            // TD-05: idempotent — if this exact landing was already recorded
-            // (auto-drain receipt from the poll loop), do not duplicate it.
-            if !crate::receipts::ReceiptStore::already_saved(
+            // TD-05/TD05-A: the fallback fires only when the inbox delivered
+            // NOTHING this call — this is an old landing, not a new transfer,
+            // so it must not re-record. Suppression here is time-unconditional
+            // (a delayed ack still matches) and cannot swallow a new receipt
+            // because new landings record in the move loop above, never here.
+            if !crate::receipts::ReceiptStore::saved_landing_recorded(
                 safe_name,
                 &existing.to_string_lossy(),
             ) {
@@ -572,15 +572,10 @@ fn cli_receive_files(
         let size = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
         match move_file_into_dir(&path, save_dir_path, &name) {
             Ok(dest) => {
+                // TD05-A: no suppression — each completed landing in this
+                // drain is a distinct transfer and gets its own receipt.
                 let dest_str = dest.to_string_lossy().to_string();
-                if !crate::receipts::ReceiptStore::already_saved(&name, &dest_str) {
-                    crate::receipts::ReceiptStore::record_saved(
-                        &name,
-                        &dest_str,
-                        size,
-                        None,
-                    );
-                }
+                crate::receipts::ReceiptStore::record_saved(&name, &dest_str, size, None);
                 landed.push(IncomingFile {
                     name,
                     size,
@@ -3286,34 +3281,97 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// A same-name landing OUTSIDE the suppression window is a NEW transfer:
-    /// the receipt must not be suppressed (path is not transfer identity).
+    /// TD05-A boundary 1 (repo-auditor): a NEW transfer inside any window
+    /// records its own receipt. Receive → delete → receive-again (same name,
+    /// seconds apart) = two receipts, because they are two transfers.
     #[test]
-    fn window_suppression_expires_for_new_transfer() {
+    fn new_transfer_inside_window_records_new_receipt() {
         let _g = crate::receipts::TEST_STORE_LOCK
             .lock()
             .unwrap_or_else(|p| p.into_inner());
         crate::receipts::ReceiptStore::reset_for_tests();
-        let dir = temp_test_dir("td05a_window");
-        let path = dir.join("report.pdf");
-        std::fs::write(&path, "old transfer").unwrap();
-        // Record a receipt timestamped well before the window.
-        crate::receipts::ReceiptStore::record_saved_at(
-            "report.pdf",
-            &path.to_string_lossy(),
-            crate::receipts::ReceiptStore::record_saved("x", "/tmp/x", 0, None)
-                .timestamp
-                .saturating_sub(crate::receipts::ReceiptStore::DUPLICATE_SUPPRESSION_WINDOW_MS + 60_000),
+        let dir = temp_test_dir("td05a_inside_window");
+        let path = dir.join("report.pdf").to_string_lossy().to_string();
+
+        // First transfer: drains and lands.
+        accept_file_with_getter("report.pdf", dir.to_str().unwrap(), |staging| {
+            std::fs::write(staging.join("report.pdf"), "first").unwrap();
+            Ok(())
+        })
+        .unwrap();
+
+        // User deletes the file, then a second transfer arrives with the
+        // same name — immediately (inside any conceivable window).
+        std::fs::remove_file(&path).unwrap();
+        accept_file_with_getter("report.pdf", dir.to_str().unwrap(), |staging| {
+            std::fs::write(staging.join("report.pdf"), "second").unwrap();
+            Ok(())
+        })
+        .unwrap();
+
+        let receipts: Vec<_> = crate::receipts::ReceiptStore::snapshot_for_tests()
+            .into_iter()
+            .filter(|r| r.filename == "report.pdf")
+            .collect();
+        assert_eq!(
+            receipts.len(),
+            2,
+            "receive-delete-receive inside the window must yield TWO receipts: {:?}",
+            receipts
         );
-        // Outside the window: already_saved is false → a new landing records.
-        assert!(
-            !crate::receipts::ReceiptStore::already_saved(
-                "report.pdf",
-                &path.to_string_lossy()
-            ),
-            "expired suppression must allow a new receipt"
-        );
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "second");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// TD05-A boundary 2 (repo-auditor): a DELAYED acknowledgement still
+    /// resolves without draining, no matter how old the receipt is.
+    #[test]
+    fn delayed_acknowledgement_outside_any_window_still_skips_drain() {
+        let _g = crate::receipts::TEST_STORE_LOCK
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        crate::receipts::ReceiptStore::reset_for_tests();
+        let dir = temp_test_dir("td05a_delayed_ack");
+        let path = dir.join("notes.txt");
+        std::fs::write(&path, "old landing").unwrap();
+        // Record the landing with a timestamp far in the past.
+        crate::receipts::ReceiptStore::record_saved_at(
+            "notes.txt",
+            &path.to_string_lossy(),
+            now_ms_testhelper().saturating_sub(3_600_000),
+        );
+
+        let drained = std::sync::atomic::AtomicBool::new(false);
+        let result = match acknowledge_already_received("notes.txt", dir.to_str().unwrap()) {
+            Some(recorded) => recorded,
+            None => accept_file_inner("notes.txt", dir.to_str().unwrap(), |staging| {
+                let _ = staging;
+                drained.store(true, std::sync::atomic::Ordering::SeqCst);
+                Ok(())
+            }, false)
+            .unwrap(),
+        };
+        assert_eq!(result, path.to_string_lossy().to_string());
+        assert!(
+            !drained.load(std::sync::atomic::Ordering::SeqCst),
+            "a delayed ack must still resolve from the recorded receipt, not re-drain"
+        );
+        // And no duplicate receipt was created by the fallback.
+        let receipts: Vec<_> = crate::receipts::ReceiptStore::snapshot_for_tests()
+            .into_iter()
+            .filter(|r| r.filename == "notes.txt" && r.status == "saved")
+            .collect();
+        assert_eq!(receipts.len(), 1, "delayed ack must not duplicate receipts");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Test helper: current wall-clock ms (kept next to the tests that need
+    /// to synthesize old timestamps).
+    fn now_ms_testhelper() -> u64 {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as u64
     }
 
     // --- TD-04: receive failures must surface, not look like "no files" ---
