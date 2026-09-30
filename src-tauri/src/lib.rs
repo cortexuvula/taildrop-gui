@@ -496,8 +496,60 @@ async fn show_in_folder(path: String) -> Result<(), String> {
     Ok(())
 }
 
+/// Self-heal the known WebKitGTK-on-Wayland crash in our AppImage builds
+/// (observed: TailDrop 0.14.0 on Omarchy/Hyprland, Mesa 26.2.2 Intel —
+/// WebKitWebProcess aborts during GPU init with
+/// "Could not create default EGL display: EGL_BAD_PARAMETER").
+///
+/// The AppImage bundles the ubuntu-24.04 build runner's WebKit but not the
+/// EGL/GL stack, so the bundled web process initializes against the host's
+/// Mesa; that mismatch is a well-known Tauri/WebKitGTK AppImage failure
+/// mode. Setting these variables before `tauri::Builder` (hence before any
+/// WebKitWebProcess spawns) forces software rendering, which sidesteps EGL
+/// display creation entirely.
+///
+/// Semantics: only ever SET — never overwrite — so a user who deliberately
+/// configures compositing keeps their value, and logging both the pre-set
+/// and applied state leaves a trace in debug logs. Linux-only by design:
+/// WKWebView on macOS/Windows is a different engine and these variables are
+/// meaningless there.
+#[cfg(target_os = "linux")]
+fn apply_webkit_linux_env_workarounds() {
+    for key in [
+        "WEBKIT_DISABLE_DMABUF_RENDERER",
+        "WEBKIT_DISABLE_COMPOSITING_MODE",
+    ] {
+        match webkit_env_decision(std::env::var(key).ok().as_deref()) {
+            Some(value) => {
+                // SAFETY: single-threaded startup, before any threads spawn.
+                unsafe { std::env::set_var(key, value) };
+                log::info!("{key} was unset; set to {value:?} (WebKitGTK Wayland EGL workaround)");
+            }
+            None => {
+                log::debug!("{key} already set by user; leaving untouched");
+            }
+        }
+    }
+}
+
+/// Pure decision core for [`apply_webkit_linux_env_workarounds`], kept
+/// `#[cfg]`-free so its never-overwrite contract is tested on every
+/// platform's CI (same portability rule as the closure-injected CLI tests).
+/// Off-Linux the only caller is the test suite, hence the targeted allow.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+fn webkit_env_decision(existing: Option<&str>) -> Option<&'static str> {
+    match existing {
+        Some(_) => None,
+        None => Some("1"),
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+fn apply_webkit_linux_env_workarounds() {}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    apply_webkit_linux_env_workarounds();
     debug_log::init();
 
     tauri::Builder::default()
@@ -563,6 +615,20 @@ pub fn run() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Regression for the TailDrop 0.14.0-on-Omarchy crash
+    /// ("Could not create default EGL display: EGL_BAD_PARAMETER" abort in
+    /// WebKitWebProcess): the in-process workaround must apply when the
+    /// variables are unset and must NEVER overwrite a user-set value —
+    /// clobbering a deliberate `WEBKIT_DISABLE_DMABUF_RENDERER=0` (or any
+    /// tuning like `=1`-vs-empty) would silently change a working setup.
+    #[test]
+    fn webkit_env_workaround_sets_when_unset_never_overwrites() {
+        assert_eq!(webkit_env_decision(None), Some("1"));
+        assert_eq!(webkit_env_decision(Some("0")), None);
+        assert_eq!(webkit_env_decision(Some("1")), None);
+        assert_eq!(webkit_env_decision(Some("")), None);
+    }
 
     /// Reopen-finding regression: the staging-recovery payload (command AND
     /// event use this shape) must serialize as `{ dirs: [...] }` with
