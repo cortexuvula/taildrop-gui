@@ -250,7 +250,16 @@ export function useIncomingFiles(options: UseIncomingFilesOptions): UseIncomingF
     }).catch((e) => {
       logger.warn("useIncomingFiles", "set_receive_settings failed:", toErrorMsg(e));
     });
-  }, [hydrated, settings.saveDirectory, settings.autoAccept]);
+    // TD-06 (reopen): when auto-accept turns on, files ALREADY sitting in the
+    // pending list must be reconciled immediately. On list-only backends an
+    // unchanged inbox produces no new `incoming-files-changed` event, so
+    // without this the file waits for refocus/another trigger before being
+    // accepted. Re-feed the current list through applyIncoming, which runs
+    // the auto-accept path when the setting is enabled.
+    if (settings.autoAccept && incomingFilesRef.current.length > 0) {
+      applyIncoming(incomingFilesRef.current);
+    }
+  }, [hydrated, settings.saveDirectory, settings.autoAccept, applyIncoming]);
 
   // One-shot catch-up fetch: on mount and when the window regains
   // visibility/focus, ask the backend for the current list so the UI is

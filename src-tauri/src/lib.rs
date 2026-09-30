@@ -308,9 +308,23 @@ async fn discard_staging_dir(path: String) -> Result<(), String> {
 
 /// Re-scan for preserved staging dirs on demand (contract:
 /// staging_recovery_found event; the same scan runs at startup).
+///
+/// Payload shape (reopen-finding fix): returns `{ dirs: [...] }` — matching
+/// the emitted event AND the frontend's `StagingRecoveryFoundEvent` type.
+/// The previous bare-array return made `result.dirs.length` read undefined
+/// and fall into the catch handler, so the recovery banner never populated
+/// through the scan route.
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct StagingRecoveryFound {
+    dirs: Vec<receipts::StagingDir>,
+}
+
 #[tauri::command]
-fn staging_recovery_scan() -> Vec<receipts::StagingDir> {
-    receipts::scan_staging_dirs()
+fn staging_recovery_scan() -> StagingRecoveryFound {
+    StagingRecoveryFound {
+        dirs: receipts::scan_staging_dirs(),
+    }
 }
 
 /// Forward receipt-store broadcasts to the webview as `transfer-receipt`
@@ -515,13 +529,18 @@ pub fn run() {
                 .unwrap_or_else(|p| p.into_inner()) = Some(app.handle().clone());
             // TD-05: discover preserved staging dirs from a previous crashed
             // run and notify (discover-and-notify — never auto-delete).
+            // Wrapped as { dirs: [...] } to match the frontend event guard
+            // (reopen-finding fix — the bare array was rejected).
             let dirs = receipts::scan_staging_dirs();
             if !dirs.is_empty() {
                 log::warn!(
                     "startup: {} preserved staging dir(s) found — emitting staging-recovery-found",
                     dirs.len()
                 );
-                let _ = app.emit("staging-recovery-found", &dirs);
+                let _ = app.emit(
+                    "staging-recovery-found",
+                    &StagingRecoveryFound { dirs },
+                );
             }
             Ok(())
         })
@@ -549,6 +568,36 @@ pub fn run() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Reopen-finding regression: the staging-recovery payload (command AND
+    /// event use this shape) must serialize as `{ dirs: [...] }` with
+    /// camelCase fields — the exact shape the frontend's
+    /// `isStagingRecoveryEvent` guard and `result.dirs.length` access expect.
+    /// A bare array previously made both routes fail silently.
+    #[test]
+    fn staging_recovery_payload_matches_frontend_contract() {
+        let payload = StagingRecoveryFound {
+            dirs: vec![receipts::StagingDir {
+                path: "/tmp/taildrop-accept-abc".to_string(),
+                files: vec![receipts::StagingFile {
+                    name: "photo.jpg".to_string(),
+                    size: 42,
+                }],
+            }],
+        };
+        let json = serde_json::to_value(&payload).unwrap();
+        assert!(
+            json.get("dirs").is_some_and(|d| d.is_array()),
+            "payload must be an object with a dirs array, got: {}",
+            json
+        );
+        let dir0 = &json["dirs"][0];
+        assert_eq!(dir0["path"], "/tmp/taildrop-accept-abc");
+        assert_eq!(dir0["files"][0]["name"], "photo.jpg");
+        assert_eq!(dir0["files"][0]["size"], 42);
+        // A bare array is exactly the regression — assert the object form.
+        assert!(json.is_object(), "must not serialize as a bare array");
+    }
 
     fn file(name: &str, size: u64) -> tailscale::IncomingFile {
         tailscale::IncomingFile {

@@ -737,29 +737,41 @@ pub(crate) fn run_command_with_cap(
     mut command: std::process::Command,
     cap: std::time::Duration,
 ) -> Result<std::process::Output, String> {
+    use std::io::Read;
+
     command
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped());
     let mut child = command
         .spawn()
         .map_err(|e| format!("Failed to run {}: {}", command.get_program().to_string_lossy(), e))?;
+
+    // Reopen-finding fix: drain both pipes on dedicated threads WHILE the
+    // child runs. Reading only after exit deadlocks — a full pipe (64 KiB on
+    // macOS) blocks the child's writes, so it can never exit and gets killed
+    // as "timed out" while perfectly healthy. Each drain thread joins when
+    // the child exits and the pipe write end closes.
+    let stdout_handle = child.stdout.take().map(|mut s| {
+        std::thread::spawn(move || {
+            let mut buf = Vec::new();
+            let _ = s.read_to_end(&mut buf);
+            buf
+        })
+    });
+    let stderr_handle = child.stderr.take().map(|mut s| {
+        std::thread::spawn(move || {
+            let mut buf = Vec::new();
+            let _ = s.read_to_end(&mut buf);
+            buf
+        })
+    });
+
     let deadline = std::time::Instant::now() + cap;
     // wait_timeout-style poll: std has no timed wait, so poll at a modest
     // interval — the cap granularity is seconds, so 50ms is negligible.
-    loop {
+    let status = loop {
         match child.try_wait() {
-            Ok(Some(status)) => {
-                let mut stdout: Vec<u8> = Vec::new();
-                let mut stderr: Vec<u8> = Vec::new();
-                use std::io::Read;
-                if let Some(mut out) = child.stdout.take() {
-                    let _ = out.read_to_end(&mut stdout);
-                }
-                if let Some(mut err) = child.stderr.take() {
-                    let _ = err.read_to_end(&mut stderr);
-                }
-                return Ok(std::process::Output { status, stdout, stderr });
-            }
+            Ok(Some(status)) => break status,
             Ok(None) => {
                 if std::time::Instant::now() >= deadline {
                     log::warn!(
@@ -769,6 +781,10 @@ pub(crate) fn run_command_with_cap(
                     );
                     let _ = child.kill();
                     let _ = child.wait(); // reap
+                    // Drain threads see EOF after the kill closes the pipes;
+                    // join so no thread leaks.
+                    let _ = stdout_handle.map(|h| h.join());
+                    let _ = stderr_handle.map(|h| h.join());
                     return Err(format!(
                         "command '{}' timed out after {:?} (process terminated)",
                         command.get_program().to_string_lossy(),
@@ -779,7 +795,14 @@ pub(crate) fn run_command_with_cap(
             }
             Err(e) => return Err(format!("Failed to wait for child: {}", e)),
         }
-    }
+    };
+    let stdout = stdout_handle
+        .and_then(|h| h.join().ok())
+        .unwrap_or_default();
+    let stderr = stderr_handle
+        .and_then(|h| h.join().ok())
+        .unwrap_or_default();
+    Ok(std::process::Output { status, stdout, stderr })
 }
 
 /// RFC 3986 percent-encoding (encode all non-unreserved characters).
@@ -2397,6 +2420,45 @@ mod tests {
         let out = run_command_with_cap(cmd, std::time::Duration::from_secs(10)).unwrap();
         assert!(out.status.success());
         assert!(String::from_utf8_lossy(&out.stdout).contains("hello-td07"));
+    }
+
+    /// Reopen-finding regression: output larger than the OS pipe capacity
+    /// (64 KiB) must complete successfully, not deadlock-until-killed. The
+    /// old runner read only after exit, so a full pipe blocked the child
+    /// forever and it was killed as "timed out".
+    #[test]
+    fn capped_command_survives_pipe_capacity_output() {
+        // ~1 MiB on stdout alone — 16x the macOS pipe capacity.
+        let mut cmd = std::process::Command::new("sh");
+        cmd.args(["-c", "dd if=/dev/zero bs=1024 count=1024 2>/dev/null | tr '\\0' 'x'"]);
+        let start = std::time::Instant::now();
+        let out = run_command_with_cap(cmd, std::time::Duration::from_secs(30)).unwrap();
+        assert!(out.status.success(), "healthy command must not be killed");
+        assert!(
+            out.stdout.len() >= 1024 * 1024,
+            "all output must be captured: got {}",
+            out.stdout.len()
+        );
+        assert!(
+            start.elapsed() < std::time::Duration::from_secs(10),
+            "must not stall on a full pipe (took {:?})",
+            start.elapsed()
+        );
+    }
+
+    /// Same for stderr.
+    #[test]
+    fn capped_command_survives_pipe_capacity_stderr() {
+        let mut cmd = std::process::Command::new("sh");
+        // 1 MiB of 'y' written to stderr only.
+        cmd.args(["-c", "{ dd if=/dev/zero bs=1024 count=1024 2>/dev/null; } | tr '\\0' 'y' 1>&2"]);
+        let out = run_command_with_cap(cmd, std::time::Duration::from_secs(30)).unwrap();
+        assert!(out.status.success());
+        assert!(
+            out.stderr.len() >= 1024 * 1024,
+            "stderr must drain concurrently: got {}",
+            out.stderr.len()
+        );
     }
 
     #[test]
