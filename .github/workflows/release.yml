@@ -56,21 +56,30 @@ jobs:
         with:
           script: |
             const tag = process.env.RELEASE_VERSION;
-            // Dedupe: a prior run (or a tag re-move) may have left a draft or
-            // published release for this tag. Delete it first so we never
-            // accumulate orphan drafts — otherwise every re-run leaks one.
+            // Dedupe: a prior run (or a tag re-move) may have left a DRAFT
+            // for this tag. Delete drafts only — a published release for this
+            // tag means the version already shipped and must NOT be silently
+            // removed: refuse loudly instead of deleting live assets.
             try {
               const existing = await github.rest.repos.getReleaseByTag({
                 owner: context.repo.owner,
                 repo: context.repo.repo,
                 tag
               });
-              await github.rest.repos.deleteRelease({
-                owner: context.repo.owner,
-                repo: context.repo.repo,
-                release_id: existing.data.id
-              });
-              console.log(`Deleted superseded release ${existing.data.id} for ${tag}`);
+              if (existing.data.draft) {
+                await github.rest.repos.deleteRelease({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  release_id: existing.data.id
+                });
+                console.log(`Deleted superseded draft ${existing.data.id} for ${tag}`);
+              } else {
+                core.setFailed(
+                  `Release ${tag} already exists and is published (id ${existing.data.id}). ` +
+                  `Refusing to delete a published release — bump the version instead.`
+                );
+                return;
+              }
             } catch (e) {
               if (e.status !== 404) throw e;
             }
