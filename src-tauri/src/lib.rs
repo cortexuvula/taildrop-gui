@@ -549,8 +549,11 @@ fn apply_webkit_linux_env_workarounds() {}
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    apply_webkit_linux_env_workarounds();
+    // Logger first: the workaround's log lines land only after a logger is
+    // installed (log's global max level is Off until then) — review finding.
+    // Env vars are still set well before tauri::Builder / any web process.
     debug_log::init();
+    apply_webkit_linux_env_workarounds();
 
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
