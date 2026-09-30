@@ -320,6 +320,108 @@ body {
   margin-top: 2px;
 }
 
+/* ===== TD-05: Receipt actions and staging recovery ===== */
+
+/* "Show in folder" link button for saved receipts */
+.btn-link.btn-show-folder {
+  background: none;
+  border: none;
+  color: var(--accent);
+  font-size: 11px;
+  padding: 2px 0;
+  cursor: pointer;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+  margin-top: 2px;
+}
+
+.btn-link.btn-show-folder:hover {
+  color: var(--accent-hover, var(--accent));
+}
+
+/* Salvaged receipt warning text */
+.transfer-warning {
+  color: var(--yellow, #e0a800);
+  font-size: 11px;
+  margin-top: 2px;
+}
+
+/* Retry / Recover action buttons on failed receipts */
+.transfer-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 4px;
+}
+
+.btn-retry,
+.btn-recover {
+  background: var(--accent);
+  color: #fff;
+  border: none;
+  border-radius: 4px;
+  padding: 4px 10px;
+  font-size: 11px;
+  cursor: pointer;
+}
+
+.btn-retry:hover,
+.btn-recover:hover {
+  background: var(--accent-hover, var(--accent));
+}
+
+.btn-discard {
+  background: transparent;
+  color: var(--text-muted);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 4px 10px;
+  font-size: 11px;
+  cursor: pointer;
+}
+
+.btn-discard:hover {
+  color: var(--red);
+  border-color: var(--red);
+}
+
+/* Staging recovery banner */
+.staging-recovery-banner {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  background: var(--bg-warning, rgba(224, 168, 0, 0.08));
+  border: 1px solid var(--yellow, #e0a800);
+  border-radius: 8px;
+  padding: 10px 14px;
+  margin: 8px 16px;
+  font-size: 13px;
+  color: var(--text-primary);
+}
+
+.staging-recovery-banner strong {
+  display: block;
+  margin-bottom: 2px;
+}
+
+.staging-detail {
+  color: var(--text-secondary);
+  font-size: 12px;
+}
+
+.staging-actions {
+  margin-top: 6px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.staging-dir-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+}
+
 /* ===== Drop Zone ===== */
 .dropzone-container {
   flex: 6;

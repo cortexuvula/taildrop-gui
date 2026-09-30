@@ -7,6 +7,7 @@ import { DebugPanel } from "./components/DebugPanel";
 import { ToastProvider, useToast } from "./components/ToastProvider";
 import { useTailscale, type SendErrorInfoLike } from "./hooks/useTailscale";
 import { useUpdater } from "./hooks/useUpdater";
+import { useReceipts } from "./hooks/useReceipts";
 import { logger } from "./lib/logger";
 import "./App.css";
 
@@ -79,6 +80,16 @@ function App() {
     pollError,
   } = useTailscale({ onSendError });
 
+  // TD-05: durable receipt state — events + replay + recovery actions
+  const {
+    receipts,
+    stagingDirs,
+    recoverStaging,
+    discardStaging,
+    retryInbox,
+    showInFolder,
+  } = useReceipts();
+
   // Mount-time diagnostic: one summary log (not per-render noise).
   // Intentionally empty deps — we only want this on first mount.
   useEffect(() => {
@@ -147,9 +158,46 @@ function App() {
         <TransferHistory
           transfers={transfers}
           incomingFiles={incomingFiles}
+          receipts={receipts}
           onAcceptFile={acceptFile}
+          onShowInFolder={showInFolder}
+          onRetryInbox={retryInbox}
+          onRecoverStaging={recoverStaging}
         />
       </div>
+
+      {stagingDirs && stagingDirs.dirs.length > 0 && (
+        <div className="staging-recovery-banner" role="alert">
+          <span aria-hidden="true">⚠</span>
+          <div>
+            <strong>Recovered files found from a previous session</strong>
+            <div className="staging-detail">
+              {stagingDirs.dirs.length} staging {stagingDirs.dirs.length === 1 ? "directory" : "directories"} with files that didn't finish saving.
+            </div>
+          </div>
+          <div className="staging-actions">
+            {stagingDirs.dirs.map((dir) => (
+              <div key={dir.path} className="staging-dir-row">
+                <span>{dir.files.length} file{dir.files.length === 1 ? "" : "s"}</span>
+                <button
+                  className="btn-recover"
+                  onClick={() => void recoverStaging(dir.path)}
+                  aria-label={`Recover ${dir.files.length} files from staging`}
+                >
+                  Recover
+                </button>
+                <button
+                  className="btn-discard"
+                  onClick={() => void discardStaging(dir.path)}
+                  aria-label="Discard staged files"
+                >
+                  Discard
+                </button>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
 
       {showSettings && (
         <Settings

@@ -70,6 +70,7 @@ export function isTransferReceipt(payload: unknown): payload is TransferReceipt 
     typeof (payload as { seq?: unknown }).seq === "number" &&
     typeof (payload as { id?: unknown }).id === "string" &&
     ((payload as { status?: unknown }).status === "saved" ||
-      (payload as { status?: unknown }).status === "failed")
+      (payload as { status?: unknown }).status === "failed" ||
+      (payload as { status?: unknown }).status === "salvaged")
   );
 }

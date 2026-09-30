@@ -441,6 +441,47 @@ fn get_env_info() -> String {
     format!("{} {}", std::env::consts::OS, std::env::consts::ARCH)
 }
 
+/// TD-05: Reveal a saved file in the system file manager (Finder/Explorer/Files).
+/// Platform-specific: macOS uses `open -R`, Windows uses `explorer /select`,
+/// Linux uses `xdg-open` on the parent directory (no universal "select" flag).
+#[tauri::command]
+async fn show_in_folder(path: String) -> Result<(), String> {
+    use std::process::Command;
+
+    let file_path = std::path::Path::new(&path);
+    if !file_path.exists() {
+        return Err(format!("File not found: {}", path));
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        Command::new("open")
+            .args(["-R", &path])
+            .spawn()
+            .map_err(|e| format!("Failed to open Finder: {}", e))?;
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        Command::new("explorer")
+            .args(["/select,", &path])
+            .spawn()
+            .map_err(|e| format!("Failed to open Explorer: {}", e))?;
+    }
+
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        // Linux: no universal "select file" flag; open the parent directory.
+        let parent = file_path.parent().unwrap_or(file_path);
+        Command::new("xdg-open")
+            .arg(parent)
+            .spawn()
+            .map_err(|e| format!("Failed to open file manager: {}", e))?;
+    }
+
+    Ok(())
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     debug_log::init();
@@ -497,6 +538,7 @@ pub fn run() {
             recover_staging_files,
             discard_staging_dir,
             staging_recovery_scan,
+            show_in_folder,
             get_debug_logs,
             get_env_info,
         ])
