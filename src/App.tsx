@@ -88,7 +88,7 @@ function App() {
     discardStaging,
     retryInbox,
     showInFolder,
-  } = useReceipts();
+  } = useReceipts({ settings });
 
   // Mount-time diagnostic: one summary log (not per-render noise).
   // Intentionally empty deps — we only want this on first mount.
@@ -178,7 +178,14 @@ function App() {
           <div className="staging-actions">
             {stagingDirs.dirs.map((dir) => (
               <div key={dir.path} className="staging-dir-row">
-                <span>{dir.files.length} file{dir.files.length === 1 ? "" : "s"}</span>
+                <div className="staging-file-list">
+                  <strong>{dir.files.length} file{dir.files.length === 1 ? "" : "s"}:</strong>
+                  <ul>
+                    {dir.files.map((f, i) => (
+                      <li key={i}>{f.name} ({(f.size / 1024).toFixed(1)} KB)</li>
+                    ))}
+                  </ul>
+                </div>
                 <button
                   className="btn-recover"
                   onClick={() => void recoverStaging(dir.path)}
@@ -188,7 +195,14 @@ function App() {
                 </button>
                 <button
                   className="btn-discard"
-                  onClick={() => void discardStaging(dir.path)}
+                  onClick={() => {
+                    const confirmed = window.confirm(
+                      `Discard ${dir.files.length} file${dir.files.length === 1 ? "" : "s"} from staging?\n\n` +
+                      `Files:\n${dir.files.map(f => `• ${f.name}`).join("\n")}\n\n` +
+                      `This action cannot be undone. These may be the only remaining copies.`
+                    );
+                    if (confirmed) void discardStaging(dir.path);
+                  }}
                   aria-label="Discard staged files"
                 >
                   Discard

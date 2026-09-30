@@ -2,12 +2,16 @@ import { useState, useEffect, useCallback, useRef } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
-import type { TransferReceipt, ReceiptPage, StagingRecoveryFoundEvent } from "../types";
+import type { TransferReceipt, ReceiptPage, StagingRecoveryFoundEvent, Settings } from "../types";
 import { mergeReceipts, isTransferReceipt, isStagingRecoveryEvent } from "../lib/receipts";
 import { logger } from "../lib/logger";
 import { toErrorMsg } from "../lib/toErrorMsg";
 
 const RECEIPT_PAGE_LIMIT = 50;
+
+export interface UseReceiptsOptions {
+  settings: Settings;
+}
 
 export interface UseReceiptsResult {
   receipts: TransferReceipt[];
@@ -29,7 +33,7 @@ export interface UseReceiptsResult {
  *   forces the client to keep paging until backlog is drained.
  * - `staging-recovery-found` fires at startup for preserved staging dirs.
  */
-export function useReceipts(): UseReceiptsResult {
+export function useReceipts({ settings }: UseReceiptsOptions): UseReceiptsResult {
   const [receipts, setReceipts] = useState<TransferReceipt[]>([]);
   const [stagingDirs, setStagingDirs] = useState<StagingRecoveryFoundEvent | null>(null);
   const mountedRef = useRef(true);
@@ -138,8 +142,12 @@ export function useReceipts(): UseReceiptsResult {
       await invoke("recover_staging_files", { path });
       // Backend emits receipts for each recovered file; replay to catch them.
       await replayReceipts();
-      // Clear the staging notification
-      setStagingDirs(null);
+      // Remove only the handled directory, not all staging dirs
+      setStagingDirs((prev) => {
+        if (!prev) return prev;
+        const remaining = prev.dirs.filter((d) => d.path !== path);
+        return remaining.length > 0 ? { ...prev, dirs: remaining } : null;
+      });
     } catch (e) {
       logger.error("useReceipts", "recover staging failed:", toErrorMsg(e));
       throw e;
@@ -149,7 +157,12 @@ export function useReceipts(): UseReceiptsResult {
   const discardStaging = useCallback(async (path: string) => {
     try {
       await invoke("discard_staging_dir", { path });
-      setStagingDirs(null);
+      // Remove only the handled directory, not all staging dirs
+      setStagingDirs((prev) => {
+        if (!prev) return prev;
+        const remaining = prev.dirs.filter((d) => d.path !== path);
+        return remaining.length > 0 ? { ...prev, dirs: remaining } : null;
+      });
     } catch (e) {
       logger.error("useReceipts", "discard staging failed:", toErrorMsg(e));
       throw e;
@@ -160,13 +173,14 @@ export function useReceipts(): UseReceiptsResult {
     try {
       // Retry re-invokes accept_file which the backend handles idempotently
       // via acknowledge_already_received (TD05-A).
-      await invoke("accept_file", { name, saveDir: "" }); // saveDir comes from settings
+      // Use the configured save directory, not the default Downloads fallback.
+      await invoke("accept_file", { name, saveDir: settings.saveDirectory });
       await replayReceipts();
     } catch (e) {
       logger.error("useReceipts", "retry inbox failed:", toErrorMsg(e));
       throw e;
     }
-  }, [replayReceipts]);
+  }, [replayReceipts, settings.saveDirectory]);
 
   const showInFolder = useCallback(async (path: string) => {
     try {
