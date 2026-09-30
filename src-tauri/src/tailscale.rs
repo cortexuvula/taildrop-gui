@@ -507,10 +507,7 @@ fn cli_receive_files(
     }
     // Private staging dir: the CLI drains here first, then each file moves
     // into save_dir with exclusive-create semantics.
-    let staging = std::env::temp_dir().join(format!(
-        "taildrop-accept-{:016x}",
-        timestamp_tag()
-    ));
+    let staging = std::env::temp_dir().join(format!("taildrop-accept-{:016x}", timestamp_tag()));
     if let Err(e) = std::fs::create_dir_all(&staging) {
         return Err(format!(
             "Cannot create staging directory '{}': {}",
@@ -518,9 +515,8 @@ fn cli_receive_files(
             e
         ));
     }
-    let drain_result = cli_drain_into_staging(save_dir, &staging, platform_label, |args| {
-        run_get(args)
-    });
+    let drain_result =
+        cli_drain_into_staging(save_dir, &staging, platform_label, |args| run_get(args));
     match drain_result {
         Ok(()) => {}
         Err(e) => {
@@ -742,9 +738,13 @@ pub(crate) fn run_command_with_cap(
     command
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped());
-    let mut child = command
-        .spawn()
-        .map_err(|e| format!("Failed to run {}: {}", command.get_program().to_string_lossy(), e))?;
+    let mut child = command.spawn().map_err(|e| {
+        format!(
+            "Failed to run {}: {}",
+            command.get_program().to_string_lossy(),
+            e
+        )
+    })?;
 
     // Reopen-finding fix: drain both pipes on dedicated threads WHILE the
     // child runs. Reading only after exit deadlocks — a full pipe (64 KiB on
@@ -781,8 +781,8 @@ pub(crate) fn run_command_with_cap(
                     );
                     let _ = child.kill();
                     let _ = child.wait(); // reap
-                    // Drain threads see EOF after the kill closes the pipes;
-                    // join so no thread leaks.
+                                          // Drain threads see EOF after the kill closes the pipes;
+                                          // join so no thread leaks.
                     let _ = stdout_handle.map(|h| h.join());
                     let _ = stderr_handle.map(|h| h.join());
                     return Err(format!(
@@ -802,7 +802,11 @@ pub(crate) fn run_command_with_cap(
     let stderr = stderr_handle
         .and_then(|h| h.join().ok())
         .unwrap_or_default();
-    Ok(std::process::Output { status, stdout, stderr })
+    Ok(std::process::Output {
+        status,
+        stdout,
+        stderr,
+    })
 }
 
 /// RFC 3986 percent-encoding (encode all non-unreserved characters).
@@ -891,10 +895,13 @@ where
     let mut header_buf: Vec<u8> = Vec::new();
     let mut temp_buf = [0u8; 4096];
     let header_end = loop {
-        let n = tokio::time::timeout(std::time::Duration::from_secs(30), reader.read(&mut temp_buf))
-            .await
-            .map_err(|_| "Timeout reading response headers".to_string())?
-            .map_err(|e| format!("Failed to read response: {}", e))?;
+        let n = tokio::time::timeout(
+            std::time::Duration::from_secs(30),
+            reader.read(&mut temp_buf),
+        )
+        .await
+        .map_err(|_| "Timeout reading response headers".to_string())?
+        .map_err(|e| format!("Failed to read response: {}", e))?;
         if n == 0 {
             return Err("Connection closed before headers received".to_string());
         }
@@ -1524,7 +1531,10 @@ mod platform {
             }
 
             log::debug!("Accepted file '{}' to '{}'", name, save_path.display());
-            let size = tokio::fs::metadata(&save_path).await.map(|m| m.len()).unwrap_or(0);
+            let size = tokio::fs::metadata(&save_path)
+                .await
+                .map(|m| m.len())
+                .unwrap_or(0);
             // TD-05: durable receipt with the actual landing path.
             crate::receipts::ReceiptStore::record_saved(
                 safe_name,
@@ -1702,8 +1712,7 @@ mod platform {
         // so the caller never deletes the inbox entry for a truncated file
         // nor reports it as successfully received. The sync variant also
         // fsyncs before reporting success.
-        super::read_http_download_sync(&mut stream, file)
-            .map_err(super::SocketGetError::Other)
+        super::read_http_download_sync(&mut stream, file).map_err(super::SocketGetError::Other)
     }
 
     /// Best-effort DELETE of a pending file via the Tailscale Unix socket.
@@ -1770,14 +1779,16 @@ mod platform {
 
                 // TD-07: capped — a hung CLI is terminated and reaped, not
                 // orphaned when the outer timeout drops this future.
-                let output =
-                    tailscale_cmd_capped(&["status", "--json"], std::time::Duration::from_secs(110))
-                        .map_err(|e| {
-                            format!(
-                                "Could not run tailscale CLI [tried: {}]: {}",
-                                binary_path, e
-                            )
-                        })?;
+                let output = tailscale_cmd_capped(
+                    &["status", "--json"],
+                    std::time::Duration::from_secs(110),
+                )
+                .map_err(|e| {
+                    format!(
+                        "Could not run tailscale CLI [tried: {}]: {}",
+                        binary_path, e
+                    )
+                })?;
 
                 let stdout = String::from_utf8_lossy(&output.stdout);
                 let stderr = String::from_utf8_lossy(&output.stderr);
@@ -1919,8 +1930,7 @@ mod platform {
                         // (the socket path is the common macOS case — this
                         // receipt was missing, so most macOS users never saw
                         // "Saved / Show in folder").
-                        let size =
-                            std::fs::metadata(&save_path).map(|m| m.len()).unwrap_or(0);
+                        let size = std::fs::metadata(&save_path).map(|m| m.len()).unwrap_or(0);
                         crate::receipts::ReceiptStore::record_saved(
                             safe_name,
                             &save_path.to_string_lossy(),
@@ -1951,27 +1961,27 @@ mod platform {
                         // accept_file_inner records exactly one receipt for
                         // the requested file AND every landed collateral file
                         // (single authoritative recording point — TD05-A).
-                        super::accept_file_inner(&name, &save_dir, |staging| {
-                            // --wait=false: don't block if the inbox is empty
-                            // (the file may have already been consumed by the
-                            // auto-receive poll on macOS).
-                            // TD-07: capped under the 120s outer wrapper.
-                            let output = tailscale_cmd_capped(
-                                &[
-                                    "file",
-                                    "get",
-                                    "--wait=false",
-                                    &staging.to_string_lossy(),
-                                ],
-                                std::time::Duration::from_secs(110),
-                            )
-                            .map_err(|e| format!("Failed to run tailscale file get: {}", e))?;
-                            if !output.status.success() {
-                                let stderr = String::from_utf8_lossy(&output.stderr);
-                                return Err(format!("tailscale file get failed: {}", stderr));
-                            }
-                            Ok(())
-                        }, false)
+                        super::accept_file_inner(
+                            &name,
+                            &save_dir,
+                            |staging| {
+                                // --wait=false: don't block if the inbox is empty
+                                // (the file may have already been consumed by the
+                                // auto-receive poll on macOS).
+                                // TD-07: capped under the 120s outer wrapper.
+                                let output = tailscale_cmd_capped(
+                                    &["file", "get", "--wait=false", &staging.to_string_lossy()],
+                                    std::time::Duration::from_secs(110),
+                                )
+                                .map_err(|e| format!("Failed to run tailscale file get: {}", e))?;
+                                if !output.status.success() {
+                                    let stderr = String::from_utf8_lossy(&output.stderr);
+                                    return Err(format!("tailscale file get failed: {}", stderr));
+                                }
+                                Ok(())
+                            },
+                            false,
+                        )
                         .inspect_err(|e| {
                             // Failure receipts stay here (one recording point
                             // per outcome; the helper records successes).
@@ -2235,27 +2245,30 @@ mod platform {
                     .ok_or_else(|| "Invalid filename".to_string())?;
                 // TD05-A: acknowledgement fast path — a recorded landing is
                 // returned without invoking the CLI (no inbox re-drain).
-                if let Some(recorded) =
-                    super::acknowledge_already_received(&name, &save_dir)
-                {
+                if let Some(recorded) = super::acknowledge_already_received(&name, &save_dir) {
                     return Ok(recorded);
                 }
                 // Single authoritative recording point: the helper records
                 // successes (requested + collateral); failures recorded here.
-                super::accept_file_inner(&name, &save_dir, |staging| {
-                    // --wait=false: don't block if the inbox is empty.
-                    // TD-07: capped under the 120s outer wrapper.
-                    let output = tailscale_cmd_capped(
-                        &["file", "get", "--wait=false", &staging.to_string_lossy()],
-                        std::time::Duration::from_secs(110),
-                    )
-                    .map_err(|e| format!("Failed to run tailscale file get: {}", e))?;
-                    if !output.status.success() {
-                        let stderr = String::from_utf8_lossy(&output.stderr);
-                        return Err(format!("tailscale file get failed: {}", stderr));
-                    }
-                    Ok(())
-                }, false)
+                super::accept_file_inner(
+                    &name,
+                    &save_dir,
+                    |staging| {
+                        // --wait=false: don't block if the inbox is empty.
+                        // TD-07: capped under the 120s outer wrapper.
+                        let output = tailscale_cmd_capped(
+                            &["file", "get", "--wait=false", &staging.to_string_lossy()],
+                            std::time::Duration::from_secs(110),
+                        )
+                        .map_err(|e| format!("Failed to run tailscale file get: {}", e))?;
+                        if !output.status.success() {
+                            let stderr = String::from_utf8_lossy(&output.stderr);
+                            return Err(format!("tailscale file get failed: {}", stderr));
+                        }
+                        Ok(())
+                    },
+                    false,
+                )
                 .map_err(|e| {
                     crate::receipts::ReceiptStore::record_failed(
                         safe_name,
@@ -2432,7 +2445,10 @@ mod tests {
     fn capped_command_survives_pipe_capacity_output() {
         // ~1 MiB on stdout alone — 16x the macOS pipe capacity.
         let mut cmd = std::process::Command::new("sh");
-        cmd.args(["-c", "dd if=/dev/zero bs=1024 count=1024 2>/dev/null | tr '\\0' 'x'"]);
+        cmd.args([
+            "-c",
+            "dd if=/dev/zero bs=1024 count=1024 2>/dev/null | tr '\\0' 'x'",
+        ]);
         let start = std::time::Instant::now();
         let out = run_command_with_cap(cmd, std::time::Duration::from_secs(30)).unwrap();
         assert!(out.status.success(), "healthy command must not be killed");
@@ -2453,7 +2469,10 @@ mod tests {
     fn capped_command_survives_pipe_capacity_stderr() {
         let mut cmd = std::process::Command::new("sh");
         // 1 MiB of 'y' written to stderr only.
-        cmd.args(["-c", "{ dd if=/dev/zero bs=1024 count=1024 2>/dev/null; } | tr '\\0' 'y' 1>&2"]);
+        cmd.args([
+            "-c",
+            "{ dd if=/dev/zero bs=1024 count=1024 2>/dev/null; } | tr '\\0' 'y' 1>&2",
+        ]);
         let out = run_command_with_cap(cmd, std::time::Duration::from_secs(30)).unwrap();
         assert!(out.status.success());
         assert!(
@@ -2959,11 +2978,8 @@ mod tests {
         // never the mtime heuristic over save_dir), under the temp dir.
         let last = args.last().expect("drain target must be the last arg");
         assert!(
-            last.starts_with(
-                std::env::temp_dir()
-                    .to_string_lossy()
-                    .trim_end_matches('/')
-            ) && last.contains("taildrop-accept-"),
+            last.starts_with(std::env::temp_dir().to_string_lossy().trim_end_matches('/'))
+                && last.contains("taildrop-accept-"),
             "drain must target a private staging dir, got: {}",
             last
         );
@@ -2994,7 +3010,9 @@ mod tests {
 
     #[test]
     fn cli_receive_files_reports_received_files() {
-        let _g = crate::receipts::TEST_STORE_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let _g = crate::receipts::TEST_STORE_LOCK
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
         crate::receipts::ReceiptStore::reset_for_tests();
         let dir = temp_test_dir("cli_reports_files");
         let result = cli_receive_files(dir.to_str().unwrap(), "test", |args| {
@@ -3035,7 +3053,9 @@ mod tests {
     /// mtime heuristic picked the N newest — this is its regression test.
     #[test]
     fn cli_receive_files_ignores_unrelated_newer_files() {
-        let _g = crate::receipts::TEST_STORE_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let _g = crate::receipts::TEST_STORE_LOCK
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
         crate::receipts::ReceiptStore::reset_for_tests();
         let dir = temp_test_dir("cli_newer_unrelated");
         // A pre-existing unrelated file, modified NOW (newer than anything
@@ -3072,7 +3092,9 @@ mod tests {
     /// ACTUAL destination ("got (1).txt"), never the requested name.
     #[test]
     fn cli_receive_files_receipts_collision_resolved_path() {
-        let _g = crate::receipts::TEST_STORE_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let _g = crate::receipts::TEST_STORE_LOCK
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
         crate::receipts::ReceiptStore::reset_for_tests();
         let dir = temp_test_dir("cli_collision_receipt");
         std::fs::write(dir.join("got.txt"), "original").unwrap();
@@ -3159,7 +3181,11 @@ mod tests {
                     .collect()
             })
             .unwrap_or_default();
-        assert!(names.contains(&"done.txt".to_string()), "names: {:?}", names);
+        assert!(
+            names.contains(&"done.txt".to_string()),
+            "names: {:?}",
+            names
+        );
         assert!(
             names.contains(&"partial.bin".to_string()),
             "names: {:?}",
@@ -3248,9 +3274,7 @@ mod tests {
         let dir = temp_test_dir("td01_cli_fail_clean");
         let staging_path = std::cell::RefCell::new(None::<std::path::PathBuf>);
         accept_file_with_getter("photo.jpg", dir.to_str().unwrap(), |staging| {
-            staging_path
-                .borrow_mut()
-                .replace(staging.to_path_buf());
+            staging_path.borrow_mut().replace(staging.to_path_buf());
             Err("tailscale not found".to_string())
         })
         .unwrap_err();
@@ -3268,7 +3292,8 @@ mod tests {
 
     #[test]
     fn parse_content_length_reads_header_case_insensitively() {
-        let headers = "HTTP/1.0 200 OK\r\nContent-Type: application/octet-stream\r\nCONTENT-LENGTH: 42\r\n";
+        let headers =
+            "HTTP/1.0 200 OK\r\nContent-Type: application/octet-stream\r\nCONTENT-LENGTH: 42\r\n";
         assert_eq!(parse_content_length(headers).unwrap(), 42);
     }
 
@@ -3291,8 +3316,7 @@ mod tests {
     #[tokio::test]
     async fn download_framing_async_rejects_short_body() {
         use tokio::io::AsyncWriteExt;
-        let response =
-            b"HTTP/1.0 200 OK\r\nContent-Length: 16\r\n\r\n01234567".to_vec();
+        let response = b"HTTP/1.0 200 OK\r\nContent-Length: 16\r\n\r\n01234567".to_vec();
         let (mut server, client) = tokio::io::duplex(64);
         server.write_all(&response).await.unwrap();
         drop(server); // clean EOF after a short body
@@ -3315,8 +3339,7 @@ mod tests {
     #[tokio::test]
     async fn download_framing_async_accepts_exact_length() {
         use tokio::io::AsyncWriteExt;
-        let mut response =
-            b"HTTP/1.0 200 OK\r\nContent-Length: 16\r\n\r\n".to_vec();
+        let mut response = b"HTTP/1.0 200 OK\r\nContent-Length: 16\r\n\r\n".to_vec();
         response.extend_from_slice(b"0123456789abcdef");
         let (mut server, client) = tokio::io::duplex(64);
         server.write_all(&response).await.unwrap();
@@ -3335,8 +3358,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn download_framing_sync_rejects_short_body() {
-        let response =
-            b"HTTP/1.0 200 OK\r\nContent-Length: 16\r\n\r\n01234567";
+        let response = b"HTTP/1.0 200 OK\r\nContent-Length: 16\r\n\r\n01234567";
         let mut cursor = std::io::Cursor::new(response.to_vec());
         let mut tmp = tempfile_for_tests("td02_short");
         let err = read_http_download_sync(&mut cursor, &mut tmp.file)
@@ -3385,7 +3407,8 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn download_framing_sync_rejects_missing_content_length() {
-        let mut response = b"HTTP/1.0 200 OK\r\nContent-Type: application/octet-stream\r\n\r\nbody".to_vec();
+        let mut response =
+            b"HTTP/1.0 200 OK\r\nContent-Type: application/octet-stream\r\n\r\nbody".to_vec();
         let mut cursor = std::io::Cursor::new(std::mem::take(&mut response));
         let mut tmp = tempfile_for_tests("td02_missing_cl");
         let err = read_http_download_sync(&mut cursor, &mut tmp.file)
@@ -3428,11 +3451,8 @@ mod tests {
     }
 
     fn tempfile_for_tests(label: &str) -> TempFileForTest {
-        let path = std::env::temp_dir().join(format!(
-            "taildrop_test_{}_{}",
-            label,
-            timestamp_tag()
-        ));
+        let path =
+            std::env::temp_dir().join(format!("taildrop_test_{}_{}", label, timestamp_tag()));
         let file = std::fs::File::create(&path).unwrap();
         TempFileForTest { path, file }
     }
@@ -3467,11 +3487,16 @@ mod tests {
         let drained = std::sync::atomic::AtomicBool::new(false);
         let result = match acknowledge_already_received("photo.jpg", dir.to_str().unwrap()) {
             Some(recorded) => recorded,
-            None => accept_file_inner("photo.jpg", dir.to_str().unwrap(), |staging| {
-                drained.store(true, std::sync::atomic::Ordering::SeqCst);
-                let _ = staging;
-                Ok(())
-            }, false)
+            None => accept_file_inner(
+                "photo.jpg",
+                dir.to_str().unwrap(),
+                |staging| {
+                    drained.store(true, std::sync::atomic::Ordering::SeqCst);
+                    let _ = staging;
+                    Ok(())
+                },
+                false,
+            )
             .expect("accept must succeed"),
         };
         assert_eq!(result, dir.join("photo.jpg").to_string_lossy());
@@ -3551,11 +3576,16 @@ mod tests {
         let drained = std::sync::atomic::AtomicBool::new(false);
         let result = match acknowledge_already_received("notes.txt", dir.to_str().unwrap()) {
             Some(recorded) => recorded,
-            None => accept_file_inner("notes.txt", dir.to_str().unwrap(), |staging| {
-                let _ = staging;
-                drained.store(true, std::sync::atomic::Ordering::SeqCst);
-                Ok(())
-            }, false)
+            None => accept_file_inner(
+                "notes.txt",
+                dir.to_str().unwrap(),
+                |staging| {
+                    let _ = staging;
+                    drained.store(true, std::sync::atomic::Ordering::SeqCst);
+                    Ok(())
+                },
+                false,
+            )
             .unwrap(),
         };
         assert_eq!(result, path.to_string_lossy().to_string());
@@ -3622,10 +3652,7 @@ mod tests {
             Ok(fake_cli_output("moved 0/0 files"))
         });
         // bad_dir can't even be created → creation error path (still Err).
-        assert!(
-            result.is_err(),
-            "unusable save dir must surface an error"
-        );
+        assert!(result.is_err(), "unusable save dir must surface an error");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

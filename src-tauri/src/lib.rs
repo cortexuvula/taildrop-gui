@@ -524,9 +524,7 @@ pub fn run() {
             tauri::async_runtime::spawn(receipt_emitter(handle));
             // TD-05: global handle for commands reading shared state outside
             // Tauri injection (staging recovery needs the save dir).
-            *APP_HANDLE
-                .lock()
-                .unwrap_or_else(|p| p.into_inner()) = Some(app.handle().clone());
+            *APP_HANDLE.lock().unwrap_or_else(|p| p.into_inner()) = Some(app.handle().clone());
             // TD-05: discover preserved staging dirs from a previous crashed
             // run and notify (discover-and-notify — never auto-delete).
             // Wrapped as { dirs: [...] } to match the frontend event guard
@@ -537,10 +535,7 @@ pub fn run() {
                     "startup: {} preserved staging dir(s) found — emitting staging-recovery-found",
                     dirs.len()
                 );
-                let _ = app.emit(
-                    "staging-recovery-found",
-                    &StagingRecoveryFound { dirs },
-                );
+                let _ = app.emit("staging-recovery-found", &StagingRecoveryFound { dirs });
             }
             Ok(())
         })

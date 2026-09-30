@@ -23,7 +23,11 @@ const RETENTION_MS: u64 = 24 * 60 * 60 * 1000;
 /// backend (every current failure classifies as Inbox or Staging); it must
 /// stay in the enum so the frontend can deserialize it.
 #[derive(Debug, Clone, Serialize, PartialEq)]
-#[serde(tag = "kind", rename_all = "camelCase", rename_all_fields = "camelCase")]
+#[serde(
+    tag = "kind",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
 pub enum Recovery {
     /// Daemon inbox still lists the file; retry = existing accept_file.
     Inbox,
@@ -328,9 +332,10 @@ impl ReceiptStore {
     ///   and must not re-record a landing that was already recorded.
     pub fn saved_landing_recorded(filename: &str, saved_path: &str) -> bool {
         let inner = STORE.inner.lock().unwrap_or_else(|p| p.into_inner());
-        inner.receipts.iter().any(|r| {
-            r.status == "saved" && r.filename == filename && r.saved_path == saved_path
-        })
+        inner
+            .receipts
+            .iter()
+            .any(|r| r.status == "saved" && r.filename == filename && r.saved_path == saved_path)
     }
 
     /// Classify a failed accept into its recovery kind. The TD-01/TD-04 fix
@@ -373,7 +378,9 @@ impl ReceiptStore {
 
     #[cfg(test)]
     pub fn record_saved_at(filename: &str, saved_path: &str, timestamp: u64) -> TransferReceipt {
-        Self::record_with_timestamp(filename, saved_path, 1, None, "saved", None, None, timestamp)
+        Self::record_with_timestamp(
+            filename, saved_path, 1, None, "saved", None, None, timestamp,
+        )
     }
 }
 
@@ -521,9 +528,7 @@ mod tests {
 
     #[test]
     fn salvaged_receipts_are_distinct_from_saved() {
-        let _g = TEST_STORE_LOCK
-            .lock()
-            .unwrap_or_else(|p| p.into_inner());
+        let _g = TEST_STORE_LOCK.lock().unwrap_or_else(|p| p.into_inner());
         ReceiptStore::reset_for_tests();
         // TD05-B: a deliberately SHORTENED staged file, "recovered" — the
         // move succeeds, but it must never emerge as a verified download.
@@ -532,7 +537,10 @@ mod tests {
         assert_eq!(page.receipts.len(), 1);
         assert_eq!(page.receipts[0].status, "salvaged");
         // Salvaged is not "saved": verified-history checks skip it.
-        assert!(!ReceiptStore::saved_landing_recorded("half-file.bin", "/tmp/save/half-file.bin"));
+        assert!(!ReceiptStore::saved_landing_recorded(
+            "half-file.bin",
+            "/tmp/save/half-file.bin"
+        ));
     }
 
     #[test]
