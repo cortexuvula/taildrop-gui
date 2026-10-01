@@ -9,6 +9,15 @@ import { toErrorMsg } from "../lib/toErrorMsg";
 
 const RECEIPT_PAGE_LIMIT = 50;
 
+/** Per-path in-flight recovery operation kind (TD-UI-06 shared op state). */
+export type StagingOpKind = "recovering" | "discarding";
+
+/** Per-path in-flight op state, keyed by the full backend staging path. */
+export type StagingOps = Record<string, StagingOpKind>;
+
+/** Per-path error message from the last settled recover/discard operation. */
+export type StagingOpErrors = Record<string, string>;
+
 export interface UseReceiptsOptions {
   settings: AppSettings;
 }
@@ -16,8 +25,19 @@ export interface UseReceiptsOptions {
 export interface UseReceiptsResult {
   receipts: TransferReceipt[];
   stagingDirs: StagingRecoveryFoundEvent | null;
+  /**
+   * TD-UI-06: per-path in-flight recover/discard ops. Owned HERE, not in the
+   * Review dialog, so closing the dialog (Done/Escape/backdrop) never
+   * destroys it while the backend operation is still running — reopening
+   * Review shows the retained pending state.
+   */
+  stagingOps: StagingOps;
+  /** Retained per-path errors from settled ops; cleared on the next retry. */
+  stagingOpErrors: StagingOpErrors;
   recoverStaging: (path: string) => Promise<void>;
   discardStaging: (path: string) => Promise<void>;
+  /** Clears a path's retained error (e.g. when opening the discard confirm). */
+  clearStagingOpError: (path: string) => void;
   retryInbox: (name: string) => Promise<void>;
   showInFolder: (path: string) => Promise<void>;
 }
@@ -36,8 +56,15 @@ export interface UseReceiptsResult {
 export function useReceipts({ settings }: UseReceiptsOptions): UseReceiptsResult {
   const [receipts, setReceipts] = useState<TransferReceipt[]>([]);
   const [stagingDirs, setStagingDirs] = useState<StagingRecoveryFoundEvent | null>(null);
+  const [stagingOps, setStagingOps] = useState<StagingOps>({});
+  const [stagingOpErrors, setStagingOpErrors] = useState<StagingOpErrors>({});
   const mountedRef = useRef(true);
   const highestSeqRef = useRef(0);
+  // Synchronous source of truth for the one-op-per-path dispatch guard
+  // (TD-UI-06). Maps a staging path to its in-flight promise so racing
+  // callers — double-clicks, Review close/reopen, TransferHistory — JOIN the
+  // existing operation instead of dispatching a second backend request.
+  const stagingInFlightRef = useRef(new Map<string, Promise<void>>());
 
   useEffect(() => {
     mountedRef.current = true;
@@ -137,37 +164,92 @@ export function useReceipts({ settings }: UseReceiptsOptions): UseReceiptsResult
     };
   }, [replayReceipts]);
 
-  const recoverStaging = useCallback(async (path: string) => {
-    try {
-      await invoke("recover_staging_files", { path });
-      // Backend emits receipts for each recovered file; replay to catch them.
-      await replayReceipts();
-      // Remove only the handled directory, not all staging dirs
-      setStagingDirs((prev) => {
-        if (!prev) return prev;
-        const remaining = prev.dirs.filter((d) => d.path !== path);
-        return remaining.length > 0 ? { ...prev, dirs: remaining } : null;
-      });
-    } catch (e) {
-      logger.error("useReceipts", "recover staging failed:", toErrorMsg(e));
-      throw e;
-    }
-  }, [replayReceipts]);
-
-  const discardStaging = useCallback(async (path: string) => {
-    try {
-      await invoke("discard_staging_dir", { path });
-      // Remove only the handled directory, not all staging dirs
-      setStagingDirs((prev) => {
-        if (!prev) return prev;
-        const remaining = prev.dirs.filter((d) => d.path !== path);
-        return remaining.length > 0 ? { ...prev, dirs: remaining } : null;
-      });
-    } catch (e) {
-      logger.error("useReceipts", "discard staging failed:", toErrorMsg(e));
-      throw e;
-    }
+  const clearStagingOpError = useCallback((path: string) => {
+    setStagingOpErrors((prev) => {
+      if (!(path in prev)) return prev;
+      const next = { ...prev };
+      delete next[path];
+      return next;
+    });
   }, []);
+
+  /**
+   * Runs one staging operation under the TD-UI-06 shared in-flight guard:
+   * a path that already has a Recover or Discard in flight can never dispatch
+   * a second request — the racing caller simply awaits the existing promise.
+   * Busy/error state lives in this hook, so it survives the Review dialog
+   * closing while the backend operation is still unresolved, and is cleared
+   * promise-scoped in `finally` when the operation settles. Failures are
+   * recorded in `stagingOpErrors` (these functions never reject), so fire-
+   * and-forget callers can't leak unhandled rejections.
+   */
+  const runStagingOp = useCallback(
+    (path: string, kind: StagingOpKind, run: () => Promise<void>) => {
+      const existing = stagingInFlightRef.current.get(path);
+      if (existing) return existing; // synchronous guard: one op per path
+
+      clearStagingOpError(path);
+      setStagingOps((prev) => ({ ...prev, [path]: kind }));
+
+      const op = (async () => {
+        try {
+          await run();
+        } catch (e) {
+          const msg = toErrorMsg(e);
+          logger.error("useReceipts", `${kind} staging failed for ${path}:`, msg);
+          setStagingOpErrors((prev) => ({ ...prev, [path]: msg }));
+        } finally {
+          // Promise-scoped cleanup: ALWAYS drop the in-flight mark when the
+          // operation settles, so a mid-flight staging-recovery-found event
+          // that re-inserts the path (setStagingDirs replaces `dirs`
+          // wholesale) cannot leave the row permanently disabled with no
+          // in-flight request. This runs even while the Review dialog is
+          // closed — op state outlives the dialog (TD-UI-06).
+          stagingInFlightRef.current.delete(path);
+          setStagingOps((prev) => {
+            if (!(path in prev)) return prev;
+            const next = { ...prev };
+            delete next[path];
+            return next;
+          });
+        }
+      })();
+
+      stagingInFlightRef.current.set(path, op);
+      return op;
+    },
+    [clearStagingOpError],
+  );
+
+  const recoverStaging = useCallback(
+    (path: string) =>
+      runStagingOp(path, "recovering", async () => {
+        await invoke("recover_staging_files", { path });
+        // Backend emits receipts for each recovered file; replay to catch them.
+        await replayReceipts();
+        // Remove only the handled directory, not all staging dirs
+        setStagingDirs((prev) => {
+          if (!prev) return prev;
+          const remaining = prev.dirs.filter((d) => d.path !== path);
+          return remaining.length > 0 ? { ...prev, dirs: remaining } : null;
+        });
+      }),
+    [runStagingOp, replayReceipts],
+  );
+
+  const discardStaging = useCallback(
+    (path: string) =>
+      runStagingOp(path, "discarding", async () => {
+        await invoke("discard_staging_dir", { path });
+        // Remove only the handled directory, not all staging dirs
+        setStagingDirs((prev) => {
+          if (!prev) return prev;
+          const remaining = prev.dirs.filter((d) => d.path !== path);
+          return remaining.length > 0 ? { ...prev, dirs: remaining } : null;
+        });
+      }),
+    [runStagingOp],
+  );
 
   const retryInbox = useCallback(async (name: string) => {
     try {
@@ -191,5 +273,15 @@ export function useReceipts({ settings }: UseReceiptsOptions): UseReceiptsResult
     }
   }, []);
 
-  return { receipts, stagingDirs, recoverStaging, discardStaging, retryInbox, showInFolder };
+  return {
+    receipts,
+    stagingDirs,
+    stagingOps,
+    stagingOpErrors,
+    recoverStaging,
+    discardStaging,
+    clearStagingOpError,
+    retryInbox,
+    showInFolder,
+  };
 }

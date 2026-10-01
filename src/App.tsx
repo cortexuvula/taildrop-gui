@@ -4,6 +4,7 @@ import { DropZone } from "./components/DropZone";
 import { TransferHistory } from "./components/TransferHistory";
 import { Settings } from "./components/Settings";
 import { DebugPanel } from "./components/DebugPanel";
+import { StagingRecovery } from "./components/StagingRecovery";
 import { ToastProvider, useToast } from "./components/ToastProvider";
 import { useTailscale, type SendErrorInfoLike } from "./hooks/useTailscale";
 import { useUpdater } from "./hooks/useUpdater";
@@ -84,8 +85,11 @@ function App() {
   const {
     receipts,
     stagingDirs,
+    stagingOps,
+    stagingOpErrors,
     recoverStaging,
     discardStaging,
+    clearStagingOpError,
     retryInbox,
     showInFolder,
   } = useReceipts({ settings });
@@ -106,6 +110,13 @@ function App() {
 
   const [showSettings, setShowSettings] = useState(false);
   const [showDebug, setShowDebug] = useState(false);
+  // Review dialog for staging recovery — opened explicitly, never auto-opened.
+  const [reviewOpen, setReviewOpen] = useState(false);
+
+  // Staging recovery state — derived, null-safe. Groups keep their distinct
+  // full backend paths as identity (no collapsing of look-alike file sets).
+  const stagingDirList = stagingDirs?.dirs ?? [];
+  const stagingDirCount = stagingDirList.length;
 
   return (
     <div className="app">
@@ -132,6 +143,29 @@ function App() {
             </div>
           </div>
         )}
+
+        {stagingDirCount > 0 && (
+          <div className="recovery-notice" role="status">
+            <span className="recovery-notice-icon" aria-hidden="true">⚠</span>
+            <div className="recovery-notice-body">
+              <div className="recovery-notice-title">Files need attention</div>
+              <div className="recovery-notice-detail">
+                {stagingDirCount === 1
+                  ? "1 recovery group contains files that may be incomplete."
+                  : `${stagingDirCount} recovery groups contain files that may be incomplete.`}
+              </div>
+            </div>
+            <button
+              type="button"
+              className="btn-review"
+              onClick={() => setReviewOpen(true)}
+              aria-haspopup="dialog"
+            >
+              Review
+            </button>
+          </div>
+        )}
+
         {loading ? (
           <div className="loading-state">
             <div className="spinner" />
@@ -164,54 +198,19 @@ function App() {
           onRetryInbox={retryInbox}
           onRecoverStaging={recoverStaging}
         />
-      </div>
 
-      {stagingDirs && stagingDirs.dirs.length > 0 && (
-        <div className="staging-recovery-banner" role="alert">
-          <span aria-hidden="true">⚠</span>
-          <div>
-            <strong>Recovered files found from a previous session</strong>
-            <div className="staging-detail">
-              {stagingDirs.dirs.length} staging {stagingDirs.dirs.length === 1 ? "directory" : "directories"} with files that didn't finish saving.
-            </div>
-          </div>
-          <div className="staging-actions">
-            {stagingDirs.dirs.map((dir) => (
-              <div key={dir.path} className="staging-dir-row">
-                <div className="staging-file-list">
-                  <strong>{dir.files.length} file{dir.files.length === 1 ? "" : "s"}:</strong>
-                  <ul>
-                    {dir.files.map((f, i) => (
-                      <li key={i}>{f.name} ({(f.size / 1024).toFixed(1)} KB)</li>
-                    ))}
-                  </ul>
-                </div>
-                <button
-                  className="btn-recover"
-                  onClick={() => void recoverStaging(dir.path)}
-                  aria-label={`Recover ${dir.files.length} files from staging`}
-                >
-                  Recover
-                </button>
-                <button
-                  className="btn-discard"
-                  onClick={() => {
-                    const confirmed = window.confirm(
-                      `Discard ${dir.files.length} file${dir.files.length === 1 ? "" : "s"} from staging?\n\n` +
-                      `Files:\n${dir.files.map(f => `• ${f.name}`).join("\n")}\n\n` +
-                      `This action cannot be undone. These may be the only remaining copies.`
-                    );
-                    if (confirmed) void discardStaging(dir.path);
-                  }}
-                  aria-label="Discard staged files"
-                >
-                  Discard
-                </button>
-              </div>
-            ))}
-          </div>
-        </div>
-      )}
+        {reviewOpen && (
+          <StagingRecovery
+            dirs={stagingDirList}
+            busy={stagingOps}
+            errors={stagingOpErrors}
+            onRecover={recoverStaging}
+            onDiscard={discardStaging}
+            onClearError={clearStagingOpError}
+            onClose={() => setReviewOpen(false)}
+          />
+        )}
+      </div>
 
       {showSettings && (
         <Settings

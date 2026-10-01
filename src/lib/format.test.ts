@@ -14,6 +14,15 @@ describe("formatSize", () => {
     expect(formatSize(500)).toBe("500 B");
   });
 
+  it("formats tiny byte sizes exactly instead of a misleading 0.0 KB", () => {
+    // Regression: staging recovery file lists once rendered (size/1024).toFixed(1)
+    // which turned 4-byte and 8-byte files into "0.0 KB".
+    expect(formatSize(1)).toBe("1 B");
+    expect(formatSize(4)).toBe("4 B");
+    expect(formatSize(8)).toBe("8 B");
+    expect(formatSize(1023)).toBe("1023 B");
+  });
+
   it("formats kilobytes", () => {
     expect(formatSize(1024)).toBe("1 KB");
     expect(formatSize(1536)).toBe("1.5 KB");

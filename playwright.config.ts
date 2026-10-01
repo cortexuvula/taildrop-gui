@@ -11,6 +11,15 @@ export default defineConfig({
   use: {
     trace: 'on-first-retry',
   },
+  // Vite dev server hosts e2e/app.e2e.html, which mounts the production App
+  // against a browser-side Tauri IPC mock (e2e/tauri-mock.ts). The file://
+  // fixture tests keep working unchanged.
+  webServer: {
+    command: 'npm run dev -- --port 1420 --strictPort',
+    url: 'http://localhost:1420',
+    reuseExistingServer: !process.env.CI,
+    timeout: 60_000,
+  },
   projects: [
     {
       name: 'chromium',
