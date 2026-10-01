@@ -396,7 +396,7 @@ pub fn page_public(since_seq: u64, limit: usize) -> ReceiptPage {
 /// opportunistically by the accept path already).
 pub fn scan_staging_dirs() -> Vec<StagingDir> {
     let mut dirs = Vec::new();
-    let entries = match std::fs::read_dir(std::env::temp_dir()) {
+    let entries = match std::fs::read_dir(crate::tailscale::staging_root()) {
         Ok(e) => e,
         Err(_) => return dirs,
     };
@@ -428,7 +428,7 @@ pub fn scan_staging_dirs() -> Vec<StagingDir> {
 }
 
 /// Validate that `path` is a `taildrop-accept-*` directory directly under the
-/// temp dir — recovery/discard commands must never touch arbitrary paths.
+/// staging root — recovery/discard commands must never touch arbitrary paths.
 pub fn validate_staging_path(path: &str) -> Result<std::path::PathBuf, String> {
     let p = std::path::Path::new(path);
     let name = p
@@ -438,11 +438,10 @@ pub fn validate_staging_path(path: &str) -> Result<std::path::PathBuf, String> {
     if !name.starts_with("taildrop-accept-") {
         return Err(format!("'{}' is not a preserved staging directory", path));
     }
-    if p.parent() != Some(std::env::temp_dir().as_path())
-        && p.parent() != std::env::temp_dir().canonicalize().ok().as_deref()
-    {
+    let root = crate::tailscale::staging_root();
+    if p.parent() != Some(root.as_path()) && p.parent() != root.canonicalize().ok().as_deref() {
         return Err(format!(
-            "'{}' is not directly under the temp directory",
+            "'{}' is not directly under the staging root directory",
             path
         ));
     }
@@ -575,7 +574,12 @@ mod tests {
     #[test]
     fn scan_finds_only_staging_dirs_with_files() {
         let _g = TEST_STORE_LOCK.lock().unwrap_or_else(|p| p.into_inner());
-        let base = std::env::temp_dir();
+        // RA-01: use an isolated staging root (RAII guard) so test fixtures
+        // never pollute the application's recovery namespace, and the
+        // override is cleared even if an assertion panics mid-test.
+        let _iso = crate::tailscale::staging_guard::StagingRootGuard::new("scan_only_with_files");
+        let base = crate::tailscale::staging_root();
+
         let with_files = base.join("taildrop-accept-scan1");
         let empty = base.join("taildrop-accept-scan2");
         let _ = std::fs::remove_dir_all(&with_files);
@@ -595,8 +599,5 @@ mod tests {
             !dirs.iter().any(|d| d.path == empty.to_string_lossy()),
             "empty staging dirs are not recovery data"
         );
-
-        let _ = std::fs::remove_dir_all(&with_files);
-        let _ = std::fs::remove_dir_all(&empty);
     }
 }

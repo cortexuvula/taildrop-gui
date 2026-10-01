@@ -265,7 +265,7 @@ fn accept_file_inner(
     // and collateral downloads are detected by exact name instead of the old
     // "exactly one new entry" heuristic, and nothing in save_dir is touched
     // until each file is atomically moved in.
-    let staging = std::env::temp_dir().join(format!("taildrop-accept-{:016x}", timestamp_tag()));
+    let staging = staging_root().join(format!("taildrop-accept-{:016x}", timestamp_tag()));
     std::fs::create_dir_all(&staging).map_err(|e| {
         format!(
             "Cannot create staging directory '{}': {}",
@@ -507,7 +507,7 @@ fn cli_receive_files(
     }
     // Private staging dir: the CLI drains here first, then each file moves
     // into save_dir with exclusive-create semantics.
-    let staging = std::env::temp_dir().join(format!("taildrop-accept-{:016x}", timestamp_tag()));
+    let staging = staging_root().join(format!("taildrop-accept-{:016x}", timestamp_tag()));
     if let Err(e) = std::fs::create_dir_all(&staging) {
         return Err(format!(
             "Cannot create staging directory '{}': {}",
@@ -661,6 +661,87 @@ fn cli_drain_into_staging(
 // ============================================================
 // Shared accept_file helper for CLI-based platforms (macOS/Windows)
 // ============================================================
+
+// ============================================================
+// Staging root isolation (RA-01)
+// ============================================================
+//
+// Production code creates staging directories under `std::env::temp_dir()`.
+// Tests that exercise staging paths must NOT pollute the shared temp dir —
+// leftover `taildrop-accept-*` dirs from interrupted tests become false
+// recovery data visible to `scan_staging_dirs()` at app startup.
+//
+// `staging_root()` returns the base directory for staging.  Production code
+// gets `std::env::temp_dir()`; tests override it via `StagingRootGuard`
+// which creates an isolated per-test directory and cleans up on drop.
+
+use std::cell::RefCell;
+
+thread_local! {
+    static STAGING_ROOT_OVERRIDE: RefCell<Option<std::path::PathBuf>> = const { RefCell::new(None) };
+}
+
+/// Return the root directory under which `taildrop-accept-*` staging dirs
+/// are created and scanned.  Defaults to `std::env::temp_dir()`.
+pub(crate) fn staging_root() -> std::path::PathBuf {
+    STAGING_ROOT_OVERRIDE.with(|r| {
+        r.borrow()
+            .as_ref()
+            .cloned()
+            .unwrap_or_else(std::env::temp_dir)
+    })
+}
+
+#[cfg(test)]
+pub(crate) mod staging_guard {
+    use super::STAGING_ROOT_OVERRIDE;
+    use std::path::PathBuf;
+
+    /// RAII guard that isolates staging dirs for a single test.
+    ///
+    /// Creates a unique directory under the system temp dir, points
+    /// `staging_root()` at it for the current thread's scope, and
+    /// removes the entire tree on drop (including on panic).
+    pub(crate) struct StagingRootGuard {
+        root: PathBuf,
+    }
+
+    impl StagingRootGuard {
+        pub(crate) fn new(label: &str) -> Self {
+            let root = std::env::temp_dir().join(format!(
+                "taildrop_test_staging_{}_{:016x}",
+                label,
+                super::timestamp_tag()
+            ));
+            std::fs::create_dir_all(&root).unwrap_or_else(|e| {
+                panic!(
+                    "cannot create isolated staging root '{}': {}",
+                    root.display(),
+                    e
+                )
+            });
+            STAGING_ROOT_OVERRIDE.with(|r| {
+                *r.borrow_mut() = Some(root.clone());
+            });
+            Self { root }
+        }
+
+        /// The isolated staging root for this test.
+        #[allow(dead_code)]
+        pub(crate) fn root(&self) -> &std::path::Path {
+            &self.root
+        }
+    }
+
+    impl Drop for StagingRootGuard {
+        fn drop(&mut self) {
+            STAGING_ROOT_OVERRIDE.with(|r| {
+                *r.borrow_mut() = None;
+            });
+            let _ = std::fs::remove_dir_all(&self.root);
+        }
+    }
+}
 
 /// Short, unique timestamp suffix for collision resolution.
 ///
@@ -2672,6 +2753,7 @@ mod tests {
 
     #[test]
     fn accept_file_rejects_path_traversal_dotdot() {
+        let _iso = super::staging_guard::StagingRootGuard::new("traversal_dotdot");
         let _g = crate::receipts::TEST_STORE_LOCK
             .lock()
             .unwrap_or_else(|p| p.into_inner());
@@ -2691,6 +2773,7 @@ mod tests {
 
     #[test]
     fn accept_file_accepts_normal_filename() {
+        let _iso = super::staging_guard::StagingRootGuard::new("normal_name");
         let _g = crate::receipts::TEST_STORE_LOCK
             .lock()
             .unwrap_or_else(|p| p.into_inner());
@@ -2733,6 +2816,7 @@ mod tests {
 
     #[test]
     fn accept_returns_path_content_actually_landed_in() {
+        let _iso = super::staging_guard::StagingRootGuard::new("actual_path");
         let _g = crate::receipts::TEST_STORE_LOCK
             .lock()
             .unwrap_or_else(|p| p.into_inner());
@@ -2769,6 +2853,7 @@ mod tests {
 
     #[test]
     fn accept_concurrent_double_accept_yields_two_distinct_files() {
+        let _iso = super::staging_guard::StagingRootGuard::new("double_accept");
         let _g = crate::receipts::TEST_STORE_LOCK
             .lock()
             .unwrap_or_else(|p| p.into_inner());
@@ -2803,6 +2888,7 @@ mod tests {
 
     #[test]
     fn accept_moves_collateral_files_without_losing_them() {
+        let _iso = super::staging_guard::StagingRootGuard::new("collateral");
         let _g = crate::receipts::TEST_STORE_LOCK
             .lock()
             .unwrap_or_else(|p| p.into_inner());
@@ -2831,6 +2917,7 @@ mod tests {
 
     #[test]
     fn accept_falls_back_to_existing_file_when_inbox_empty() {
+        let _iso = super::staging_guard::StagingRootGuard::new("already_received");
         let _g = crate::receipts::TEST_STORE_LOCK
             .lock()
             .unwrap_or_else(|p| p.into_inner());
@@ -2850,6 +2937,7 @@ mod tests {
 
     #[test]
     fn accept_reports_failure_when_file_never_appears() {
+        let _iso = super::staging_guard::StagingRootGuard::new("never_appeared");
         let _g = crate::receipts::TEST_STORE_LOCK
             .lock()
             .unwrap_or_else(|p| p.into_inner());
@@ -2866,6 +2954,7 @@ mod tests {
 
     #[test]
     fn accept_creates_missing_save_dir() {
+        let _iso = super::staging_guard::StagingRootGuard::new("create_save_dir");
         let _g = crate::receipts::TEST_STORE_LOCK
             .lock()
             .unwrap_or_else(|p| p.into_inner());
@@ -2955,6 +3044,7 @@ mod tests {
 
     #[test]
     fn cli_receive_files_uses_rename_conflict_policy() {
+        let _iso = super::staging_guard::StagingRootGuard::new("cli_rename_policy");
         let _g = crate::receipts::TEST_STORE_LOCK
             .lock()
             .unwrap_or_else(|p| p.into_inner());
@@ -2982,7 +3072,7 @@ mod tests {
         // never the mtime heuristic over save_dir), under the temp dir.
         let last = args.last().expect("drain target must be the last arg");
         assert!(
-            last.starts_with(std::env::temp_dir().to_string_lossy().trim_end_matches('/'))
+            last.starts_with(staging_root().to_string_lossy().trim_end_matches('/'))
                 && last.contains("taildrop-accept-"),
             "drain must target a private staging dir, got: {}",
             last
@@ -2992,6 +3082,7 @@ mod tests {
 
     #[test]
     fn cli_receive_files_propagates_save_dir_error() {
+        let _iso = super::staging_guard::StagingRootGuard::new("cli_save_dir_error");
         let _g = crate::receipts::TEST_STORE_LOCK
             .lock()
             .unwrap_or_else(|p| p.into_inner());
@@ -3014,6 +3105,7 @@ mod tests {
 
     #[test]
     fn cli_receive_files_reports_received_files() {
+        let _iso = super::staging_guard::StagingRootGuard::new("cli_reports_files");
         let _g = crate::receipts::TEST_STORE_LOCK
             .lock()
             .unwrap_or_else(|p| p.into_inner());
@@ -3057,6 +3149,7 @@ mod tests {
     /// mtime heuristic picked the N newest — this is its regression test.
     #[test]
     fn cli_receive_files_ignores_unrelated_newer_files() {
+        let _iso = super::staging_guard::StagingRootGuard::new("cli_newer_unrelated");
         let _g = crate::receipts::TEST_STORE_LOCK
             .lock()
             .unwrap_or_else(|p| p.into_inner());
@@ -3096,6 +3189,7 @@ mod tests {
     /// ACTUAL destination ("got (1).txt"), never the requested name.
     #[test]
     fn cli_receive_files_receipts_collision_resolved_path() {
+        let _iso = super::staging_guard::StagingRootGuard::new("cli_collision_receipt");
         let _g = crate::receipts::TEST_STORE_LOCK
             .lock()
             .unwrap_or_else(|p| p.into_inner());
@@ -3136,6 +3230,7 @@ mod tests {
     /// leftovers are NOT marked saved (unverified).
     #[test]
     fn cli_receive_files_partial_failure_preserves_landed_receipts() {
+        let _iso = super::staging_guard::StagingRootGuard::new("cli_partial_failure");
         let _g = crate::receipts::TEST_STORE_LOCK
             .lock()
             .unwrap_or_else(|p| p.into_inner());
@@ -3201,14 +3296,15 @@ mod tests {
 
     // --- TD-01: staged files must survive CLI/move failures ---
     //
-    // Both staging tests scan the shared temp dir for `taildrop-accept-*`
-    // directories, so they must not run concurrently with each other (or
-    // with any other accept test whose staging dir is in flight) — one
-    // test's cleanup would delete another's live staging directory.
+    // Each staging test now uses a `StagingRootGuard` (RA-01) that creates an
+    // isolated per-test staging directory, so concurrent tests no longer
+    // interfere.  The lock is retained as a safety net for any future tests
+    // that might still scan shared state.
     static STAGING_TESTS_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     #[test]
     fn accept_preserves_staged_files_when_cli_fails_partway() {
+        let _iso = super::staging_guard::StagingRootGuard::new("td01_cli_fail");
         let _g = crate::receipts::TEST_STORE_LOCK
             .lock()
             .unwrap_or_else(|p| p.into_inner());
@@ -3216,7 +3312,9 @@ mod tests {
         let dir = temp_test_dir("td01_cli_fail");
         // The CLI drains a file out of the daemon inbox into staging, then
         // exits non-zero (e.g. a second file in the batch failed).
+        let staging_seen = std::sync::Mutex::new(None::<std::path::PathBuf>);
         let err = accept_file_with_getter("photo.jpg", dir.to_str().unwrap(), |staging| {
+            *staging_seen.lock().unwrap() = Some(staging.to_path_buf());
             std::fs::write(staging.join("photo.jpg"), "precious bytes").unwrap();
             Err("exit status 1: partial batch failure".to_string())
         })
@@ -3227,47 +3325,31 @@ mod tests {
             "error must point at the recovery location: {}",
             err
         );
-        // The staged file must still exist — it is the only remaining copy.
-        let staged: Vec<_> = std::fs::read_dir(std::env::temp_dir())
+        // The staged file must still exist — assert against the captured
+        // staging path, not by scanning the shared temp dir (RA-01).
+        let staging = staging_seen
+            .into_inner()
             .unwrap()
-            .filter_map(|e| e.ok())
-            .filter(|e| {
-                let name = e.file_name().to_string_lossy().to_string();
-                name.starts_with("taildrop-accept-")
-            })
-            .flat_map(|e| {
-                std::fs::read_dir(e.path())
-                    .map(|rd| rd.filter_map(|f| f.ok()).collect::<Vec<_>>())
-                    .unwrap_or_default()
-            })
-            .filter(|f| {
-                std::fs::read(f.path())
-                    .map(|c| c == b"precious bytes")
-                    .unwrap_or(false)
-            })
-            .collect();
+            .expect("closure must have captured staging path");
+        let staged_file = staging.join("photo.jpg");
+        assert!(
+            staged_file.exists(),
+            "the drained file must survive in staging at '{}'",
+            staged_file.display()
+        );
         assert_eq!(
-            staged.len(),
-            1,
-            "the drained file must survive in staging, found {:?}",
-            staged
+            std::fs::read(&staged_file).unwrap(),
+            b"precious bytes",
+            "staged content must be intact"
         );
         // Nothing may have leaked into the save dir under the requested name.
         assert!(!dir.join("photo.jpg").exists());
-        // Clean up ONLY the staging dir this test created (identified by its
-        // content) — a blanket `taildrop-accept-*` sweep would race with
-        // other accept tests running in parallel.
-        if let Some(found) = staged.first() {
-            let staging_dir = found.path().parent().map(|p| p.to_path_buf());
-            if let Some(p) = staging_dir {
-                let _ = std::fs::remove_dir_all(&p);
-            }
-        }
         let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn accept_removes_staging_when_cli_fails_cleanly() {
+        let _iso = super::staging_guard::StagingRootGuard::new("td01_cli_fail_clean");
         let _g = crate::receipts::TEST_STORE_LOCK
             .lock()
             .unwrap_or_else(|p| p.into_inner());
@@ -3290,6 +3372,60 @@ mod tests {
             staging.display()
         );
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// RA-01 regression verification: confirm that test fixtures left in an
+    /// isolated staging root are invisible to `scan_staging_dirs()` (which
+    /// scans the production temp dir) and that a fresh test run succeeds
+    /// despite earlier residue on disk.
+    #[test]
+    fn ra01_isolated_fixtures_invisible_to_recovery_scan() {
+        // --- (a) Simulate an interrupted test leaving fixtures behind ---
+        let isolated_root = std::env::temp_dir().join(format!(
+            "taildrop_test_staging_ra01_verify_{:016x}",
+            timestamp_tag()
+        ));
+        std::fs::create_dir_all(&isolated_root).unwrap();
+        let stale_staging = isolated_root.join("taildrop-accept-stale123");
+        std::fs::create_dir_all(&stale_staging).unwrap();
+        std::fs::write(stale_staging.join("done.txt"), "complete").unwrap();
+        std::fs::write(stale_staging.join("partial.bin"), "half").unwrap();
+
+        // With no override active, `scan_staging_dirs()` scans
+        // `std::env::temp_dir()`.  The isolated root is NOT under it,
+        // so the stale fixtures must be invisible.
+        let dirs = crate::receipts::scan_staging_dirs();
+        assert!(
+            !dirs
+                .iter()
+                .any(|d| d.path.starts_with(isolated_root.to_string_lossy().as_ref())),
+            "stale fixtures in isolated root must NOT appear in recovery scan: {:?}",
+            dirs
+        );
+
+        // --- (b) A fresh staging-root guard succeeds despite the residue ---
+        {
+            let _iso = super::staging_guard::StagingRootGuard::new("ra01_after_residue");
+            let dir = temp_test_dir("ra01_after_residue");
+            let result = accept_file_with_getter(
+                "photo.jpg",
+                dir.to_str().unwrap(),
+                fake_cli_delivering(vec![("photo.jpg", "fresh bytes")]),
+            );
+            assert!(
+                result.is_ok(),
+                "fresh test must succeed despite stale residue on disk: {:?}",
+                result
+            );
+            assert_eq!(
+                std::fs::read_to_string(dir.join("photo.jpg")).unwrap(),
+                "fresh bytes"
+            );
+            let _ = std::fs::remove_dir_all(&dir);
+        }
+
+        // Clean up the synthetic residue.
+        let _ = std::fs::remove_dir_all(&isolated_root);
     }
 
     // --- TD-02: Content-Length enforcement ---
@@ -3467,6 +3603,7 @@ mod tests {
     /// all (no inbox re-drain) — the fast path returns the recorded path.
     #[test]
     fn acknowledge_returns_recorded_path_without_draining() {
+        let _iso = super::staging_guard::StagingRootGuard::new("td05a_ack_no_drain");
         let _g = crate::receipts::TEST_STORE_LOCK
             .lock()
             .unwrap_or_else(|p| p.into_inner());
@@ -3522,6 +3659,7 @@ mod tests {
     /// seconds apart) = two receipts, because they are two transfers.
     #[test]
     fn new_transfer_inside_window_records_new_receipt() {
+        let _iso = super::staging_guard::StagingRootGuard::new("td05a_inside_window");
         let _g = crate::receipts::TEST_STORE_LOCK
             .lock()
             .unwrap_or_else(|p| p.into_inner());
@@ -3563,6 +3701,7 @@ mod tests {
     /// resolves without draining, no matter how old the receipt is.
     #[test]
     fn delayed_acknowledgement_outside_any_window_still_skips_drain() {
+        let _iso = super::staging_guard::StagingRootGuard::new("td05a_delayed_ack");
         let _g = crate::receipts::TEST_STORE_LOCK
             .lock()
             .unwrap_or_else(|p| p.into_inner());
@@ -3619,6 +3758,7 @@ mod tests {
 
     #[test]
     fn cli_receive_files_propagates_nonzero_exit() {
+        let _iso = super::staging_guard::StagingRootGuard::new("td04_nonzero_exit");
         let _g = crate::receipts::TEST_STORE_LOCK
             .lock()
             .unwrap_or_else(|p| p.into_inner());
@@ -3639,6 +3779,7 @@ mod tests {
 
     #[test]
     fn cli_receive_files_propagates_unreadable_save_dir() {
+        let _iso = super::staging_guard::StagingRootGuard::new("td04_unreadable");
         let _g = crate::receipts::TEST_STORE_LOCK
             .lock()
             .unwrap_or_else(|p| p.into_inner());
