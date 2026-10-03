@@ -390,10 +390,37 @@ pub fn page_public(since_seq: u64, limit: usize) -> ReceiptPage {
     STORE.page(since_seq, limit)
 }
 
-/// Scan the temp dir for preserved `taildrop-accept-*` staging directories
-/// (TD-01 recovery data). Returns only directories containing at least one
-/// regular file — empty leftovers are not recovery data (and are cleaned up
-/// opportunistically by the accept path already).
+/// Age past which an empty `taildrop-accept-*` dir is considered the
+/// leavings of a dead process and safe to sweep. Every accept/drain path
+/// is bounded by a 120s outer timeout, so 15 minutes is ~7.5x the worst
+/// possible in-flight window — an empty dir that old cannot belong to a
+/// live accept.
+const EMPTY_STAGING_SWEEP_AGE: std::time::Duration = std::time::Duration::from_secs(15 * 60);
+
+/// Decide whether an empty staging dir is stale (its owning accept/drain
+/// process is dead) and safe to sweep. Pure and explicit about `now` so
+/// the age gate is unit-testable everywhere without filesystem mtime
+/// tricks. A missing/future-dated mtime reads as fresh — never sweep.
+fn empty_dir_is_stale(modified: Option<std::time::SystemTime>, now: std::time::SystemTime) -> bool {
+    modified
+        .and_then(|t| now.duration_since(t).ok())
+        .map(|age| age > EMPTY_STAGING_SWEEP_AGE)
+        .unwrap_or(false)
+}
+
+/// Scan the staging root for preserved `taildrop-accept-*` staging
+/// directories (TD-01 recovery data). Returns only directories containing
+/// at least one regular file — an empty dir holds nothing recoverable.
+///
+/// Empty leftovers get swept when they are STALE (older than
+/// [`EMPTY_STAGING_SWEEP_AGE`]): the accept paths clean up their own dirs
+/// on success/failure, but a process killed between `create_dir_all` and
+/// cleanup (SIGKILL, power loss, forced quit during a receive poll)
+/// otherwise leaks the empty dir into the staging root forever — skipped
+/// by the recovery UI and never removed by anything. A FRESH empty dir is
+/// left untouched so a concurrent in-flight drain that has not landed its
+/// first file yet is never disturbed. Unstat-able dirs are treated as
+/// fresh (conservative: sweep only what we can verify is dead).
 pub fn scan_staging_dirs() -> Vec<StagingDir> {
     let mut dirs = Vec::new();
     let entries = match std::fs::read_dir(crate::tailscale::staging_root()) {
@@ -417,12 +444,29 @@ pub fn scan_staging_dirs() -> Vec<StagingDir> {
                 }
             }
         }
-        if !files.is_empty() {
-            dirs.push(StagingDir {
-                path: path.to_string_lossy().to_string(),
-                files,
-            });
+        if files.is_empty() {
+            if empty_dir_is_stale(
+                entry.metadata().ok().and_then(|m| m.modified().ok()),
+                std::time::SystemTime::now(),
+            ) {
+                match std::fs::remove_dir_all(&path) {
+                    Ok(()) => log::debug!(
+                        "scan_staging_dirs: swept empty staging dir left by interrupted run: '{}'",
+                        path.display()
+                    ),
+                    Err(e) => log::warn!(
+                        "scan_staging_dirs: failed to sweep empty staging dir '{}': {}",
+                        path.display(),
+                        e
+                    ),
+                }
+            }
+            continue;
         }
+        dirs.push(StagingDir {
+            path: path.to_string_lossy().to_string(),
+            files,
+        });
     }
     dirs
 }
@@ -598,6 +642,70 @@ mod tests {
         assert!(
             !dirs.iter().any(|d| d.path == empty.to_string_lossy()),
             "empty staging dirs are not recovery data"
+        );
+    }
+
+    #[test]
+    fn empty_dir_sweep_decision_is_age_gated() {
+        // Pure gate: an empty dir older than the sweep age is stale
+        // (its owning process cannot be alive); fresh or future-dated
+        // dirs are never swept — a concurrent in-flight drain may not
+        // have landed its first file yet.
+        let now = std::time::SystemTime::now();
+        let old = now
+            .checked_sub(std::time::Duration::from_secs(16 * 60))
+            .unwrap();
+        let fresh = now.checked_sub(std::time::Duration::from_secs(60)).unwrap();
+        let future = now
+            .checked_add(std::time::Duration::from_secs(120))
+            .unwrap();
+        assert!(empty_dir_is_stale(Some(old), now), "> 15 min → stale");
+        assert!(!empty_dir_is_stale(Some(fresh), now), "fresh → untouched");
+        assert!(
+            !empty_dir_is_stale(Some(future), now),
+            "future-dated (clock skew) → never sweep"
+        );
+        assert!(!empty_dir_is_stale(None, now), "unstat-able → never sweep");
+    }
+
+    /// Real-filesystem sweep: needs to backdate a dir's mtime, which
+    /// `File::open` on a directory only supports on Unix (Windows would
+    /// need FILE_FLAG_BACKUP_SEMANTICS). The decision gate itself is
+    /// covered cross-platform by `empty_dir_sweep_decision_is_age_gated`.
+    #[cfg(unix)]
+    #[test]
+    fn scan_sweeps_stale_empty_dir_keeps_fresh() {
+        let _g = TEST_STORE_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let _iso = crate::tailscale::staging_guard::StagingRootGuard::new("sweep_stale");
+        let base = crate::tailscale::staging_root();
+
+        let stale = base.join("taildrop-accept-stale");
+        let fresh_empty = base.join("taildrop-accept-fresh");
+        let with_files = base.join("taildrop-accept-withfiles");
+        for d in [&stale, &fresh_empty, &with_files] {
+            let _ = std::fs::remove_dir_all(d);
+            std::fs::create_dir_all(d).unwrap();
+        }
+        std::fs::write(with_files.join("data.bin"), b"payload").unwrap();
+        // Backdate the stale dir one hour — simulating a crashed accept
+        // run that created the dir and never returned to clean it up.
+        let f = std::fs::File::open(&stale).unwrap();
+        f.set_modified(std::time::SystemTime::now() - std::time::Duration::from_secs(3600))
+            .unwrap();
+
+        let dirs = scan_staging_dirs();
+        assert!(dirs.iter().any(|d| d.path == with_files.to_string_lossy()));
+        assert!(
+            !dirs.iter().any(|d| d.path == stale.to_string_lossy()),
+            "stale empty dir swept before return"
+        );
+        assert!(
+            !stale.exists(),
+            "stale empty dir physically removed (leak closed)"
+        );
+        assert!(
+            fresh_empty.exists(),
+            "fresh empty dir untouched (concurrent in-flight protection)"
         );
     }
 }
