@@ -204,26 +204,51 @@ fn timestamp_probe_tag() -> u64 {
 }
 
 /// Update the shared receive settings the background receive task reads.
-/// The values are stored even when validation fails so behavior matches the
+/// Ordering: validate → store → emit-on-failure → gate. The save dir is
+/// validated before any state write or gate flip so the receive loop can
+/// never drain into a path validation has not yet judged. The values are
+/// still stored when validation fails so behavior matches the
 /// frontend-driven poll this replaces: an unusable dir surfaces as a
-/// persistent `incoming-files-error` event, not as a silent revert.
+/// persistent `incoming-files-error` event, not as a silent revert. On
+/// failure that event is emitted here directly via `APP_HANDLE` — the
+/// loop's own emit only fires after [`RECEIVE_FAILURE_THRESHOLD`]
+/// consecutive fetch failures. `RECEIVE_READY` is then set unconditionally:
+/// it is set-once-never-cleared, and leaving it unset on a bad dir would
+/// deadlock the loop and silently kill receives.
 #[tauri::command]
 async fn set_receive_settings(
     state: tauri::State<'_, SharedReceiveSettings>,
     save_dir: String,
     auto_accept: bool,
 ) -> Result<(), String> {
+    let validation = validate_save_dir_path(&save_dir).await;
     {
         let mut settings = state
             .write()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        settings.save_dir = save_dir.clone();
+        settings.save_dir = save_dir;
         settings.auto_accept = auto_accept;
     }
+    if let Err(msg) = &validation {
+        // The loop's threshold-gated emit may never fire if the (created)
+        // dir polls as an empty inbox, so surface the error immediately.
+        let app = APP_HANDLE
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
+            .expect("set_receive_settings called before app setup");
+        if let Err(e) = app.emit("incoming-files-error", msg.clone()) {
+            log::debug!(
+                "set_receive_settings: emit incoming-files-error failed: {}",
+                e
+            );
+        }
+    }
     // TD-03: settings have arrived from the (hydrated) frontend — the receive
-    // loop may start draining into the authoritative destination now.
+    // loop may start draining into the authoritative destination now. Set on
+    // both validation paths: gating on success would deadlock the loop.
     RECEIVE_READY.store(true, std::sync::atomic::Ordering::Release);
-    validate_save_dir_path(&save_dir).await.map(|_| ())
+    validation.map(|_| ())
 }
 
 /// TD-03: readiness probe for the frontend/tests — true once the receive
