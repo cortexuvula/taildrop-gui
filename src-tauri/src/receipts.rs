@@ -390,11 +390,14 @@ pub fn page_public(since_seq: u64, limit: usize) -> ReceiptPage {
     STORE.page(since_seq, limit)
 }
 
-/// Age past which an empty `taildrop-accept-*` dir is considered the
-/// leavings of a dead process and safe to sweep. Every accept/drain path
-/// is bounded by a 120s outer timeout, so 15 minutes is ~7.5x the worst
-/// possible in-flight window — an empty dir that old cannot belong to a
-/// live accept.
+/// Age past which an empty `taildrop-accept-*` dir is treated as the
+/// leavings of an interrupted run and swept. NOTE: this is a heuristic,
+/// NOT a liveness proof — the macOS CLI-receive fallback runs the
+/// UNcapped `tailscale_cmd` (TD-07's orphan problem), so a hung child can
+/// hold its staging dir empty for longer than any accept bound. The
+/// sweep's safety therefore comes from the removal primitive (`remove_dir`
+/// fails if a file lands in the race), not from the age gate; the gate
+/// only keeps the scan from churning genuinely fresh dirs.
 const EMPTY_STAGING_SWEEP_AGE: std::time::Duration = std::time::Duration::from_secs(15 * 60);
 
 /// Decide whether an empty staging dir is stale (its owning accept/drain
@@ -417,10 +420,12 @@ fn empty_dir_is_stale(modified: Option<std::time::SystemTime>, now: std::time::S
 /// on success/failure, but a process killed between `create_dir_all` and
 /// cleanup (SIGKILL, power loss, forced quit during a receive poll)
 /// otherwise leaks the empty dir into the staging root forever — skipped
-/// by the recovery UI and never removed by anything. A FRESH empty dir is
-/// left untouched so a concurrent in-flight drain that has not landed its
-/// first file yet is never disturbed. Unstat-able dirs are treated as
-/// fresh (conservative: sweep only what we can verify is dead).
+/// by the recovery UI and never removed by anything. The removal is
+/// `remove_dir` (fails if anything landed in the race window), so the
+/// sweep is non-destructive even when the age gate misjudges a live
+/// drain. A FRESH empty dir is left untouched so a concurrent in-flight
+/// drain that has not landed its first file yet is never disturbed.
+/// Unstat-able dirs are treated as fresh.
 pub fn scan_staging_dirs() -> Vec<StagingDir> {
     let mut dirs = Vec::new();
     let entries = match std::fs::read_dir(crate::tailscale::staging_root()) {
@@ -449,7 +454,7 @@ pub fn scan_staging_dirs() -> Vec<StagingDir> {
                 entry.metadata().ok().and_then(|m| m.modified().ok()),
                 std::time::SystemTime::now(),
             ) {
-                match std::fs::remove_dir_all(&path) {
+                match std::fs::remove_dir(&path) {
                     Ok(()) => log::debug!(
                         "scan_staging_dirs: swept empty staging dir left by interrupted run: '{}'",
                         path.display()
@@ -707,5 +712,29 @@ mod tests {
             fresh_empty.exists(),
             "fresh empty dir untouched (concurrent in-flight protection)"
         );
+    }
+
+    #[test]
+    fn sweep_removal_fails_non_destructively_on_landed_file() {
+        // The property that makes the sweep safe against an orphaned
+        // drain landing a file in the check-then-remove race: `remove_dir`
+        // (unlike `remove_dir_all`) refuses to delete a dir that gained a
+        // file — the dir survives with its file as recovery data instead
+        // of silently deleting user bytes.
+        let _g = TEST_STORE_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let _iso = crate::tailscale::staging_guard::StagingRootGuard::new("sweep_race");
+        let base = crate::tailscale::staging_root();
+        let d = base.join("taildrop-accept-race");
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        // The dir is empty at "check" time; the file lands before removal.
+        std::fs::write(d.join("late.bin"), b"payload").unwrap();
+
+        assert!(
+            std::fs::remove_dir(&d).is_err(),
+            "refuses to remove non-empty dir"
+        );
+        assert!(d.join("late.bin").exists(), "landed file survives");
+        assert!(d.exists(), "dir survives as recovery data");
     }
 }
