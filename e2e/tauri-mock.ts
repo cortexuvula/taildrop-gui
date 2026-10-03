@@ -203,12 +203,21 @@ async function handle(cmd: string, args: InvokeArgs): Promise<unknown> {
       return null;
     case "plugin:autostart|is_enabled":
       return false;
+    case "plugin:autostart|enable":
+      return null;
+    case "plugin:autostart|disable":
+      return null;
     case "plugin:notification|is_permission_granted":
       return false;
     case "plugin:dialog|open":
       return null;
     case "get_tailscale_status":
       return [selfPeer, otherPeer];
+    case "get_debug_logs":
+      // DebugPanel harness: empty backend log page (useDebugLogs maps this).
+      return [];
+    case "get_env_info":
+      return "e2e-mock · macOS 15 · WebKit";
     case "get_incoming_files":
       return state.incoming;
     case "get_default_download_dir":

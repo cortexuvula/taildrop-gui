@@ -23,23 +23,23 @@ test('Settings dialog: Shift+Tab from overlay wraps to last focusable', async ({
   // Shift+Tab should wrap to the last focusable element
   await page.keyboard.press('Shift+Tab');
 
-  // Should now focus the "Check for Updates" button (last focusable)
-  const lastBtn = page.locator('.btn-secondary');
+  // Should now focus the "Check for updates" button (last focusable = footer button)
+  const lastBtn = page.locator('.settings-footer .btn-update');
   await expect(lastBtn).toBeFocused();
 });
 
 test('Settings dialog: Tab from last element wraps to first', async ({ page }) => {
   await page.goto(`file://${fixturePath}`);
 
-  // Focus the last focusable element
-  const lastBtn = page.locator('.btn-secondary');
+  // Focus the last focusable element (footer Check for updates button)
+  const lastBtn = page.locator('.settings-footer .btn-update');
   await lastBtn.focus();
   await expect(lastBtn).toBeFocused();
 
   // Tab should wrap to the first focusable element (close button)
   await page.keyboard.press('Tab');
 
-  const closeBtn = page.locator('.settings-panel .icon-btn').first();
+  const closeBtn = page.locator('.settings-header .icon-btn');
   await expect(closeBtn).toBeFocused();
 });
 

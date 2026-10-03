@@ -18,6 +18,7 @@
     </div>
   </div>
 
+  <!-- Production Settings component structure (card-based groups, ToggleSwitch buttons) -->
   <div class="settings-overlay" role="dialog" aria-modal="true" aria-labelledby="modal-heading" tabindex="-1">
     <div class="settings-panel">
       <div class="settings-header">
@@ -25,68 +26,133 @@
         <button class="icon-btn" aria-label="Close settings">✕</button>
       </div>
 
-      <div class="settings-section">
-        <label class="settings-label" for="save-dir-input">Save Directory</label>
-        <input id="save-dir-input" type="text" class="settings-input" value="/Users/cortexuvula/Downloads">
-      </div>
+      <div class="settings-body">
+        <!-- Receiving card -->
+        <section class="settings-card" aria-label="Receiving settings">
+          <h3 class="settings-card-heading">
+            <span class="settings-card-icon" aria-hidden="true">📥</span>
+            Receiving
+          </h3>
 
-      <div class="settings-section">
-        <label class="settings-label">
-          <span class="toggle-row">
-            Auto-accept incoming files
-            <input type="checkbox">
-          </span>
-        </label>
-      </div>
+          <div class="settings-field">
+            <label class="settings-field-label" for="save-directory">Save directory</label>
+            <div class="settings-directory-row">
+              <input id="save-directory" type="text" class="settings-input" value="/nonexistent/path" aria-invalid="true" aria-describedby="save-directory-error">
+              <button class="btn-secondary btn-browse">Browse</button>
+            </div>
+            <p class="settings-field-error" id="save-directory-error" role="alert">
+              <span class="settings-error-icon" aria-hidden="true">⚠</span>
+              Directory "/nonexistent/path" does not exist
+            </p>
+          </div>
 
-      <div class="settings-section">
-        <label class="settings-label">
-          <span class="toggle-row">
-            Show offline nodes
-            <input type="checkbox" checked>
-          </span>
-        </label>
-      </div>
+          <label class="toggle-switch">
+            <span class="toggle-switch-label">Auto-accept incoming files</span>
+            <button role="switch" aria-checked="true" class="toggle-switch-track toggle-switch-on" type="button">
+              <span class="toggle-switch-thumb"></span>
+            </button>
+          </label>
+        </section>
 
-      <div class="settings-section">
-        <label class="settings-label">
-          <span class="toggle-row">
-            Show exit nodes
-            <input type="checkbox">
-          </span>
-        </label>
-      </div>
+        <!-- Application card -->
+        <section class="settings-card" aria-label="Application settings">
+          <h3 class="settings-card-heading">
+            <span class="settings-card-icon" aria-hidden="true">⚙</span>
+            Application
+          </h3>
 
-      <div class="settings-section">
-        <label class="settings-label">
-          <span class="toggle-row">
-            Desktop notifications
-            <input type="checkbox" checked>
-          </span>
-        </label>
-      </div>
+          <label class="toggle-switch">
+            <span class="toggle-switch-label">Desktop notifications</span>
+            <button role="switch" aria-checked="true" class="toggle-switch-track toggle-switch-on" type="button">
+              <span class="toggle-switch-thumb"></span>
+            </button>
+          </label>
+          <label class="toggle-switch toggle-switch--disabled">
+            <span class="toggle-switch-label">Start on boot</span>
+            <button role="switch" aria-checked="false" class="toggle-switch-track toggle-switch-off" type="button" disabled>
+              <span class="toggle-switch-thumb"></span>
+            </button>
+          </label>
+        </section>
 
-      <div class="settings-section">
-        <label class="settings-label">Hidden Nodes</label>
-        <div class="node-visibility-list" style="font-size: 12px; color: var(--text-secondary);">
-          No hidden nodes
-        </div>
+        <!-- Device visibility card -->
+        <section class="settings-card" aria-label="Device visibility settings">
+          <h3 class="settings-card-heading">
+            <span class="settings-card-icon" aria-hidden="true">👁</span>
+            Device visibility
+          </h3>
+
+          <label class="toggle-switch">
+            <span class="toggle-switch-label">Show offline nodes</span>
+            <button role="switch" aria-checked="true" class="toggle-switch-track toggle-switch-on" type="button">
+              <span class="toggle-switch-thumb"></span>
+            </button>
+          </label>
+          <label class="toggle-switch">
+            <span class="toggle-switch-label">Show Mullvad/exit nodes</span>
+            <button role="switch" aria-checked="false" class="toggle-switch-track toggle-switch-off" type="button">
+              <span class="toggle-switch-thumb"></span>
+            </button>
+          </label>
+
+          <p class="settings-hint">
+            Toggled devices appear in the sidebar, subject to the filters above.
+          </p>
+
+          <div class="settings-field">
+            <label class="settings-field-label" for="device-search">Search devices</label>
+            <div class="settings-search-row">
+              <input id="device-search" type="text" class="settings-input" placeholder="Search devices…">
+            </div>
+          </div>
+
+          <div class="settings-device-list">
+            <div class="settings-device-row" title="MacBook-Pro">
+              <span class="settings-device-dot online"></span>
+              <span class="settings-device-os">🍎</span>
+              <span class="settings-device-name">MacBook-Pro</span>
+              <span class="settings-device-visible">Visible</span>
+              <label class="toggle-switch toggle-switch--compact">
+                <button role="switch" aria-checked="true" class="toggle-switch-track toggle-switch-on" type="button">
+                  <span class="toggle-switch-thumb"></span>
+                </button>
+              </label>
+            </div>
+            <div class="settings-device-row" title="Linux-Workstation">
+              <span class="settings-device-dot"></span>
+              <span class="settings-device-os">🐧</span>
+              <span class="settings-device-name">Linux-Workstation</span>
+              <span class="settings-device-visible">Visible</span>
+              <label class="toggle-switch toggle-switch--compact">
+                <button role="switch" aria-checked="false" class="toggle-switch-track toggle-switch-off" type="button">
+                  <span class="toggle-switch-thumb"></span>
+                </button>
+              </label>
+            </div>
+          </div>
+        </section>
       </div>
 
       <div class="settings-footer">
-        <span class="settings-version">v0.13.1</span>
-        <button class="btn-secondary">Check for Updates</button>
+        <div class="settings-footer-left">
+          <span class="settings-version">TailDrop v0.14.2</span>
+          <span class="settings-dot-sep" aria-hidden="true">·</span>
+        </div>
+        <button class="btn-update">Check for updates</button>
       </div>
     </div>
   </div>
 
   <script>
-    // Simulate focus trap behavior
+    // Simulate the production useModal focus trap: same focusable selector
+    // shape and the same disabled/hidden/tabindex exclusions.
     const overlay = document.querySelector('.settings-overlay');
-    const focusableSelector = 'button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])';
+    const focusableSelector = 'button, [href], input, select, textarea, summary, [tabindex]:not([tabindex="-1"])';
 
     function getFocusableElements() {
-      return Array.from(overlay.querySelectorAll(focusableSelector));
+      return Array.from(overlay.querySelectorAll(focusableSelector)).filter(
+        (el) => !el.hasAttribute('disabled') && el.tabIndex !== -1 && !el.hasAttribute('hidden')
+      );
     }
 
     overlay.addEventListener('keydown', (e) => {
@@ -103,13 +169,11 @@
         const last = focusable[focusable.length - 1];
 
         if (e.shiftKey) {
-          // Shift+Tab: wrap from first to last, or from overlay to last
           if (document.activeElement === first || document.activeElement === overlay) {
             e.preventDefault();
             last.focus();
           }
         } else {
-          // Tab: wrap from last to first
           if (document.activeElement === last) {
             e.preventDefault();
             first.focus();
@@ -118,7 +182,8 @@
       }
     });
 
-    // Initial focus
+    // Initial focus on the first focusable element (close button), matching
+    // useModal's mount behavior.
     const firstFocusable = getFocusableElements()[0];
     if (firstFocusable) {
       firstFocusable.focus();

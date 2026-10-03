@@ -5,6 +5,7 @@ import { getVersion } from "@tauri-apps/api/app";
 import { useToast } from "./ToastProvider";
 import { useModalWithLabel } from "../hooks/useModal";
 import { logger } from "../lib/logger";
+import { ToggleSwitch } from "./ToggleSwitch";
 import type { UseUpdaterApi } from "../hooks/useUpdater";
 import type { Peer, AppSettings } from "../types";
 
@@ -14,13 +15,46 @@ interface SettingsProps {
   onUpdate: (update: Partial<AppSettings>) => void;
   onClose: () => void;
   updater: UseUpdaterApi;
-  /** Non-null when the configured save directory is unusable (not absolute,
-   * missing, or read-only) — validated by the backend. */
   saveDirError?: string | null;
 }
 
-export function Settings({ settings, allPeers, onUpdate, onClose, updater, saveDirError }: SettingsProps) {
-  const [nodeSearch, setNodeSearch] = useState("");
+const OS_ICON: Record<string, string> = {
+  windows: "🪟",
+  macos: "🍎",
+  darwin: "🍎",
+  ios: "🍎",
+  linux: "🐧",
+  android: "🤖",
+};
+
+function getOsIcon(os: string): string {
+  const lower = os.toLowerCase();
+  for (const [key, icon] of Object.entries(OS_ICON)) {
+    if (lower.includes(key)) return icon;
+  }
+  return "💻";
+}
+
+function deviceMatches(peer: Peer, query: string): boolean {
+  const q = query.trim().toLowerCase();
+  if (!q) return true;
+  return (
+    peer.display_name.toLowerCase().includes(q) ||
+    peer.hostname.toLowerCase().includes(q) ||
+    peer.os.toLowerCase().includes(q) ||
+    peer.ips.some((ip) => ip.includes(q))
+  );
+}
+
+export function Settings({
+  settings,
+  allPeers,
+  onUpdate,
+  onClose,
+  updater,
+  saveDirError,
+}: SettingsProps) {
+  const [deviceSearch, setDeviceSearch] = useState("");
   const [autoStart, setAutoStart] = useState(false);
   const [autoStartBusy, setAutoStartBusy] = useState(false);
   const [appVersion, setAppVersion] = useState("");
@@ -51,14 +85,15 @@ export function Settings({ settings, allPeers, onUpdate, onClose, updater, saveD
       }
       setAutoStart(checked);
     } catch {
-      // Revert to actual state on failure
       const actual = await isEnabled();
       setAutoStart(actual);
     } finally {
       setAutoStartBusy(false);
     }
   };
-  const nonSelfPeers = allPeers.filter((p) => !p.is_self);
+
+  const devices = allPeers.filter((p) => !p.is_self);
+  const filteredDevices = devices.filter((p) => deviceMatches(p, deviceSearch));
 
   const toggleHidden = (id: string) => {
     const hidden = settings.hiddenNodes.includes(id)
@@ -69,7 +104,6 @@ export function Settings({ settings, allPeers, onUpdate, onClose, updater, saveD
 
   const handleCheckUpdates = async () => {
     const result = await updater.check();
-    // "available" is handled by App's effect (persistent toast) — no duplicate.
     if (result === "idle") {
       toast.info("You're up to date", "TailDrop is on the latest version.");
     } else if (result === "error") {
@@ -82,152 +116,174 @@ export function Settings({ settings, allPeers, onUpdate, onClose, updater, saveD
       <div className="settings-panel" onClick={(e) => e.stopPropagation()}>
         <div className="settings-header">
           <h2 id="modal-heading">Settings</h2>
-          <button className="icon-btn" onClick={onClose} aria-label="Close settings">
+          <button
+            className="icon-btn icon-btn-close"
+            onClick={onClose}
+            aria-label="Close settings"
+          >
             ✕
           </button>
         </div>
 
-        <div className="settings-section">
-          <label className="settings-label" htmlFor="save-directory">Save Directory</label>
-          <div style={{ display: "flex", gap: 8 }}>
-            <input
-              id="save-directory"
-              type="text"
-              className="settings-input"
-              value={settings.saveDirectory}
-              onChange={(e) => onUpdate({ saveDirectory: e.target.value })}
-              placeholder="Downloads folder"
-              style={{ flex: 1 }}
-            />
-            <button
-              className="btn-secondary"
-              onClick={async () => {
-                const selected = await open({ directory: true });
-                if (selected) {
-                  onUpdate({ saveDirectory: selected as string });
-                }
-              }}
-            >
-              Browse
-            </button>
-          </div>
-          {saveDirError && (
-            <div className="settings-field-error" role="alert">
-              ⚠ {saveDirError}
+        <div className="settings-body">
+          {/* ── Receiving ── */}
+          <section className="settings-card" aria-label="Receiving settings">
+            <h3 className="settings-card-heading">
+              <span className="settings-card-icon" aria-hidden="true">📥</span>
+              Receiving
+            </h3>
+
+            <div className="settings-field">
+              <label className="settings-field-label" htmlFor="save-directory">
+                Save directory
+              </label>
+              <div className="settings-directory-row">
+                <input
+                  id="save-directory"
+                  type="text"
+                  className="settings-input"
+                  value={settings.saveDirectory}
+                  onChange={(e) => onUpdate({ saveDirectory: e.target.value })}
+                  placeholder="Downloads folder"
+                  spellCheck={false}
+                  aria-invalid={saveDirError ? true : undefined}
+                  aria-describedby={saveDirError ? "save-directory-error" : undefined}
+                />
+                <button
+                  className="btn-secondary btn-browse"
+                  onClick={async () => {
+                    const selected = await open({ directory: true });
+                    if (selected) {
+                      onUpdate({ saveDirectory: selected as string });
+                    }
+                  }}
+                >
+                  Browse
+                </button>
+              </div>
+              {saveDirError && (
+                <p className="settings-field-error" id="save-directory-error" role="alert">
+                  <span className="settings-error-icon" aria-hidden="true">⚠</span>
+                  {saveDirError}
+                </p>
+              )}
             </div>
-          )}
-        </div>
 
-        <div className="settings-section">
-          <label className="settings-label toggle-row">
-            <span>Auto-accept incoming files</span>
-            <input
-              type="checkbox"
+            <ToggleSwitch
               checked={settings.autoAccept}
-              onChange={(e) => onUpdate({ autoAccept: e.target.checked })}
+              onChange={(c) => onUpdate({ autoAccept: c })}
+              label="Auto-accept incoming files"
             />
-          </label>
-        </div>
+          </section>
 
-        <div className="settings-section">
-          <label className="settings-label toggle-row">
-            <span>Desktop notifications</span>
-            <input
-              type="checkbox"
+          {/* ── Application ── */}
+          <section className="settings-card" aria-label="Application settings">
+            <h3 className="settings-card-heading">
+              <span className="settings-card-icon" aria-hidden="true">⚙</span>
+              Application
+            </h3>
+
+            <ToggleSwitch
               checked={settings.notifications ?? false}
-              onChange={(e) => onUpdate({ notifications: e.target.checked })}
+              onChange={(c) => onUpdate({ notifications: c })}
+              label="Desktop notifications"
             />
-          </label>
-        </div>
-
-        <div className="settings-section">
-          <label className="settings-label toggle-row">
-            <span>Start on boot</span>
-            <input
-              type="checkbox"
+            <ToggleSwitch
               checked={autoStart}
+              onChange={toggleAutoStart}
               disabled={autoStartBusy}
-              onChange={(e) => toggleAutoStart(e.target.checked)}
+              label="Start on boot"
             />
-          </label>
-        </div>
+          </section>
 
-        <div className="settings-section">
-          <label className="settings-label toggle-row">
-            <span>Show offline nodes</span>
-            <input
-              type="checkbox"
+          {/* ── Device visibility ── */}
+          <section className="settings-card" aria-label="Device visibility settings">
+            <h3 className="settings-card-heading">
+              <span className="settings-card-icon" aria-hidden="true">👁</span>
+              Device visibility
+            </h3>
+
+            <ToggleSwitch
               checked={settings.showOfflineNodes ?? false}
-              onChange={(e) => onUpdate({ showOfflineNodes: e.target.checked })}
+              onChange={(c) => onUpdate({ showOfflineNodes: c })}
+              label="Show offline nodes"
             />
-          </label>
-        </div>
-
-        <div className="settings-section">
-          <label className="settings-label toggle-row">
-            <span>Show Mullvad/exit nodes</span>
-            <input
-              type="checkbox"
+            <ToggleSwitch
               checked={settings.showExitNodes ?? false}
-              onChange={(e) => onUpdate({ showExitNodes: e.target.checked })}
+              onChange={(c) => onUpdate({ showExitNodes: c })}
+              label="Show Mullvad / exit nodes"
             />
-          </label>
+
+            <p className="settings-hint">
+              Toggled devices appear in the sidebar, subject to the filters above.
+            </p>
+
+            <div className="settings-field">
+              <label className="settings-field-label" htmlFor="device-search">
+                Search devices
+              </label>
+              <div className="settings-search-row">
+                <input
+                  id="device-search"
+                  type="text"
+                  className="settings-input"
+                  value={deviceSearch}
+                  onChange={(e) => setDeviceSearch(e.target.value)}
+                  placeholder="Search devices…"
+                />
+                {deviceSearch && (
+                  <button
+                    className="settings-search-clear"
+                    onClick={() => setDeviceSearch("")}
+                    aria-label="Clear search"
+                  >
+                    ✕
+                  </button>
+                )}
+              </div>
+            </div>
+
+            {devices.length === 0 ? (
+              <p className="settings-empty">No devices discovered yet</p>
+            ) : filteredDevices.length === 0 ? (
+              <p className="settings-empty">No matching devices</p>
+            ) : (
+              <div className="settings-device-list">
+                {filteredDevices.map((device) => {
+                  const visible = !settings.hiddenNodes.includes(device.id);
+                  return (
+                    <div
+                      key={`${device.public_key}:${device.id}`}
+                      className="settings-device-row"
+                      title={device.display_name}
+                    >
+                      <span className={`settings-device-dot ${device.online ? "online" : ""}`} />
+                      <span className="settings-device-os">{getOsIcon(device.os)}</span>
+                      <span className="settings-device-name">{device.display_name}</span>
+                      <span className="settings-device-visible">Visible</span>
+                      <ToggleSwitch
+                        checked={visible}
+                        onChange={() => toggleHidden(device.id)}
+                        label={`${device.display_name} visibility`}
+                        compact
+                      />
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+          </section>
         </div>
 
-        <div className="settings-section">
-          <label className="settings-label" htmlFor="node-visibility-search">Node Visibility</label>
-          <div className="search-wrap" style={{ marginTop: 6 }}>
-            <input
-              id="node-visibility-search"
-              type="text"
-              className="settings-input"
-              value={nodeSearch}
-              onChange={(e) => setNodeSearch(e.target.value)}
-              placeholder="Search nodes..."
-            />
-            {nodeSearch && (
-              <button className="search-clear" onClick={() => setNodeSearch("")} aria-label="Clear search">
-                ✕
-              </button>
-            )}
-          </div>
-          <div className="node-visibility-list">
-            {nonSelfPeers
-              .filter((p) => {
-                if (!nodeSearch) return true;
-                const q = nodeSearch.toLowerCase();
-                return (
-                  p.display_name.toLowerCase().includes(q) ||
-                  p.hostname.toLowerCase().includes(q) ||
-                  p.os.toLowerCase().includes(q) ||
-                  p.ips.some((ip) => ip.includes(q))
-                );
-              })
-              .map((peer) => (
-                <label key={`${peer.public_key}:${peer.id}`} className="toggle-row">
-                  <span>
-                    {peer.display_name}
-                    <span className="peer-os-small">{peer.os}</span>
-                  </span>
-                  <input
-                    type="checkbox"
-                    checked={!settings.hiddenNodes.includes(peer.id)}
-                    onChange={() => toggleHidden(peer.id)}
-                  />
-                </label>
-              ))}
-            {nonSelfPeers.length === 0 && (
-              <div className="empty-state">No peers discovered yet</div>
-            )}
-          </div>
-        </div>
-
-        <div className="settings-section settings-footer">
-          <div className="settings-version">
-            {appVersion ? `TailDrop v${appVersion}` : "TailDrop"}
+        <div className="settings-footer">
+          <div className="settings-footer-left">
+            <span className="settings-version">
+              {appVersion ? `TailDrop v${appVersion}` : "TailDrop"}
+            </span>
+            <span className="settings-dot-sep" aria-hidden="true">·</span>
           </div>
           <button
-            className="btn-secondary"
+            className="btn-update"
             onClick={handleCheckUpdates}
             disabled={
               updater.status === "checking" || updater.status === "downloading"
