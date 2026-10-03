@@ -139,8 +139,10 @@ fn is_cross_device(e: &std::io::Error) -> bool {
 /// Move `src` into `dir` under `name`, NEVER overwriting an existing file.
 /// The destination is first reserved with an exclusive create (so concurrent
 /// movers get the next unique suffix), then `src` is renamed over our own
-/// reservation — atomic on both Unix and Windows. Falls back to copy+delete
-/// when the staging and save directories live on different filesystems.
+/// reservation — atomic on both Unix and Windows. When the staging and save
+/// directories live on different filesystems, the bytes are copied into an
+/// exclusively-created temp file inside `dir` and atomically renamed onto
+/// the reservation path, then the source is deleted.
 /// Returns the path the content actually landed at.
 fn move_file_into_dir(
     src: &std::path::Path,
@@ -154,28 +156,61 @@ fn move_file_into_dir(
     match std::fs::rename(src, &dest) {
         Ok(()) => Ok(dest),
         Err(e) if is_cross_device(&e) => {
+            // EXDEV fallback: copy into an exclusively-created temp file in
+            // `dir` (same filesystem, so the final rename is atomic), then
+            // rename it onto the reservation path. `dest` is never re-opened
+            // by pathname — between `drop(placeholder)` and the write the
+            // path is not exclusively held, and a truncating reopen could
+            // hit a substitute file planted in that gap.
+            let tmp = dir.join(format!(".taildrop-move-{}", timestamp_tag()));
             let copy_result = (|| -> Result<(), String> {
                 let mut input = std::fs::File::open(src)
                     .map_err(|e| format!("Failed to read '{}': {}", src.display(), e))?;
-                let mut output = std::fs::OpenOptions::new()
-                    .write(true)
-                    .truncate(true)
-                    .open(&dest)
-                    .map_err(|e| format!("Failed to open '{}': {}", dest.display(), e))?;
+                let mut output = std::fs::File::create_new(&tmp)
+                    .map_err(|e| format!("Failed to create '{}': {}", tmp.display(), e))?;
                 std::io::copy(&mut input, &mut output)
                     .map_err(|e| format!("Failed to copy '{}': {}", src.display(), e))?;
                 output
                     .sync_all()
-                    .map_err(|e| format!("Failed to flush '{}': {}", dest.display(), e))?;
+                    .map_err(|e| format!("Failed to flush '{}': {}", tmp.display(), e))?;
+                drop(output); // Windows cannot move a file that is still open
+                std::fs::rename(&tmp, &dest).map_err(|e| {
+                    format!(
+                        "Failed to rename '{}' to '{}': {}",
+                        tmp.display(),
+                        dest.display(),
+                        e
+                    )
+                })?;
                 Ok(())
             })();
             match copy_result {
                 Ok(()) => {
-                    let _ = std::fs::remove_file(src);
+                    if let Err(e) = std::fs::remove_file(src) {
+                        log::warn!(
+                            "Copied '{}' to '{}' but failed to remove the source: {}",
+                            src.display(),
+                            dest.display(),
+                            e
+                        );
+                    }
                     Ok(dest)
                 }
                 Err(err) => {
-                    let _ = std::fs::remove_file(&dest);
+                    if let Err(e) = std::fs::remove_file(&tmp) {
+                        log::warn!(
+                            "Failed to remove temp file '{}' after copy failure: {}",
+                            tmp.display(),
+                            e
+                        );
+                    }
+                    if let Err(e) = std::fs::remove_file(&dest) {
+                        log::warn!(
+                            "Failed to remove reservation '{}' after copy failure: {}",
+                            dest.display(),
+                            e
+                        );
+                    }
                     Err(err)
                 }
             }
