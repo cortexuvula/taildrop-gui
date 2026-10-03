@@ -391,13 +391,13 @@ pub fn page_public(since_seq: u64, limit: usize) -> ReceiptPage {
 }
 
 /// Age past which an empty `taildrop-accept-*` dir is treated as the
-/// leavings of an interrupted run and swept. NOTE: this is a heuristic,
-/// NOT a liveness proof — the macOS CLI-receive fallback runs the
-/// UNcapped `tailscale_cmd` (TD-07's orphan problem), so a hung child can
-/// hold its staging dir empty for longer than any accept bound. The
-/// sweep's safety therefore comes from the removal primitive (`remove_dir`
-/// fails if a file lands in the race), not from the age gate; the gate
-/// only keeps the scan from churning genuinely fresh dirs.
+/// leavings of an interrupted run and swept. Every accept/drain path is
+/// now bounded (capped CLI child ≤110s under a 120s outer wrapper), so
+/// 15 minutes vastly exceeds any live operation — but the age gate stays
+/// a heuristic, NOT a liveness proof (clock skew, killed-but-unreaped
+/// processes), and the sweep's safety comes from the removal primitive
+/// (`remove_dir` fails if a file lands in the race), not from the gate;
+/// the gate only keeps the scan from churning genuinely fresh dirs.
 const EMPTY_STAGING_SWEEP_AGE: std::time::Duration = std::time::Duration::from_secs(15 * 60);
 
 /// Decide whether an empty staging dir is stale (its owning accept/drain

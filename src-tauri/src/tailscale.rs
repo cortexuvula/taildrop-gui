@@ -1662,16 +1662,6 @@ mod platform {
     /// the shell-injection surface the previous `/bin/sh -c` wrapper carried.
     /// (The child inherits the same environment either way — the shell
     /// intermediary added no launchd/XPC-relevant state.)
-    fn tailscale_cmd(args: &[&str]) -> std::io::Result<std::process::Output> {
-        let binary = find_tailscale().unwrap_or("tailscale");
-        log::debug!("macOS exec: {} {:?}", binary, args);
-        Command::new(binary).args(args).output()
-    }
-
-    /// TD-07: capped CLI execution. Same binary discovery/args as
-    /// `tailscale_cmd`, but the child is terminated and reaped when the cap
-    /// expires instead of being orphaned by a dropped timeout future. Callers
-    /// already wrap in `spawn_blocking`; the cap runs inside that thread.
     fn tailscale_cmd_capped(
         args: &[&str],
         cap: std::time::Duration,
@@ -1740,10 +1730,15 @@ mod platform {
 
     /// CLI auto-receive fallback for when the Unix socket is unavailable (the
     /// macOS GUI install case). Delegates to the shared `cli_receive_files`
-    /// helper with the macOS-specific `tailscale_cmd` invocation.
+    /// helper with the macOS-specific `tailscale_cmd_capped` invocation —
+    /// capped so a hung CLI child is terminated and reaped (TD-07) instead of
+    /// surviving the outer `get_incoming_files` timeout as an orphaned
+    /// process that keeps its staging dir alive indefinitely. Matches the
+    /// Windows fallback's 110s cap.
     fn try_cli_receive_files(save_dir: &str) -> Result<Vec<u8>, String> {
         super::cli_receive_files(save_dir, "macOS", |args| {
-            tailscale_cmd(args).map_err(|e| format!("Failed to run tailscale file get: {}", e))
+            tailscale_cmd_capped(args, std::time::Duration::from_secs(110))
+                .map_err(|e| format!("Failed to run tailscale file get: {}", e))
         })
     }
 
