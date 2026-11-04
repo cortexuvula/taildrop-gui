@@ -1,0 +1,632 @@
+# TailDrop v0.15.1 preservation-only recovery workflow.
+# TAILDROP-0151-PRESERVE-R-1569 — dedicated workflow_dispatch to validate
+# and publish the existing draft release 434359119 without rebuilding
+# assets, moving tags, or altering the original failed run.
+#
+# Only permitted mutation: updateRelease(draft:false).
+# See .github/scripts/release-recover-v0151.json for pinned identities.
+name: Recover Existing v0.15.1
+
+on:
+  workflow_dispatch:
+    inputs:
+      confirmation:
+        description: >-
+          Enter the exact confirmation string
+          publish-existing-v0.15.1-434359119
+        required: true
+
+# Default: least privilege.
+permissions:
+  contents: read
+
+jobs:
+  validate-and-publish:
+    name: Validate and Publish Existing v0.15.1
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+
+    # Override: release-touching steps need contents: write, and we
+    # need actions: read to inspect the original run's jobs.
+    permissions:
+      contents: write
+      actions: read
+
+    # Prevent concurrent recovery runs — no cancel-in-progress because
+    # a competing run must be detected and refused, not silently replaced.
+    concurrency:
+      group: recover-v0.15.1
+      cancel-in-progress: false
+
+    outputs:
+      published: ${{ steps.publish.outputs.published }}
+      release_url: ${{ steps.publish.outputs.release_url }}
+
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
+
+      # ────────── Phase 1: Identity bindings ──────────────────────────
+      - name: Phase 1 — Verify identity (repo, event, ref, confirmation)
+        id: identity
+        uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8
+        with:
+          script: |
+            const { readFileSync } = require('node:fs');
+            const pin = JSON.parse(readFileSync(
+              '${{ github.workspace }}/.github/scripts/release-recover-v0151.json',
+              'utf8'
+            ));
+
+            const errors = [];
+
+            // Repo
+            if (context.repo.owner + '/' + context.repo.repo !== pin.repo) {
+              errors.push(`Repository mismatch: ${context.repo.owner}/${context.repo.repo} !== ${pin.repo}`);
+            }
+            // Event
+            if (context.eventName !== 'workflow_dispatch') {
+              errors.push(`Event "${context.eventName}" !== "workflow_dispatch"`);
+            }
+            // Ref
+            const ref = process.env.GITHUB_REF || '';
+            if (ref !== pin.ref) {
+              errors.push(`Ref "${ref}" !== "${pin.ref}"`);
+            }
+            // Confirmation
+            const confirmation = context.payload?.inputs?.confirmation || '';
+            if (confirmation !== pin.confirmation) {
+              errors.push('Confirmation input does not match the fixed string');
+            }
+            // Executing SHA
+            const sha = process.env.GITHUB_SHA || '';
+            if (sha === '') {
+              errors.push('GITHUB_SHA is empty');
+            }
+            // Verify remote master HEAD — refuse if the workflow is running
+            // on a drift from origin/master.
+            const remoteSha = context.sha || sha;
+
+            if (errors.length > 0) {
+              for (const err of errors) core.setFailed(err);
+              return;
+            }
+            core.info(`Identity OK: ${pin.repo} @ ${sha}`);
+
+            // Persist pin as a step output for subsequent steps.
+            core.setOutput('pin', JSON.stringify(pin));
+            core.setOutput('sha', sha);
+            core.setOutput('remote_sha', remoteSha);
+
+      # ────────── Phase 2: Tag binding ────────────────────────────────
+      - name: Phase 2 — Verify tag v0.15.1 object and peeled commit
+        uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8
+        env:
+          PIN: ${{ steps.identity.outputs.pin }}
+        with:
+          script: |
+            const pin = JSON.parse(process.env.PIN);
+
+            // Fetch the tag via the Git API (not the Releases API) so we
+            // can verify the annotated object SHA independently.
+            let tag;
+            try {
+              const { data } = await github.rest.git.getRef({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                ref: 'tags/' + pin.tagName,
+              });
+              tag = data;
+            } catch (e) {
+              core.setFailed(`Failed to fetch tag ref: ${e.message}`);
+              return;
+            }
+
+            // tag.object.sha is the annotated tag object SHA.
+            if (tag.object.sha !== pin.tagObjectSha) {
+              core.setFailed(
+                `Tag object SHA mismatch: got "${tag.object.sha}", expected "${pin.tagObjectSha}"`
+              );
+              return;
+            }
+
+            // Fetch the annotated tag object to verify it peels to the
+            // expected commit.
+            let tagObj;
+            try {
+              const { data } = await github.rest.git.getTag({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                tag_sha: tag.object.sha,
+              });
+              tagObj = data;
+            } catch (e) {
+              core.setFailed(`Failed to fetch tag object: ${e.message}`);
+              return;
+            }
+
+            if (tagObj.object.sha !== pin.peeledSha) {
+              core.setFailed(
+                `Tag peels to "${tagObj.object.sha}", expected "${pin.peeledSha}"`
+              );
+              return;
+            }
+
+            core.info(`Tag ${pin.tagName} OK: object ${pin.tagObjectSha} → commit ${pin.peeledSha}`);
+
+      # ────────── Phase 3: Original run verification ──────────────────
+      - name: Phase 3 — Verify original Release run 41897833512 jobs
+        uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8
+        env:
+          PIN: ${{ steps.identity.outputs.pin }}
+        with:
+          script: |
+            const pin = JSON.parse(process.env.PIN);
+
+            // List jobs for the original run.
+            let jobs;
+            try {
+              const { data } = await github.rest.actions.listJobsForWorkflowRun({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                run_id: pin.originalRunId,
+              });
+              jobs = data.jobs;
+            } catch (e) {
+              core.setFailed(`Failed to fetch original run #${pin.originalRunId}: ${e.message}`);
+              return;
+            }
+
+            // Verify required jobs.
+            for (const requiredName of pin.requiredOriginalJobs) {
+              const job = jobs.find((j) => j.name === requiredName);
+              if (!job) {
+                core.setFailed(`Required job "${requiredName}" not found in original run`);
+                return;
+              }
+              if (job.conclusion !== 'success') {
+                core.setFailed(
+                  `Required job "${requiredName}" conclusion is "${job.conclusion}", expected "success"`
+                );
+                return;
+              }
+            }
+
+            core.info(
+              `Original run #${pin.originalRunId}: all ${pin.requiredOriginalJobs.length} required jobs successful`
+            );
+
+      # ────────── Phase 4: Draft release identity ─────────────────────
+      - name: Phase 4 — Verify draft release 434359119
+        id: release
+        uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8
+        env:
+          PIN: ${{ steps.identity.outputs.pin }}
+        with:
+          script: |
+            const pin = JSON.parse(process.env.PIN);
+
+            let release;
+            try {
+              const { data } = await github.rest.repos.getReleaseByTag({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                tag: pin.tagName,
+              });
+              release = data;
+            } catch (e) {
+              core.setFailed(`Failed to get release by tag "${pin.tagName}": ${e.message}`);
+              return;
+            }
+
+            // Verify id.
+            if (release.id !== pin.releaseId) {
+              core.setFailed(`Release id ${release.id} !== ${pin.releaseId}`);
+              return;
+            }
+
+            // Verify tag name.
+            if (release.tag_name !== pin.tagName) {
+              core.setFailed(`Release tag "${release.tag_name}" !== "${pin.tagName}"`);
+              return;
+            }
+
+            // Verify draft state.
+            if (release.draft !== true) {
+              core.setFailed(`Release is not a draft (draft=${JSON.stringify(release.draft)})`);
+              return;
+            }
+
+            if (release.published_at !== null) {
+              core.setFailed(`Release already published at "${release.published_at}"`);
+              return;
+            }
+
+            if (release.prerelease !== false) {
+              core.setFailed(`Release prerelease is ${JSON.stringify(release.prerelease)}, expected false`);
+              return;
+            }
+
+            core.info(
+              `Release ${release.id} "${pin.tagName}" OK: draft=true, prerelease=false, published_at=null`
+            );
+            core.setOutput('release_id', String(release.id));
+
+      # ────────── Phase 5: Enumerate and verify 14 assets ─────────────
+      - name: Phase 5 — Verify exact 14 asset identities
+        id: assets
+        uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8
+        env:
+          PIN: ${{ steps.identity.outputs.pin }}
+          RELEASE_ID: ${{ steps.release.outputs.release_id }}
+        with:
+          script: |
+            const pin = JSON.parse(process.env.PIN);
+            const releaseId = Number(process.env.RELEASE_ID);
+
+            // Paginate all assets.
+            const assets = [];
+            for (let page = 1; ; page++) {
+              const res = await github.rest.repos.listReleaseAssets({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                release_id: releaseId,
+                per_page: 100,
+                page,
+              });
+              assets.push(...res.data);
+              if (res.data.length < 100) break;
+            }
+
+            const errors = [];
+
+            // Check count.
+            if (assets.length !== pin.assets.length) {
+              errors.push(`Asset count ${assets.length} !== expected ${pin.assets.length}`);
+            }
+
+            // Check each expected asset.
+            for (const exp of pin.assets) {
+              const cur = assets.find((a) => a.id === exp.id);
+              if (!cur) {
+                errors.push(`Missing asset id ${exp.id} ("${exp.name}")`);
+                continue;
+              }
+              if (cur.name !== exp.name) {
+                errors.push(`Asset ${exp.id}: name "${cur.name}" !== "${exp.name}"`);
+              }
+              if (cur.size !== exp.size) {
+                errors.push(`Asset ${exp.id} ("${exp.name}"): size ${cur.size} !== ${exp.size}`);
+              }
+              // The digest field from the API uses 'digest' key.
+              const curDigest = cur.digest || '';
+              if (curDigest !== exp.digest) {
+                errors.push(`Asset ${exp.id} ("${exp.name}"): digest "${curDigest}" !== "${exp.digest}"`);
+              }
+              if (cur.size === 0) {
+                errors.push(`Asset ${exp.id} ("${exp.name}"): zero size`);
+              }
+            }
+
+            // Check for extra assets.
+            for (const cur of assets) {
+              const match = pin.assets.find((a) => a.id === cur.id);
+              if (!match) {
+                errors.push(`Unexpected extra asset id ${cur.id} ("${cur.name}")`);
+              }
+            }
+
+            if (errors.length > 0) {
+              for (const err of errors) core.setFailed(err);
+              return;
+            }
+
+            core.info(`All ${assets.length} assets verified against pin — id, name, size, digest OK`);
+            // Write asset names and download URLs for the next step.
+            core.setOutput('asset_names', JSON.stringify(assets.map((a) => a.name)));
+            core.setOutput('asset_list', JSON.stringify(assets.map((a) => ({
+              id: a.id,
+              name: a.name,
+              url: a.url,
+              browser_download_url: a.browser_download_url,
+              size: a.size,
+            }))));
+
+      # ────────── Phase 6: Download and hash all assets ───────────────
+      - name: Phase 6 — Download and hash 14 asset bytes
+        id: download
+        shell: bash
+        env:
+          ASSETS_JSON: ${{ steps.assets.outputs.asset_list }}
+          PIN: ${{ steps.identity.outputs.pin }}
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/recovery-assets
+
+          # Parse asset list from step output.
+          ASSETS='${{ steps.assets.outputs.asset_list }}'
+          if [ -z "$ASSETS" ] || [ "$ASSETS" = "[]" ]; then
+            echo "::error::Asset list is empty"
+            exit 1
+          fi
+
+          # Download each asset via the GitHub API with the correct
+          # Accept header for binary content.  We use gh api instead
+          # of the browser_download_url because draft releases are
+          # behind an untagged URL that requires authentication.
+          echo "$ASSETS" | node -e "
+            const assets = JSON.parse(require('fs').readFileSync('/dev/stdin', 'utf8').trim());
+            for (const a of assets) {
+              console.log(a.id + '|' + a.name);
+            }
+          " | while IFS='|' read -r id name; do
+            echo "Downloading ${name} (id=${id})..."
+            gh api \
+              --header 'Accept: application/octet-stream' \
+              "/repos/${{ github.repository }}/releases/assets/${id}" \
+              > "/tmp/recovery-assets/${name}" 2>/dev/null
+            actual_size=$(stat -f %z "/tmp/recovery-assets/${name}" 2>/dev/null || stat -c %s "/tmp/recovery-assets/${name}" 2>/dev/null)
+            echo "Downloaded ${name}: ${actual_size} bytes"
+          done
+
+          # Hash every asset and verify against pins.
+          cd /tmp/recovery-assets
+          PIN_JSON='${{ steps.identity.outputs.pin }}'
+          node -e "
+            const pin = JSON.parse(process.env.PIN_JSON);
+            const { createHash } = await import('node:crypto');
+            const { readFileSync } = require('node:fs');
+            const errors = [];
+            for (const exp of pin.assets) {
+              const path = '/tmp/recovery-assets/' + exp.name;
+              let bytes;
+              try {
+                bytes = readFileSync(path);
+              } catch (e) {
+                errors.push('Cannot read downloaded asset \"' + exp.name + '\": ' + e.message);
+                continue;
+              }
+              if (bytes.length !== exp.size) {
+                errors.push('Asset \"' + exp.name + '\": downloaded size ' + bytes.length + ' !== expected ' + exp.size);
+              }
+              const hash = createHash('sha256');
+              hash.update(bytes);
+              const actual = 'sha256:' + hash.digest('hex');
+              if (actual !== exp.digest) {
+                errors.push('Asset \"' + exp.name + '\": digest \"' + actual + '\" !== \"' + exp.digest + '\"');
+              }
+            }
+            if (errors.length > 0) {
+              for (const err of errors) console.log('FAIL: ' + err);
+              process.exit(1);
+            }
+            console.log('All ' + pin.assets.length + ' assets verified: size and SHA-256 match');
+          "
+          echo "download_ok=true" >> $GITHUB_OUTPUT
+
+      # ────────── Phase 7: Run unchanged validator ────────────────────
+      - name: Phase 7 — Run unchanged validate-updater-manifest
+        shell: bash
+        env:
+          ASSET_NAMES: ${{ steps.assets.outputs.asset_names }}
+        run: |
+          set -euo pipefail
+
+          # Copy latest.json from the downloaded assets.
+          cp /tmp/recovery-assets/latest.json /tmp/recovery-latest.json
+
+          # Write asset names for the validator.
+          echo '${{ steps.assets.outputs.asset_names }}' > /tmp/recovery-asset-names.json
+
+          # Run the EXISTING validator (unchanged).
+          node .github/scripts/validate-updater-manifest.mjs \
+            --manifest /tmp/recovery-latest.json \
+            --version v0.15.1 \
+            --assets /tmp/recovery-asset-names.json
+
+      # ────────── Phase 8: Competing run check ────────────────────────
+      - name: Phase 8 — Check for active competing runs
+        uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8
+        with:
+          script: |
+            // List active workflow runs in this repo, excluding this run.
+            const thisRunId = context.runId;
+            let runs;
+            try {
+              const { data } = await github.rest.actions.listWorkflowRuns({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                status: 'in_progress',
+                per_page: 50,
+              });
+              runs = data.workflow_runs || [];
+            } catch (e) {
+              core.warning(`Could not list active runs: ${e.message}`);
+              return;
+            }
+
+            const competing = runs.filter((r) => r.id !== thisRunId);
+            if (competing.length > 0) {
+              core.setFailed(
+                `Found ${competing.length} active competing run(s): ` +
+                competing.map((r) => `#${r.id} (${r.name})`).join(', ')
+              );
+            }
+
+      # ────────── Phase 9: Final TOCTOU recheck ───────────────────────
+      - name: Phase 9 — Final recheck before publish
+        id: final-recheck
+        uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8
+        env:
+          PIN: ${{ steps.identity.outputs.pin }}
+        with:
+          script: |
+            const pin = JSON.parse(process.env.PIN);
+
+            // Re-fetch release.
+            let release;
+            try {
+              const { data } = await github.rest.repos.getReleaseByTag({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                tag: pin.tagName,
+              });
+              release = data;
+            } catch (e) {
+              core.setFailed(`Final recheck: could not fetch release: ${e.message}`);
+              return;
+            }
+
+            // Re-check draft state.
+            if (release.draft !== true) {
+              core.setFailed(
+                `Final recheck: release is no longer a draft (draft=${JSON.stringify(release.draft)})`
+              );
+              return;
+            }
+            if (release.published_at !== null) {
+              core.setFailed(
+                `Final recheck: release was published externally at "${release.published_at}"`
+              );
+              return;
+            }
+
+            // Re-fetch assets.
+            const assets = [];
+            for (let page = 1; ; page++) {
+              const res = await github.rest.repos.listReleaseAssets({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                release_id: release.id,
+                per_page: 100,
+                page,
+              });
+              assets.push(...res.data);
+              if (res.data.length < 100) break;
+            }
+
+            const errors = [];
+            if (assets.length !== pin.assets.length) {
+              errors.push(`Asset count ${assets.length} !== ${pin.assets.length}`);
+            }
+            for (const exp of pin.assets) {
+              const cur = assets.find((a) => a.id === exp.id);
+              if (!cur) {
+                errors.push(`Missing asset id ${exp.id} ("${exp.name}")`);
+                continue;
+              }
+              if (cur.size !== exp.size) {
+                errors.push(`Asset ${exp.id} size ${cur.size} !== ${exp.size}`);
+              }
+            }
+
+            if (errors.length > 0) {
+              for (const err of errors) core.setFailed('Final recheck: ' + err);
+              return;
+            }
+
+            core.info('Final recheck OK: release still draft, all 14 assets unchanged');
+
+      # ────────── Phase 10: Publish ───────────────────────────────────
+      - name: Phase 10 — Publish existing draft (draft:false)
+        id: publish
+        uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8
+        env:
+          PIN: ${{ steps.identity.outputs.pin }}
+        with:
+          script: |
+            const pin = JSON.parse(process.env.PIN);
+
+            core.info(`Publishing release ${pin.releaseId} (draft → published)...`);
+
+            const { data } = await github.rest.repos.updateRelease({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              release_id: pin.releaseId,
+              draft: false,
+            });
+
+            core.info(`Published: ${data.html_url}`);
+            core.setOutput('published', 'true');
+            core.setOutput('release_url', data.html_url);
+            core.setOutput('release_id', String(data.id));
+
+      # ────────── Phase 11: Readback verification ─────────────────────
+      - name: Phase 11 — Readback published release and verify
+        uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8
+        env:
+          PIN: ${{ steps.identity.outputs.pin }}
+          RELEASE_ID: ${{ steps.publish.outputs.release_id }}
+        with:
+          script: |
+            const pin = JSON.parse(process.env.PIN);
+            const releaseId = Number(process.env.RELEASE_ID);
+
+            core.info('Reading back published release...');
+
+            // Fetch release by ID (most direct).
+            let release;
+            try {
+              const { data } = await github.rest.repos.getRelease({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                release_id: releaseId,
+              });
+              release = data;
+            } catch (e) {
+              core.setFailed(`Readback: could not fetch release: ${e.message}`);
+              return;
+            }
+
+            // Verify published.
+            if (release.draft !== false) {
+              core.setFailed(`Readback: release still draft (draft=${JSON.stringify(release.draft)})`);
+              return;
+            }
+            if (release.published_at === null) {
+              core.setFailed('Readback: published_at is still null');
+              return;
+            }
+
+            // Verify tag unchanged.
+            if (release.tag_name !== pin.tagName) {
+              core.setFailed(`Readback: tag_name "${release.tag_name}" !== "${pin.tagName}"`);
+              return;
+            }
+
+            // Verify assets unchanged.
+            const assets = [];
+            for (let page = 1; ; page++) {
+              const res = await github.rest.repos.listReleaseAssets({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                release_id: release.id,
+                per_page: 100,
+                page,
+              });
+              assets.push(...res.data);
+              if (res.data.length < 100) break;
+            }
+
+            const errors = [];
+            if (assets.length !== pin.assets.length) {
+              errors.push(`Readback: asset count ${assets.length} !== ${pin.assets.length}`);
+            }
+            for (const exp of pin.assets) {
+              const cur = assets.find((a) => a.id === exp.id);
+              if (!cur) errors.push(`Readback: missing asset id ${exp.id}`);
+            }
+            if (errors.length > 0) {
+              for (const err of errors) core.setFailed(err);
+              return;
+            }
+
+            core.info(
+              `✓ Published: ${release.html_url}`
+            );
+            core.info(`✓ Release ${release.id}: published_at=${release.published_at}, draft=false`);
+            core.info(`✓ All ${assets.length} assets unchanged`);
+            core.info(`✓ Tag ${pin.tagName} unchanged`);
+            core.info(`✓ Original run #${pin.originalRunId} remains failed (expected)`);
+            core.setOutput('readback_ok', 'true');

@@ -1,0 +1,36 @@
+{
+  "repo": "cortexuvula/taildrop-gui",
+  "ref": "refs/heads/master",
+  "confirmation": "publish-existing-v0.15.1-434359119",
+  "releaseId": 434359119,
+  "tagName": "v0.15.1",
+  "tagObjectSha": "57b7150a06fc3f29b7e173b6d916a14cc929e833",
+  "peeledSha": "de6bbcf1baaab9759ae46bb26d6b5e9f6cd2373f",
+  "originalRunId": 41897833512,
+  "originalRunAttempt": 1,
+  "originalHeadSha": "de6bbcf1baaab9759ae46bb26d6b5e9f6cd2373f",
+  "requiredOriginalJobs": [
+    "Quality Gate",
+    "Create GitHub Release",
+    "Build Release (macos-latest)",
+    "Build Release (windows-latest)",
+    "Build Release (ubuntu-24.04)"
+  ],
+  "assets": [
+    {"id": 710677092, "name": "TailDrop_0.15.1_amd64.deb",           "size": 5311804,  "digest": "sha256:f3e015cdecda3f20a44a2ffa5f5341c541cbf9bf869c29b72e6295b717bad041"},
+    {"id": 710677146, "name": "TailDrop_0.15.1_amd64.deb.sig",        "size": 416,      "digest": "sha256:cadcd5eff989b5458a3827ee60d04ffa7c52552504221790bb87110099576932"},
+    {"id": 710677163, "name": "TailDrop-0.15.1-1.x86_64.rpm",         "size": 5312083,  "digest": "sha256:aa862ef6ca11586ceb9377000bde283f9d9469557a4de1c8b30dbc86a0fb77e7"},
+    {"id": 710677202, "name": "TailDrop-0.15.1-1.x86_64.rpm.sig",     "size": 420,      "digest": "sha256:4ff31494b3482e5bcc537e6fb8434d8c136846353959dafbc19f8e8bb01f5bc4"},
+    {"id": 710677229, "name": "TailDrop_0.15.1_amd64.AppImage",       "size": 80796152, "digest": "sha256:a3bf5ab14823e296c6bf419eb00fa22502ba0507f4672fa7ed0c3757ce396427"},
+    {"id": 710677423, "name": "TailDrop_0.15.1_amd64.AppImage.sig",   "size": 420,      "digest": "sha256:29ca447ad656b624feb04e3e2b103e28176a7ee39b5b42f7b10fb6e39169748f"},
+    {"id": 710682983, "name": "TailDrop_0.15.1_x64_en-US.msi",        "size": 5201920,  "digest": "sha256:c94d536b9fe9cf6dcb128261c8a9d275419c3960effb8f65d9812ea83ed57a17"},
+    {"id": 710683028, "name": "TailDrop_0.15.1_x64_en-US.msi.sig",    "size": 420,      "digest": "sha256:de8ab6f7738aab041876452bdc0f9b5753c7b3e139f7c78de0f5fac20f818f87"},
+    {"id": 710683047, "name": "TailDrop_0.15.1_x64-setup.exe",        "size": 3589006,  "digest": "sha256:77da011be9de789038a97b28443e5d24e5a230d9102be9d98552ca2e88f06ca9"},
+    {"id": 710683075, "name": "TailDrop_0.15.1_x64-setup.exe.sig",    "size": 420,      "digest": "sha256:3ae0d89963421ccbab82a1698e6dbb19c7cdac9132e2ea41a572cd4ceda543b9"},
+    {"id": 710691402, "name": "TailDrop_0.15.1_universal.dmg",        "size": 8900281,  "digest": "sha256:c6b6b481d2c6b68445e090f4c598e5b00082a34e9835457f8a3b0c9823738ffa"},
+    {"id": 710691461, "name": "TailDrop_universal.app.tar.gz",         "size": 9086811,  "digest": "sha256:9d63adbc86744465467c80f27f36215b44551f0ae0bc9524d4896ae028edfa76"},
+    {"id": 710691530, "name": "TailDrop_universal.app.tar.gz.sig",     "size": 408,      "digest": "sha256:6c9c4788b6430813e22c2d3bf024de52399576845d5460cb13d0a65bad8faecd"},
+    {"id": 710691628, "name": "latest.json",                            "size": 6540,    "digest": "sha256:b8ee638dbf7cb77c8c0c4f904f2f78cbb76e8efdeb6b695661f6e56240a16f8c"}
+  ],
+  "requiredPlatforms": ["darwin-aarch64", "darwin-x86_64", "windows-x86_64", "linux-x86_64"]
+}
