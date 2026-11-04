@@ -40,6 +40,11 @@ export function checkIdentity(r, pin) {
     e.push("Confirmation input does not match the fixed string");
   if (r.execSha === undefined || r.execSha === "")
     e.push("Executing SHA is empty or undefined");
+  // Verify remote master HEAD matches executing SHA
+  if (r.remoteSha === undefined || r.remoteSha === "")
+    e.push("Remote master SHA is empty or undefined");
+  else if (r.remoteSha !== r.execSha)
+    e.push(`Remote master SHA "${r.remoteSha}" !== executing SHA "${r.execSha}"`);
   return e;
 }
 
@@ -195,7 +200,17 @@ export function checkAssetSet(assets, pin) {
  */
 export function checkAssetBytes(downloaded, pin) {
   const e = [];
-  // Not all bytes may have been downloaded — only verify what was provided.
+  if (!Array.isArray(downloaded) || downloaded.length === 0) {
+    e.push("No assets downloaded — all " + pin.assets.length + " assets required");
+    return e;
+  }
+  // Build a set of asset IDs that were downloaded
+  const downloadedIds = new Set(downloaded.map(d => d.id));
+  for (const exp of pin.assets) {
+    if (!downloadedIds.has(exp.id)) {
+      e.push(`Asset id ${exp.id} ("${exp.name}") was not downloaded`);
+    }
+  }
   for (const d of downloaded) {
     const exp = pin.assets.find((a) => a.id === d.id);
     if (!exp) {
@@ -256,6 +271,8 @@ export async function checkValidator(manifest, version, assetNames, pin) {
 
 /**
  * Refuse an active competing publication or recovery run.
+ * Checks queued, pending, in_progress, waiting, requested — any non-completed
+ * status that could conflict with this recovery.
  * @param {Array<{id:number, status:string, name:string}>} activeRuns
  * @param {object} pin
  * @returns {string[]}
@@ -264,7 +281,7 @@ export function checkCompetitor(activeRuns, pin) {
   const e = [];
   if (!Array.isArray(activeRuns) || activeRuns.length === 0) return e;
   for (const run of activeRuns) {
-    if (run.status === "in_progress" || run.status === "queued" || run.status === "pending") {
+    if (run.status === "in_progress" || run.status === "queued" || run.status === "pending" || run.status === "waiting" || run.status === "requested") {
       e.push(`Active competing run #${run.id} ("${run.name}") is ${run.status}`);
     }
   }

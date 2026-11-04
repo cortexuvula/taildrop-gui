@@ -20,6 +20,7 @@ import {
   checkOriginalRun,
   checkDraftRelease,
   checkAssetSet,
+  checkAssetBytes,
   checkCompetitor,
   checkFinalRecheck,
   evaluateRecovery,
@@ -72,6 +73,7 @@ const GOOD_IDENTITY = {
   ref: "refs/heads/master",
   confirmation: "publish-existing-v0.15.1-434359119",
   execSha: "de6bbcf1baaab9759ae46bb26d6b5e9f6cd2373f",
+  remoteSha: "de6bbcf1baaab9759ae46bb26d6b5e9f6cd2373f",
 };
 
 const GOOD_TAG = {
@@ -345,12 +347,12 @@ test("checkFinalRecheck: asset drift fails", () => {
 
 function goodReality() {
   return {
-    identity: GOOD_IDENTITY,
+    identity: { ...GOOD_IDENTITY },
     tag: GOOD_TAG,
     originalRun: GOOD_ORIGINAL_RUN,
     release: GOOD_RELEASE,
     assets: makeGoodAssets(),
-    downloaded: [],
+    downloaded: [],  // Empty by default — failure tests replace this when needed
     manifest: {
       version: "0.15.1",
       pub_date: "2026-11-04T19:43:00Z",
@@ -385,7 +387,32 @@ function goodReality() {
 
 test("evaluateRecovery: happy path calls publish exactly once", async () => {
   let calls = 0;
-  const r = await evaluateRecovery(goodReality(), PIN, () => { calls++; });
+  const reality = goodReality();
+  // Provide mock downloaded bytes.  Use small buffers (not full-size) and
+  // override the pin's expected sizes/digests to match.
+  const { createHash } = await import("node:crypto");
+  const mockPin = JSON.parse(JSON.stringify(PIN));
+  const mockDownloaded = mockPin.assets.map((exp) => {
+    const bytes = Buffer.from(exp.name); // small, deterministic content
+    return { id: exp.id, bytes };
+  });
+  // Override pin's expected sizes and digests to match our small mock bytes.
+  for (let i = 0; i < mockPin.assets.length; i++) {
+    mockPin.assets[i].size = mockDownloaded[i].bytes.length;
+    const hash = createHash("sha256");
+    hash.update(mockDownloaded[i].bytes);
+    mockPin.assets[i].digest = "sha256:" + hash.digest("hex");
+  }
+  reality.downloaded = mockDownloaded;
+  // Also override reality.assets to match mockPin (goodReality() copies PIN
+  // sizes which differ from mockPin).
+  reality.assets = mockPin.assets.map(a => ({ id: a.id, name: a.name, size: a.size, digest: a.digest }));
+  // Override finalRecheck assets too — goodReality() uses makeGoodAssets()
+  // which copies PIN sizes, not mockPin sizes.
+  if (reality.finalRecheck) {
+    reality.finalRecheck.assets = mockPin.assets.map(a => ({ id: a.id, name: a.name, size: a.size, digest: a.digest }));
+  }
+  const r = await evaluateRecovery(reality, mockPin, () => { calls++; });
   assert.equal(r.ok, true, "expected ok=true");
   assert.equal(r.published, true, "expected published=true");
   assert.equal(r.errors.length, 0, `expected no errors, got: ${JSON.stringify(r.errors)}`);
@@ -532,4 +559,140 @@ test("evaluateRecovery: duplicate asset id — publish never called", async () =
   assert.equal(r.ok, false);
   assert.equal(r.published, false);
   assert.equal(calls, 0);
+});
+
+// ═══════════════════════════════════════════════════════════════════════════════
+//  R1 correction: expanded coverage for blockers identified by reviewer
+// ═══════════════════════════════════════════════════════════════════════════════
+
+// ─── checkIdentity: remoteSha binding ───────────────────────────────────────
+
+test("checkIdentity: missing remote SHA fails", () => {
+  const e = checkIdentity({ ...GOOD_IDENTITY, remoteSha: "" }, PIN);
+  assert.ok(e.some((m) => m.includes("Remote master SHA")));
+});
+
+test("checkIdentity: mismatched remote SHA fails", () => {
+  const e = checkIdentity({
+    ...GOOD_IDENTITY,
+    remoteSha: "0000000000000000000000000000000000000000",
+  }, PIN);
+  assert.ok(e.some((m) => m.includes("Remote master SHA")));
+});
+
+test("checkIdentity: matching remote SHA passes", () => {
+  const e = checkIdentity({
+    ...GOOD_IDENTITY,
+    remoteSha: GOOD_IDENTITY.execSha,
+  }, PIN);
+  assert.deepEqual(e, []);
+});
+
+// ─── checkAssetBytes: empty/partial downloads ──────────────────────────────
+
+test("checkAssetBytes: no downloaded assets fails", () => {
+  const e = checkAssetBytes([], PIN);
+  assert.ok(e.some((m) => m.includes("No assets downloaded")));
+});
+
+test("checkAssetBytes: missing some assets fails", () => {
+  const d = PIN.assets.slice(0, 10).map((a) => ({
+    id: a.id,
+    bytes: Buffer.alloc(a.size, 0),
+  }));
+  const e = checkAssetBytes(d, PIN);
+  // Should report which assets were NOT downloaded.
+  assert.ok(e.length > 0, "expected errors for missing assets");
+  assert.ok(e.some((m) => m.includes("was not downloaded")), "expected 'not downloaded' error");
+});
+
+test("checkAssetBytes: wrong size fails", () => {
+  const pinAssets = PIN.assets.slice(0, 1);
+  const d = pinAssets.map((a) => ({
+    id: a.id,
+    bytes: Buffer.alloc(a.size + 1, 0),
+  }));
+  const e = checkAssetBytes(d, { ...PIN, assets: pinAssets });
+  assert.ok(e.some((m) => m.includes("size")), "expected size mismatch error");
+});
+
+// ─── checkCompetitor: expanded status coverage ─────────────────────────────
+
+test("checkCompetitor: queued run fails", () => {
+  const e = checkCompetitor([{ id: 100, name: "queued-wf", status: "queued" }], {});
+  assert.ok(e.some((m) => m.includes("Active competing") && m.includes("queued")));
+});
+
+test("checkCompetitor: pending run fails", () => {
+  const e = checkCompetitor([{ id: 100, name: "pending-wf", status: "pending" }], {});
+  assert.ok(e.some((m) => m.includes("Active competing") && m.includes("pending")));
+});
+
+test("checkCompetitor: waiting run fails", () => {
+  const e = checkCompetitor([{ id: 100, name: "waiting-wf", status: "waiting" }], {});
+  assert.ok(e.some((m) => m.includes("Active competing") && m.includes("waiting")));
+});
+
+test("checkCompetitor: completed run passes", () => {
+  const e = checkCompetitor([{ id: 100, name: "done-wf", status: "completed" }], {});
+  assert.deepEqual(e, []);
+});
+
+test("checkCompetitor: multiple non-completed statuses all reported", () => {
+  const e = checkCompetitor([
+    { id: 1, name: "wf1", status: "queued" },
+    { id: 2, name: "wf2", status: "in_progress" },
+    { id: 3, name: "wf3", status: "pending" },
+  ], {});
+  assert.equal(e.length, 3, "expected all 3 non-completed runs to be reported");
+});
+
+// ─── checkFinalRecheck: tag drift ──────────────────────────────────────────
+
+test("checkFinalRecheck: tag object drift fails", () => {
+  const errors = checkFinalRecheck({
+    release: GOOD_RELEASE,
+    assets: makeGoodAssets(),
+    tag: { ...GOOD_TAG, tagObjectSha: "0000000000000000000000000000000000000000" },
+  }, PIN);
+  assert.ok(
+    errors.some((m) => m.includes("Final recheck:") && m.includes("Tag object SHA")),
+    "expected final recheck to catch tag object drift"
+  );
+});
+
+test("checkFinalRecheck: peeled commit drift fails", () => {
+  const errors = checkFinalRecheck({
+    release: GOOD_RELEASE,
+    assets: makeGoodAssets(),
+    tag: { ...GOOD_TAG, peeledSha: "0000000000000000000000000000000000000000" },
+  }, PIN);
+  assert.ok(
+    errors.some((m) => m.includes("Final recheck:") && m.includes("Peeled commit SHA")),
+    "expected final recheck to catch peeled SHA drift"
+  );
+});
+
+// ─── evaluateRecovery: empty downloads ─────────────────────────────────────
+
+test("evaluateRecovery: empty downloaded assets — publish never called", async () => {
+  let calls = 0;
+  const reality = goodReality();
+  // Already has downloaded: [] — must fail with new check
+  const r = await evaluateRecovery(reality, PIN, () => { calls++; });
+  assert.equal(r.ok, false, "expected ok=false for empty downloads");
+  assert.equal(r.published, false, "expected published=false for empty downloads");
+  assert.equal(calls, 0, "expected 0 publish calls for empty downloads");
+  assert.ok(r.errors.some((m) => m.includes("No assets downloaded")), "expected 'No assets downloaded' error");
+});
+
+test("evaluateRecovery: missing remote SHA — publish never called", async () => {
+  let calls = 0;
+  const reality = goodReality();
+  reality.identity = { ...reality.identity, remoteSha: "" };
+  const r = await evaluateRecovery(reality, PIN, () => { calls++; });
+  assert.equal(r.ok, false);
+  assert.equal(r.published, false);
+  assert.equal(calls, 0);
+  assert.ok(r.errors.some((m) => m.includes("Remote master SHA")), "expected remote SHA error");
 });
