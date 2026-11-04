@@ -19,7 +19,7 @@ A drag-and-drop file transfer desktop app for Tailscale Taildrop. Built with Tau
 ## Prerequisites
 
 ### All Platforms
-- [Node.js](https://nodejs.org/) 18+
+- [Node.js](https://nodejs.org/) **>=22.13** (the `engines` requirement in `package.json`; Node 18 is too old for the current Vite/TS toolchain)
 - [Rust](https://rustup.rs/) 1.70+
 - [Tailscale](https://tailscale.com/) installed and running
 

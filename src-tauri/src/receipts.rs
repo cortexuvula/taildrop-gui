@@ -415,6 +415,19 @@ fn empty_dir_is_stale(modified: Option<std::time::SystemTime>, now: std::time::S
 /// directories (TD-01 recovery data). Returns only directories containing
 /// at least one regular file — an empty dir holds nothing recoverable.
 ///
+/// Safe-by-construction (A1): a directory whose contents cannot be
+/// enumerated (read_dir failure, per-entry iteration failure) is treated as
+/// "contents unknown", never "empty" — it is preserved on disk and the sweep
+/// is NOT attempted, and it is not offered as a recovery group whose files
+/// we cannot describe. A directory holding ONLY nested/non-regular entries
+/// is likewise never swept (its bytes may be the only copy) and stays off
+/// the recovery list. Only a genuinely empty directory (successful
+/// enumeration, zero entries) is sweepable.
+///
+/// Active-group exclusion (A3): a staging dir a live accept/drain currently
+/// owns (`is_active_staging`) is never published — its contents are still in
+/// motion and must not be offered to user operations.
+///
 /// Empty leftovers get swept when they are STALE (older than
 /// [`EMPTY_STAGING_SWEEP_AGE`]): the accept paths clean up their own dirs
 /// on success/failure, but a process killed between `create_dir_all` and
@@ -425,7 +438,6 @@ fn empty_dir_is_stale(modified: Option<std::time::SystemTime>, now: std::time::S
 /// sweep is non-destructive even when the age gate misjudges a live
 /// drain. A FRESH empty dir is left untouched so a concurrent in-flight
 /// drain that has not landed its first file yet is never disturbed.
-/// Unstat-able dirs are treated as fresh.
 pub fn scan_staging_dirs() -> Vec<StagingDir> {
     let mut dirs = Vec::new();
     let entries = match std::fs::read_dir(crate::tailscale::staging_root()) {
@@ -438,18 +450,38 @@ pub fn scan_staging_dirs() -> Vec<StagingDir> {
             continue;
         }
         let path = entry.path();
+        // A3: never offer a group the active writer still owns.
+        if crate::tailscale::is_active_staging(&path) {
+            continue;
+        }
         let mut files = Vec::new();
-        if let Ok(rd) = std::fs::read_dir(&path) {
-            for f in rd.filter_map(|e| e.ok()) {
-                if f.file_type().map(|t| t.is_file()).unwrap_or(false) {
-                    files.push(StagingFile {
-                        name: f.file_name().to_string_lossy().to_string(),
-                        size: f.metadata().map(|m| m.len()).unwrap_or(0),
-                    });
+        // A1: ANY entry — regular, hidden, nested, symlink — is "not empty".
+        // A failure to enumerate is "contents unknown"; both must never be
+        // swept (and unknown contents are not describable as recovery files).
+        let mut any_entry: bool = false;
+        match std::fs::read_dir(&path) {
+            Ok(rd) => {
+                for f in rd {
+                    match f {
+                        Ok(e) => {
+                            any_entry = true;
+                            if e.file_type().map(|t| t.is_file()).unwrap_or(false) {
+                                files.push(StagingFile {
+                                    name: e.file_name().to_string_lossy().to_string(),
+                                    size: e.metadata().map(|m| m.len()).unwrap_or(0),
+                                });
+                            }
+                        }
+                        // A1: an individual iteration failure means some
+                        // contents went unseen — treat as unknown.
+                        Err(_) => any_entry = true,
+                    }
                 }
             }
+            // A1: unreadable = contents unknown = preserved, never swept.
+            Err(_) => any_entry = true,
         }
-        if files.is_empty() {
+        if !any_entry {
             if empty_dir_is_stale(
                 entry.metadata().ok().and_then(|m| m.modified().ok()),
                 std::time::SystemTime::now(),
@@ -468,10 +500,12 @@ pub fn scan_staging_dirs() -> Vec<StagingDir> {
             }
             continue;
         }
-        dirs.push(StagingDir {
-            path: path.to_string_lossy().to_string(),
-            files,
-        });
+        if !files.is_empty() {
+            dirs.push(StagingDir {
+                path: path.to_string_lossy().to_string(),
+                files,
+            });
+        }
     }
     dirs
 }
@@ -736,5 +770,112 @@ mod tests {
         );
         assert!(d.join("late.bin").exists(), "landed file survives");
         assert!(d.exists(), "dir survives as recovery data");
+    }
+
+    // --- A3 (TAILDROP-FIXES-20261104): no active-group exposure ---
+
+    /// A3: a staging dir a live accept/drain still owns must never be
+    /// published by the recovery scan; once the writer finishes (guard
+    /// dropped) the same dir becomes a normal recovery group.
+    #[test]
+    fn scan_excludes_active_staging_dirs_until_released() {
+        let _g = TEST_STORE_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let _iso = crate::tailscale::staging_guard::StagingRootGuard::new("active_exclude");
+        let base = crate::tailscale::staging_root();
+        let active = base.join("taildrop-accept-active1");
+        let inactive = base.join("taildrop-accept-idle1");
+        for d in [&active, &inactive] {
+            let _ = std::fs::remove_dir_all(d);
+            std::fs::create_dir_all(d).unwrap();
+        }
+        std::fs::write(active.join("in-flight.bin"), b"writing").unwrap();
+        std::fs::write(inactive.join("whole.bin"), b"payload").unwrap();
+
+        // Guard-disable control: WITHOUT the active registration (baseline
+        // semantics), the live dir would be published — the scan only skips
+        // it because the writer registered it.
+        let guard = crate::tailscale::ActiveStagingGuard::new(&active);
+        let dirs = scan_staging_dirs();
+        assert!(
+            dirs.iter().any(|d| d.path == inactive.to_string_lossy()),
+            "idle recovery group must be published"
+        );
+        assert!(
+            !dirs.iter().any(|d| d.path == active.to_string_lossy()),
+            "active in-flight group must NOT be exposed: {:?}",
+            dirs
+        );
+        drop(guard);
+        let dirs = scan_staging_dirs();
+        assert!(
+            dirs.iter().any(|d| d.path == active.to_string_lossy()),
+            "after the writer finishes, the preserved group becomes recoverable"
+        );
+    }
+
+    /// A1: a staging dir whose contents cannot be enumerated (mode 000) is
+    /// never swept — "contents unknown" is not "empty". Unix-only; Windows
+    /// ACL tricks are not portable and the decision gate is covered by the
+    /// portable tests above.
+    #[cfg(unix)]
+    #[test]
+    fn scan_never_sweeps_unreadable_staging() {
+        use std::os::unix::fs::PermissionsExt;
+        let _g = TEST_STORE_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let _iso = crate::tailscale::staging_guard::StagingRootGuard::new("scan_unreadable");
+        let base = crate::tailscale::staging_root();
+        let d = base.join("taildrop-accept-unreadable");
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        std::fs::write(d.join("hidden.bin"), b"only copy").unwrap();
+        // Backdate so the sweep gate would consider it stale, then revoke
+        // read permission so enumeration fails.
+        let f = std::fs::File::open(&d).unwrap();
+        f.set_modified(std::time::SystemTime::now() - std::time::Duration::from_secs(3600))
+            .unwrap();
+        drop(f);
+        std::fs::set_permissions(&d, std::fs::Permissions::from_mode(0o000)).unwrap();
+
+        let dirs = scan_staging_dirs();
+        std::fs::set_permissions(&d, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        assert!(
+            d.exists(),
+            "unreadable staging dir must be preserved, never swept"
+        );
+        assert!(
+            d.join("hidden.bin").exists(),
+            "bytes inside the unreadable dir must be intact"
+        );
+        assert!(
+            !dirs.iter().any(|x| x.path == d.to_string_lossy()),
+            "unreadable contents are not describable as recovery files"
+        );
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// A1: a staging dir holding ONLY nested/non-regular entries is never
+    /// swept (remove_dir refuses non-empty dirs and the scan must not even
+    /// attempt it) and is not listed as an empty-file recovery group.
+    #[test]
+    fn scan_keeps_nested_only_staging_never_listed() {
+        let _g = TEST_STORE_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let _iso = crate::tailscale::staging_guard::StagingRootGuard::new("scan_nested_only");
+        let base = crate::tailscale::staging_root();
+        let d = base.join("taildrop-accept-nestedonly");
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(d.join("sub")).unwrap();
+        std::fs::write(d.join("sub/only-copy.bin"), b"bytes").unwrap();
+
+        let dirs = scan_staging_dirs();
+        assert!(
+            d.join("sub/only-copy.bin").exists(),
+            "nested-only staging must be preserved"
+        );
+        assert!(
+            !dirs.iter().any(|x| x.path == d.to_string_lossy()),
+            "nested-only contents are not listed as an empty-file group"
+        );
+        let _ = std::fs::remove_dir_all(&d);
     }
 }

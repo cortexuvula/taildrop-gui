@@ -138,6 +138,21 @@ jobs:
       - name: Frontend tests
         run: npm test
 
+      # The updater-manifest validator is a release-critical gate's own
+      # component: prove its synthetic cases (complete pass / missing
+      # platform / wrong version / missing artifact fail) on every release.
+      - name: Updater manifest validator tests
+        run: node --test .github/scripts/updater-manifest.test.mjs
+
+      - name: Install Playwright browsers
+        run: npx playwright install --with-deps chromium
+
+      # Same UI E2E gate as branch CI: the TAGGED revision must pass the
+      # real-browser suite (layout, focus trap, contrast, recovery flow),
+      # not just an earlier branch run.
+      - name: End-to-end tests
+        run: npm run test:e2e
+
       - name: Rust formatting check
         run: cargo fmt --all -- --check
         working-directory: src-tauri
@@ -213,10 +228,10 @@ jobs:
       # Updater manifest: tauri-action's includeUpdaterJson MERGES platform
       # entries into any latest.json already on the release (it downloads the
       # existing asset and seeds its platforms map before re-uploading), so
-      # the three platform jobs compose rather than last-writer-wins. The
-      # only residual race is two jobs uploading in the same few-second
-      # window — build durations differ by minutes, making that practically
-      # negligible.
+      # the three platform jobs compose rather than last-writer-wins. A
+      # residual same-instant upload race is still possible; the
+      # validate-manifest job re-fetches the composed manifest and fails the
+      # publish closed if any expected platform/artifact is missing.
       - name: Build and upload (macOS universal)
         if: matrix.os == 'macos-latest'
         uses: tauri-apps/tauri-action@84b9d35b5fc46c1e45415bdb6144030364f7ebc5 # v0
@@ -261,9 +276,70 @@ jobs:
           includeUpdaterJson: true
           args: --target x86_64-unknown-linux-gnu
 
+  # Fail-closed updater-manifest gate. The three parallel build jobs compose
+  # latest.json by download-merge-upload; a simultaneous-upload race can leave
+  # the LAST upload missing the other platforms. Build durations differ by
+  # minutes in practice, but correctness must not depend on that heuristic:
+  # before the release is published, re-fetch the composed manifest and prove
+  # it covers every platform this repo ships, points at the tagged version,
+  # and references artifacts that actually exist on the release.
+  validate-manifest:
+    name: Validate Updater Manifest
+    needs: [create-release, build-release]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
+
+      - name: Fetch composed latest.json and release asset list
+        uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8
+        env:
+          RELEASE_ID: ${{ needs.create-release.outputs.release_id }}
+        with:
+          script: |
+            const { writeFileSync } = require('node:fs');
+            const releaseId = Number(process.env.RELEASE_ID);
+            const assets = [];
+            for (let page = 1; ; page++) {
+              const res = await github.rest.repos.listReleaseAssets({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                release_id: releaseId,
+                per_page: 100,
+                page,
+              });
+              assets.push(...res.data);
+              if (res.data.length < 100) break;
+            }
+            writeFileSync('release-asset-names.json', JSON.stringify(assets.map((a) => a.name)));
+            const jsonAsset = assets.find((a) => a.name === 'latest.json');
+            if (!jsonAsset) {
+              core.setFailed('latest.json was not uploaded by the build jobs — updater manifest missing');
+              return;
+            }
+            const data = await github.rest.repos.getReleaseAsset({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              release_id: releaseId,
+              asset_id: jsonAsset.id,
+              headers: { accept: 'application/octet-stream' },
+            });
+            writeFileSync('latest.json', Buffer.from(data.data));
+
+      - name: Validate manifest (fail-closed)
+        run: |
+          node .github/scripts/validate-updater-manifest.mjs \
+            --manifest latest.json \
+            --version "${{ needs.create-release.outputs.version }}" \
+            --assets release-asset-names.json
+
   publish-release:
     name: Publish Release
-    needs: [create-release, build-release, quality-gate]
+    needs: [create-release, build-release, quality-gate, validate-manifest]
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     permissions:

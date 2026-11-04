@@ -60,6 +60,13 @@ export function useReceipts({ settings }: UseReceiptsOptions): UseReceiptsResult
   const [stagingOpErrors, setStagingOpErrors] = useState<StagingOpErrors>({});
   const mountedRef = useRef(true);
   const highestSeqRef = useRef(0);
+  // R3 (TAILDROP-TERMINAL-REWORK-1511): serial "generation" for replay
+  // completions. Two overlapping replays (mount + focus, or two rapid focus
+  // events) can resolve OUT OF ORDER: the OLDER replay may finish last and
+  // carry a retention window the NEWER replay already pruned. Every replay
+  // stamps itself with the newest generation at start; only the replay whose
+  // generation still matches at completion may touch receipts or the cursor.
+  const replayGenerationRef = useRef(0);
   // Synchronous source of truth for the one-op-per-path dispatch guard
   // (TD-UI-06). Maps a staging path to its in-flight promise so racing
   // callers — double-clicks, Review close/reopen, TransferHistory — JOIN the
@@ -73,9 +80,19 @@ export function useReceipts({ settings }: UseReceiptsOptions): UseReceiptsResult
 
   /** Page through the receipt store until hasMore is false. */
   const replayReceipts = useCallback(async () => {
+    // R3: stamp THIS replay as the newest request. Any older in-flight
+    // replay that completes later is discarded (see the completion guard) so
+    // it can neither resurrect pruned rows nor regress highestSeqRef.
+    const generation = ++replayGenerationRef.current;
     try {
       let sinceSeq = highestSeqRef.current;
       let allNew: TransferReceipt[] = [];
+      // A5: the reset indication accumulates across EVERY page of one replay
+      // — with a stale cursor, only the first page(s) report reset:true (the
+      // cursor lands inside retained history on later pages). Reconcile once
+      // pagination finishes, or previously-displayed expired receipts and
+      // their obsolete recovery actions outlive the prune.
+      let resetSeen = false;
       let hasMore = true;
 
       while (hasMore) {
@@ -84,22 +101,63 @@ export function useReceipts({ settings }: UseReceiptsOptions): UseReceiptsResult
           limit: RECEIPT_PAGE_LIMIT,
         });
         allNew = allNew.concat(page.receipts);
+        resetSeen = resetSeen || page.reset;
         hasMore = page.hasMore;
         sinceSeq = page.nextSinceSeq;
-        if (!hasMore && page.reset) {
-          // Cursor predates retained history — replace all receipts
-          setReceipts(allNew);
-          highestSeqRef.current = sinceSeq;
-          return;
-        }
       }
 
-      if (allNew.length > 0) {
-        setReceipts((prev) => mergeReceipts(prev, { receipts: allNew, nextSinceSeq: sinceSeq, hasMore: false, reset: false }));
-        highestSeqRef.current = sinceSeq;
+      if (!mountedRef.current) return; // never update state after unmount
+      if (generation !== replayGenerationRef.current) return; // superseded — never touch state or cursor
+      highestSeqRef.current = sinceSeq;
+      if (resetSeen) {
+        // Cursor predated retained history — replace all receipts, keeping
+        // only legitimately LIVE receipts that arrived while this replay was
+        // paging (seq beyond the final cursor) so a real-time event is never
+        // clobbered by the stale-async overwrite.
+        setReceipts((prev) => {
+          const live: TransferReceipt[] = prev.filter((r) => r.seq > sinceSeq);
+          return mergeReceipts(live, {
+            receipts: allNew,
+            nextSinceSeq: sinceSeq,
+            hasMore: false,
+            reset: true,
+          });
+        });
+      } else if (allNew.length > 0) {
+        setReceipts((prev) =>
+          mergeReceipts(prev, {
+            receipts: allNew,
+            nextSinceSeq: sinceSeq,
+            hasMore: false,
+            reset: false,
+          }),
+        );
       }
     } catch (e) {
       logger.warn("useReceipts", "replay failed:", toErrorMsg(e));
+    }
+  }, []);
+
+  /**
+   * A3: re-run the staging recovery scan and, when it finds preserved
+   * groups, REPLACE the current recovery list with the fresh result. Runs at
+   * mount and on refocus/visibility so a group preserved while minimized or
+   * during a failure appears without a restart; the backend also emits
+   * `staging-recovery-found` immediately on receive failures. An EMPTY scan
+   * result never clears the list: groups are removed only by their own
+   * recover/discard handlers, and a scan that started before a group was
+   * preserved must not wipe the just-published event payload (event/scan
+   * ordering race).
+   */
+  const refreshStagingScan = useCallback(async () => {
+    try {
+      const result = await invoke<StagingRecoveryFoundEvent>("staging_recovery_scan");
+      if (!mountedRef.current) return;
+      if (result.dirs.length > 0) {
+        setStagingDirs(result);
+      }
+    } catch (e) {
+      logger.debug("useReceipts", "staging scan failed:", toErrorMsg(e));
     }
   }, []);
 
@@ -137,23 +195,25 @@ export function useReceipts({ settings }: UseReceiptsOptions): UseReceiptsResult
     void replayReceipts();
 
     // Check for preserved staging dirs at startup
-    invoke<StagingRecoveryFoundEvent>("staging_recovery_scan")
-      .then((result) => {
-        if (mountedRef.current && result.dirs.length > 0) {
-          setStagingDirs(result);
-        }
-      })
-      .catch((e) => logger.debug("useReceipts", "staging scan failed:", toErrorMsg(e)));
+    void refreshStagingScan();
 
     const handleVisible = () => {
-      if (!document.hidden) void replayReceipts();
+      if (document.hidden) return;
+      // A3 fallback: reconcile preserved staging on refocus, not only at
+      // mount — a group preserved by a failed poll while minimized appears
+      // immediately when the window regains visibility.
+      void replayReceipts();
+      void refreshStagingScan();
     };
     document.addEventListener("visibilitychange", handleVisible);
 
     let unlistenFocus: (() => void) | undefined;
     getCurrentWindow()
       .onFocusChanged(({ payload: focused }: { payload: boolean }) => {
-        if (focused) void replayReceipts();
+        if (focused) {
+          void replayReceipts();
+          void refreshStagingScan();
+        }
       })
       .then((fn: () => void) => { unlistenFocus = fn; })
       .catch(() => {});
@@ -162,7 +222,7 @@ export function useReceipts({ settings }: UseReceiptsOptions): UseReceiptsResult
       document.removeEventListener("visibilitychange", handleVisible);
       unlistenFocus?.();
     };
-  }, [replayReceipts]);
+  }, [replayReceipts, refreshStagingScan]);
 
   const clearStagingOpError = useCallback((path: string) => {
     setStagingOpErrors((prev) => {

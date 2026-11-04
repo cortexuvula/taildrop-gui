@@ -308,31 +308,47 @@ fn accept_file_inner(
             e
         )
     })?;
+    // A3: while this accept owns the staging dir, recovery scans must never
+    // publish it as a recovery group. Dropped on every return path.
+    let _active = ActiveStagingGuard::new(&staging);
 
     let result = (|| -> Result<String, String> {
         if let Err(e) = run_get(&staging) {
-            // TD-01: the CLI may have drained (and removed from the daemon
+            // TD-01/A1: the CLI may have drained (and removed from the daemon
             // inbox) some files before exiting non-zero. Anything left in
             // staging is the only remaining copy — preserve it and tell the
-            // user where it is instead of deleting it.
-            let leftover = count_files_in_dir(&staging);
-            if leftover > 0 {
-                // TD-05: the CLI's stdout would tell us which files completed
-                // before the failure, but the injected-getter contract gives
-                // us Output only through run_get; files present in staging
-                // after a failed run are treated as UNVERIFIED (a file
-                // sitting there is not proof it downloaded completely —
-                // repo-audititor). They stay recoverable via the staging
-                // recovery path; no "saved" receipt is recorded for them.
-                return Err(format!(
-                    "tailscale file get failed: {}. {} file(s) it had already \
-                     downloaded are preserved for recovery in '{}'",
-                    e,
-                    leftover,
-                    staging.display()
-                ));
+            // user where it is instead of deleting it. An UNREADABLE staging
+            // dir is "contents unknown", never "empty".
+            match staging_is_known_empty(&staging) {
+                Ok(true) => return Err(e),
+                _ => {
+                    let leftover = count_files_in_dir(&staging);
+                    // TD-05: the CLI's stdout would tell us which files
+                    // completed before the failure, but the injected-getter
+                    // contract gives us Output only through run_get; files
+                    // present in staging after a failed run are treated as
+                    // UNVERIFIED (a file sitting there is not proof it
+                    // downloaded completely — repo-audititor). They stay
+                    // recoverable via the staging recovery path; no "saved"
+                    // receipt is recorded for them.
+                    return Err(if leftover > 0 {
+                        format!(
+                            "tailscale file get failed: {}. {} file(s) it had already \
+                             downloaded are preserved for recovery in '{}'",
+                            e,
+                            leftover,
+                            staging.display()
+                        )
+                    } else {
+                        format!(
+                            "tailscale file get failed: {}. File(s) it had already \
+                             downloaded are preserved for recovery in '{}'",
+                            e,
+                            staging.display()
+                        )
+                    });
+                }
             }
-            return Err(e);
         }
 
         // Move every file the CLI drained out of staging into the save dir.
@@ -446,25 +462,29 @@ fn accept_file_inner(
         ))
     })();
 
-    // TD-01: only remove staging once it provably holds nothing that needs
-    // recovery. On success every file was moved out; on failure the error
-    // message above already pointed the user at the staging path, which MUST
-    // survive unless it is empty. Removing it unconditionally destroyed the
-    // receiver's last copy when the CLI or a move failed partway.
-    if result.is_ok() || count_files_in_dir(&staging) == 0 {
-        let _ = std::fs::remove_dir_all(&staging);
-    } else {
-        log::warn!(
+    // TD-01/A1: only remove staging once it provably holds nothing that needs
+    // recovery — a successful enumeration yielding ZERO entries, removed with
+    // the NON-RECURSIVE primitive. On success every file was moved out; on
+    // failure the error message above already pointed the user at the staging
+    // path, which MUST survive unless it is provably empty. An enumeration
+    // failure is "contents unknown" (never empty), and any entry — including
+    // a file landing in the check/delete race or a nested/non-regular entry —
+    // makes `remove_dir` refuse, preserving every byte.
+    match staging_is_known_empty(&staging) {
+        Ok(true) => {
+            let _ = std::fs::remove_dir(&staging);
+        }
+        _ => log::warn!(
             "accept: preserving staging directory '{}' for manual recovery",
             staging.display()
-        );
+        ),
     }
     result
 }
 
 /// Number of regular files directly inside `dir` (0 if it doesn't exist).
-/// Used to decide whether a staging directory still holds files that must
-/// survive cleanup (TD-01).
+/// Used ONLY for recovery-message counts, never for cleanup decisions (A1:
+/// an unreadable/incomplete count must not establish emptiness).
 fn count_files_in_dir(dir: &std::path::Path) -> usize {
     std::fs::read_dir(dir)
         .map(|entries| {
@@ -474,6 +494,32 @@ fn count_files_in_dir(dir: &std::path::Path) -> usize {
                 .count()
         })
         .unwrap_or(0)
+}
+
+/// A1: strict emptiness probe for AUTOMATIC staging cleanup. `Ok(true)` is
+/// returned ONLY when the directory enumerated successfully AND contains no
+/// entries at all. Any read_dir or per-entry iteration failure is `Err`
+/// ("contents unknown") — never evidence of emptiness. Any entry — regular,
+/// hidden, nested, symlink — is `Ok(false)`, so callers preserve the
+/// directory, and the non-recursive `remove_dir` primitive refuses to delete
+/// whatever landed in the check/delete race.
+pub(crate) fn staging_is_known_empty(dir: &std::path::Path) -> Result<bool, String> {
+    match std::fs::read_dir(dir) {
+        Ok(mut entries) => {
+            // Any entry — regular, hidden, nested, symlink — means "not
+            // empty"; a per-entry read failure means "unknown". Only a
+            // successful enumeration yielding zero entries is Ok(true).
+            if let Some(entry) = entries.next() {
+                match entry {
+                    Ok(_) => Ok(false),
+                    Err(e) => Err(format!("cannot enumerate '{}': {}", dir.display(), e)),
+                }
+            } else {
+                Ok(true)
+            }
+        }
+        Err(e) => Err(format!("cannot read '{}': {}", dir.display(), e)),
+    }
 }
 
 // --- TD-05: pub wrappers for the receipt-recovery command layer ---
@@ -489,9 +535,62 @@ pub fn move_file_for_recovery(
     move_file_into_dir(src, dir, name)
 }
 
-/// Whether a staging directory holds no recoverable files.
-pub fn staging_is_empty(dir: &std::path::Path) -> bool {
-    count_files_in_dir(dir) == 0
+// --- A3: active-staging registry (no recovery exposure of live groups) ---
+//
+// `cli_receive_files` / `accept_file_inner` create a private staging dir and
+// clean it up at the end of the call. Between creation and cleanup the dir
+// is the ACTIVE WRITER's working area; recovery scans (startup, refocus,
+// post-failure reconciliation) must NOT publish it to the recovery UI — a
+// user could act on a group whose contents are still in motion. The
+// registry is process-lifetime state (a crash clears memory), so preserved
+// dirs from dead runs are never marked active.
+
+/// Paths currently owned by an in-flight accept/drain.
+static ACTIVE_STAGING: std::sync::LazyLock<
+    std::sync::Mutex<std::collections::HashSet<std::path::PathBuf>>,
+> = std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashSet::new()));
+
+/// Mark a staging dir as owned by an in-flight accept/drain (A3). Scans skip
+/// registered dirs; a crash clears the registry.
+pub(crate) fn register_active_staging(path: &std::path::Path) {
+    if let Ok(mut set) = ACTIVE_STAGING.lock() {
+        set.insert(path.to_path_buf());
+    }
+}
+
+/// Unmark a staging dir (Drop of [`ActiveStagingGuard`] covers every return
+/// path).
+fn unregister_active_staging(path: &std::path::Path) {
+    if let Ok(mut set) = ACTIVE_STAGING.lock() {
+        set.remove(path);
+    }
+}
+
+/// Whether a staging dir is currently owned by a live accept/drain — recovery
+/// scans must never offer it (A3: no active-group exposure).
+pub fn is_active_staging(path: &std::path::Path) -> bool {
+    ACTIVE_STAGING
+        .lock()
+        .map(|set| set.contains(path))
+        .unwrap_or(false)
+}
+
+/// Registers a staging dir as active for the lifetime of this guard (created
+/// immediately after the dir is created, dropped on every function return —
+/// success, failure and early errors alike).
+pub(crate) struct ActiveStagingGuard(std::path::PathBuf);
+
+impl ActiveStagingGuard {
+    pub(crate) fn new(path: &std::path::Path) -> Self {
+        register_active_staging(path);
+        Self(path.to_path_buf())
+    }
+}
+
+impl Drop for ActiveStagingGuard {
+    fn drop(&mut self) {
+        unregister_active_staging(&self.0);
+    }
 }
 
 /// Shared CLI auto-receive logic for macOS/Windows. Runs
@@ -550,24 +649,30 @@ fn cli_receive_files(
             e
         ));
     }
+    // A3: while this drain owns the staging dir, recovery scans must never
+    // publish it as a recovery group. Dropped on every return path.
+    let _active = ActiveStagingGuard::new(&staging);
     let drain_result =
         cli_drain_into_staging(save_dir, &staging, platform_label, |args| run_get(args));
     match drain_result {
         Ok(()) => {}
         Err(e) => {
-            // TD-01/TD-05: preserve any files the CLI managed to deliver
+            // TD-01/TD-05/A1: preserve any files the CLI managed to deliver
             // before failing — they are unverified but recoverable; the
             // staging recovery path owns them. No saved receipts for them.
-            if count_files_in_dir(&staging) > 0 {
-                log::warn!(
+            // ONLY a provably-empty staging dir is removed, via the
+            // non-recursive primitive; an unreadable one is contents-unknown.
+            match staging_is_known_empty(&staging) {
+                Ok(true) => {
+                    let _ = std::fs::remove_dir(&staging);
+                }
+                _ => log::warn!(
                     "{} CLI auto-receive failed with staged file(s) preserved \
                      for recovery in '{}': {}",
                     platform_label,
                     staging.display(),
                     e
-                );
-            } else {
-                let _ = std::fs::remove_dir_all(&staging);
+                ),
             }
             return Err(e);
         }
@@ -587,11 +692,23 @@ fn cli_receive_files(
             .map(|e| e.path())
             .collect(),
         Err(e) => {
-            let _ = std::fs::remove_dir_all(&staging);
-            return Err(format!(
-                "Cannot list staged files in '{}': {}",
+            // A1: an enumeration failure means contents are UNKNOWN — never
+            // delete. Preserve the directory (it may hold the only copy of
+            // drained bytes), surface the original error, and name the
+            // recovery location so the receive loop can publish it.
+            log::warn!(
+                "{} CLI auto-receive: cannot list staged files in '{}'; preserving \
+                 for recovery: {}",
+                platform_label,
                 staging.display(),
                 e
+            );
+            return Err(format!(
+                "Cannot list staged files in '{}': {}. Staged file(s) are preserved \
+                 for recovery in '{}'",
+                staging.display(),
+                e,
+                staging.display()
             ));
         }
     };
@@ -616,18 +733,22 @@ fn cli_receive_files(
             Err(e) => move_failures.push(format!("{} ({})", name, e)),
         }
     }
-    // TD-01 cleanup gate: remove staging only when provably empty.
-    if count_files_in_dir(&staging) == 0 {
-        let _ = std::fs::remove_dir_all(&staging);
-    } else {
-        log::warn!(
+    // TD-01/A1 cleanup gate: remove staging only when provably empty — a
+    // successful enumeration yielding ZERO entries, removed with the
+    // NON-RECURSIVE primitive so anything landing in the check/delete race
+    // (or a nested/non-regular entry) survives.
+    match staging_is_known_empty(&staging) {
+        Ok(true) => {
+            let _ = std::fs::remove_dir(&staging);
+        }
+        _ => log::warn!(
             "{} CLI auto-receive: preserving staging '{}' for recovery ({} \
              failed move(s): {})",
             platform_label,
             staging.display(),
             move_failures.len(),
             move_failures.join("; ")
-        );
+        ),
     }
     if !move_failures.is_empty() {
         // Files that moved are recorded above (partial success preserved);
@@ -3843,5 +3964,272 @@ mod tests {
             use std::os::windows::process::ExitStatusExt;
             std::process::ExitStatus::from_raw(1)
         }
+    }
+
+    // ============================================================
+    // A1 (TAILDROP-FIXES-20261104): fail-safe staging cleanup
+    // ============================================================
+    //
+    // Automatic cleanup of receive/recovery staging must NEVER treat an
+    // unreadable or incomplete enumeration as emptiness, must use an
+    // intrinsically non-recursive removal primitive (so a file appearing in
+    // the check/delete race survives), and must preserve non-regular
+    // entries / unknown contents instead of destroying them. The first three
+    // tests are the discriminating regressions: at baseline the remove_dir_all
+    // cleanup gates recursively deleted nested entries that the CLI/accept
+    // path had never moved.
+
+    /// A1 regression (auto-receive success path): after a clean drain, staging
+    /// may still hold a non-regular entry (a subdirectory) — the recursive
+    /// cleanup must not destroy it or anything inside it, while regular
+    /// files still land in the save dir.
+    #[test]
+    fn a1_cli_receive_preserves_nested_entries_on_success() {
+        let _iso = super::staging_guard::StagingRootGuard::new("a1_cli_nested");
+        let _g = crate::receipts::TEST_STORE_LOCK
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        crate::receipts::ReceiptStore::reset_for_tests();
+        let dir = temp_test_dir("a1_cli_nested");
+        let staging_seen = std::sync::Mutex::new(None::<std::path::PathBuf>);
+        let result = cli_receive_files(dir.to_str().unwrap(), "test", |args| {
+            let staging = std::path::Path::new(args.last().unwrap());
+            *staging_seen.lock().unwrap() = Some(staging.to_path_buf());
+            // The CLI delivers a regular file AND leaves a nested entry
+            // behind (conflict-rename artifacts / unusual inbox content).
+            std::fs::create_dir_all(staging.join("sub")).unwrap();
+            std::fs::write(staging.join("sub/nested.bin"), b"nested bytes").unwrap();
+            std::fs::write(staging.join("top.txt"), b"top").unwrap();
+            Ok(fake_cli_output("moved 1/2 files"))
+        });
+        assert!(
+            result.is_ok(),
+            "clean drain must succeed: {:?}",
+            result.err()
+        );
+        let text = String::from_utf8(result.unwrap()).unwrap();
+        assert!(
+            text.contains("top.txt"),
+            "regular file must be reported as landed: {}",
+            text
+        );
+        // The regular file landed; the nested bytes must NEVER be deleted.
+        assert_eq!(std::fs::read_to_string(dir.join("top.txt")).unwrap(), "top");
+        let staging = staging_seen
+            .into_inner()
+            .unwrap()
+            .expect("closure must have captured staging");
+        assert!(
+            staging.join("sub/nested.bin").exists(),
+            "nested bytes inside the preserved staging dir must survive cleanup: '{}'",
+            staging.join("sub/nested.bin").display()
+        );
+        assert_eq!(
+            std::fs::read(staging.join("sub/nested.bin")).unwrap(),
+            b"nested bytes",
+            "nested content must be intact"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(&staging);
+    }
+
+    /// A1 regression (manual accept success path): same property through
+    /// `accept_file_with_getter` — a success that leaves a nested entry in
+    /// staging must preserve it.
+    #[test]
+    fn a1_accept_preserves_nested_entries_on_success() {
+        let _iso = super::staging_guard::StagingRootGuard::new("a1_accept_nested");
+        let _g = crate::receipts::TEST_STORE_LOCK
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        crate::receipts::ReceiptStore::reset_for_tests();
+        let dir = temp_test_dir("a1_accept_nested");
+        let staging_seen = std::sync::Mutex::new(None::<std::path::PathBuf>);
+        let result = accept_file_with_getter("report.pdf", dir.to_str().unwrap(), |staging| {
+            *staging_seen.lock().unwrap() = Some(staging.to_path_buf());
+            std::fs::create_dir_all(staging.join("sub")).unwrap();
+            std::fs::write(staging.join("sub/nested.bin"), b"nested bytes").unwrap();
+            std::fs::write(staging.join("report.pdf"), b"report").unwrap();
+            Ok(())
+        });
+        let landed = result.expect("accept should succeed");
+        assert_eq!(std::path::PathBuf::from(&landed), dir.join("report.pdf"));
+        let staging = staging_seen
+            .into_inner()
+            .unwrap()
+            .expect("closure must have captured staging");
+        assert!(
+            staging.join("sub/nested.bin").exists(),
+            "nested bytes must survive the success-path cleanup: '{}'",
+            staging.join("sub/nested.bin").display()
+        );
+        assert_eq!(
+            std::fs::read(staging.join("sub/nested.bin")).unwrap(),
+            b"nested bytes"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(&staging);
+    }
+
+    /// A1 regression (accept failure path): a failed CLI run whose only
+    /// staging content is a nested entry must NOT be treated as empty and
+    /// recursively deleted — the bytes inside may be the only copy.
+    #[test]
+    fn a1_accept_preserves_nested_entries_when_cli_fails() {
+        let _iso = super::staging_guard::StagingRootGuard::new("a1_accept_nested_fail");
+        let _g = crate::receipts::TEST_STORE_LOCK
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        let dir = temp_test_dir("a1_accept_nested_fail");
+        let staging_seen = std::sync::Mutex::new(None::<std::path::PathBuf>);
+        accept_file_with_getter("photo.jpg", dir.to_str().unwrap(), |staging| {
+            *staging_seen.lock().unwrap() = Some(staging.to_path_buf());
+            std::fs::create_dir_all(staging.join("sub")).unwrap();
+            std::fs::write(staging.join("sub/nested.bin"), b"only copy").unwrap();
+            Err("exit status 1: partial batch failure".to_string())
+        })
+        .expect_err("CLI failure must surface");
+        let staging = staging_seen
+            .into_inner()
+            .unwrap()
+            .expect("closure must have captured staging");
+        assert!(
+            staging.join("sub/nested.bin").exists(),
+            "nested-only leftovers are not 'empty' — they must survive: '{}'",
+            staging.join("sub/nested.bin").display()
+        );
+        assert_eq!(
+            std::fs::read(staging.join("sub/nested.bin")).unwrap(),
+            b"only copy",
+            "the only copy of the bytes must be intact"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(&staging);
+    }
+
+    /// A1 regression: a post-drain LISTING failure must not establish
+    /// emptiness, must not attempt deletion, and the returned error must
+    /// point at the preserved recovery location (actionable recovery info
+    /// alongside the preserved bytes). Unix-only: makes read_dir fail via
+    /// file permissions.
+    #[cfg(unix)]
+    #[test]
+    fn a1_cli_receive_error_names_preservation_when_listing_fails() {
+        use std::os::unix::fs::PermissionsExt;
+        let _iso = super::staging_guard::StagingRootGuard::new("a1_listing_fail");
+        let _g = crate::receipts::TEST_STORE_LOCK
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        let dir = temp_test_dir("a1_listing_fail");
+        let staging_seen = std::sync::Mutex::new(None::<std::path::PathBuf>);
+        let result = cli_receive_files(dir.to_str().unwrap(), "test", |args| {
+            let staging = std::path::Path::new(args.last().unwrap());
+            *staging_seen.lock().unwrap() = Some(staging.to_path_buf());
+            // The CLI drained a file into staging successfully...
+            std::fs::write(staging.join("precious.bin"), b"precious bytes").unwrap();
+            // ...then the directory becomes unreadable before the move phase
+            // enumerates it (transient FS error / permission revocation).
+            std::fs::set_permissions(staging, std::fs::Permissions::from_mode(0o000)).unwrap();
+            Ok(fake_cli_output("moved 1/1 files"))
+        });
+        let err = result.expect_err("unreadable staging must surface as an error");
+        let staging = staging_seen
+            .into_inner()
+            .unwrap()
+            .expect("closure must have captured staging");
+        // Restore permissions so the bytes can be verified and cleaned up.
+        let _ = std::fs::set_permissions(&staging, std::fs::Permissions::from_mode(0o755));
+        assert!(
+            err.contains("preserved for recovery in"),
+            "the error must name the recovery location, got: {}",
+            err
+        );
+        assert!(
+            staging.join("precious.bin").exists(),
+            "staged bytes must survive the enumeration failure: '{}'",
+            staging.join("precious.bin").display()
+        );
+        assert_eq!(
+            std::fs::read(staging.join("precious.bin")).unwrap(),
+            b"precious bytes",
+            "staged content must be intact"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(&staging);
+    }
+
+    /// A1 (failed moves): a file whose move into the save dir fails stays in
+    /// staging, preserved, and the error names the recovery location. The
+    /// save dir is made incapable of accepting files by pointing it at a
+    /// regular file — portable on every target.
+    #[test]
+    fn a1_cli_receive_preserves_staged_file_when_move_fails() {
+        let _iso = super::staging_guard::StagingRootGuard::new("a1_move_fail");
+        let _g = crate::receipts::TEST_STORE_LOCK
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        let root = temp_test_dir("a1_move_fail");
+        let save_file = root.join("save");
+        std::fs::write(&save_file, b"i am a file, not a directory").unwrap();
+        let staging_seen = std::sync::Mutex::new(None::<std::path::PathBuf>);
+        let result = cli_receive_files(save_file.to_str().unwrap(), "test", |args| {
+            let staging = std::path::Path::new(args.last().unwrap());
+            *staging_seen.lock().unwrap() = Some(staging.to_path_buf());
+            std::fs::write(staging.join("precious.bin"), b"bytes").unwrap();
+            Ok(fake_cli_output("moved 1/1 files"))
+        });
+        let err = result.expect_err("failed move must surface");
+        assert!(
+            err.contains("preserved for recovery in"),
+            "failed moves must expose the recovery location: {}",
+            err
+        );
+        let staging = staging_seen
+            .into_inner()
+            .unwrap()
+            .expect("closure must have captured staging");
+        assert!(
+            staging.join("precious.bin").exists(),
+            "staged bytes must survive the failed move"
+        );
+        assert_eq!(
+            std::fs::read(staging.join("precious.bin")).unwrap(),
+            b"bytes"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+        let _ = std::fs::remove_dir_all(&staging);
+    }
+
+    /// A1 (genuinely empty cleanup): a staging dir that is REALLY empty after
+    /// a clean drain is removed — automatic cleanup still works when the
+    /// provable-emptiness bar is met.
+    #[test]
+    fn a1_cli_receive_removes_genuinely_empty_staging() {
+        let _iso = super::staging_guard::StagingRootGuard::new("a1_genuinely_empty");
+        let _g = crate::receipts::TEST_STORE_LOCK
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        let dir = temp_test_dir("a1_genuinely_empty");
+        let staging_seen = std::sync::Mutex::new(None::<std::path::PathBuf>);
+        let result = cli_receive_files(dir.to_str().unwrap(), "test", |args| {
+            let staging = std::path::Path::new(args.last().unwrap());
+            *staging_seen.lock().unwrap() = Some(staging.to_path_buf());
+            Ok(fake_cli_output("moved 0/0 files"))
+        });
+        assert!(
+            result.is_ok(),
+            "empty drain must succeed: {:?}",
+            result.err()
+        );
+        let staging = staging_seen
+            .into_inner()
+            .unwrap()
+            .expect("closure must have captured staging");
+        assert!(
+            !staging.exists(),
+            "provably-empty staging must be cleaned up: '{}'",
+            staging.display()
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

@@ -33,6 +33,19 @@ function harness(page: Page) {
 async function openHarness(page: Page, params = '') {
   await page.goto(`${HARNESS_URL}${params}`);
   await expect(page.locator('.settings-panel')).toBeVisible();
+  // R4 (TAILDROP-TERMINAL-REWORK-1511): the panel becomes visible the moment
+  // the component COMMITS, but useModal's passive effects — the document
+  // keydown listener (Escape-to-close), the inert walk, initial focus and
+  // the focus trap — flush AFTER paint, as a separate scheduled task. A
+  // keyboard press issued right after visibility can therefore land before
+  // the keydown listener exists, silently dropping the Escape (the
+  // pre-existing workload-sensitive flake this file intermittently hit under
+  // the full parallel suite, on baseline AND candidate bytes). The effect
+  // declaring the keydown listener runs BEFORE the effect that moves focus
+  // to the Close button, so awaiting the Close button's initial focus proves
+  // key handling, inertness and the trap are all installed: no interaction
+  // (keyboard or click) can precede them.
+  await expect(page.getByRole('button', { name: 'Close settings' })).toBeFocused();
 }
 
 function isSwitchChecked(switchBtn: import('@playwright/test').Locator) {

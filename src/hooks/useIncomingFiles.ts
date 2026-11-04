@@ -70,6 +70,18 @@ export function useIncomingFiles(options: UseIncomingFilesOptions): UseIncomingF
   const [pollError, setPollError] = useState<string | null>(null);
 
   const autoAcceptingRef = useRef(false);
+  // A4: latest busy-time incoming snapshot — a changed event that arrives
+  // while an auto-accept is running is retained here and reconciled after
+  // the active accept settles, instead of being silently dropped. The
+  // retention is REPLACED by every newer snapshot — including an EMPTY one,
+  // which cancels stale queued input (a file that vanished from the inbox
+  // must never be accepted later).
+  const pendingAutoAcceptRef = useRef<IncomingFile[] | null>(null);
+  // A4 (rework): the FULL set of file names the ACTIVE auto-accept batch
+  // owns — every file it will accept (or has accepted), regardless of where
+  // its sequential accept loop currently is. A snapshot overlapping the
+  // batch is deduped against this set so a file can never be accepted twice.
+  const batchFilesRef = useRef(new Set<string>());
   const seenIncomingRef = useRef(new Set<string>());
   const recentlyAcceptedRef = useRef(new Map<string, number>());
   // Mirror of incomingFiles for synchronous lookup from the bridge.
@@ -92,6 +104,11 @@ export function useIncomingFiles(options: UseIncomingFilesOptions): UseIncomingF
     async (files: IncomingFile[]) => {
       if (autoAcceptingRef.current) return;
       autoAcceptingRef.current = true;
+      // A4 (rework): the whole batch is recorded up front so overlapping
+      // snapshots can never re-accept a file this batch owns — including
+      // files whose sequential accept hasn't STARTED yet (the loop marks
+      // recently-accepted per-iteration, just before each await).
+      batchFilesRef.current = new Set(files.map((f) => f.name));
       try {
         const records: TransferRecord[] = [];
         const errorRecords: TransferRecord[] = [];
@@ -132,6 +149,25 @@ export function useIncomingFiles(options: UseIncomingFilesOptions): UseIncomingF
         }
       } finally {
         autoAcceptingRef.current = false;
+        // A4: reconcile the latest busy-time snapshot. A changed event that
+        // arrived while this accept ran must not be lost — either accept it
+        // now (auto-accept still on, consumed exactly once — no retry loop
+        // for failures) or leave it visibly pending (auto-accept was turned
+        // off mid-flight). An EMPTY latest snapshot (pending === []) means
+        // the queued input already vanished: nothing is accepted. Never
+        // update state after unmount.
+        batchFilesRef.current.clear();
+        if (!mountedRef.current) return;
+        const pending = pendingAutoAcceptRef.current;
+        if (pending && pending.length > 0) {
+          pendingAutoAcceptRef.current = null;
+          if (settingsRef.current.autoAccept) {
+            setIncomingFiles([]);
+            void autoAcceptFiles(pending);
+          }
+          // auto-accept off: the busy snapshot was already shown by
+          // applyIncoming — leave it visibly pending; no accept is started.
+        }
       }
     },
     [appendTransfers, settingsRef],
@@ -139,18 +175,21 @@ export function useIncomingFiles(options: UseIncomingFilesOptions): UseIncomingF
 
   // Send desktop notification for new incoming files.
   const notifyIncoming = useCallback(async (files: IncomingFile[]) => {
-    if (!settingsRef.current.notifications) return;
+    // A6: reconcile seen keys against EVERY snapshot, including EMPTY ones —
+    // a file that disappeared must re-arm its notification key, so a later
+    // DISTINCT transfer with the same name/size notifies again. An unchanged
+    // snapshot keeps its keys (duplicate suppression preserved).
     const fileKey = (f: IncomingFile) => `${f.name}:${f.size}`;
+    const currentKeys = new Set(files.map(fileKey));
+    for (const key of seenIncomingRef.current) {
+      if (!currentKeys.has(key)) seenIncomingRef.current.delete(key);
+    }
+    if (!settingsRef.current.notifications) return;
     const newFiles = files.filter((f) => !seenIncomingRef.current.has(fileKey(f)));
     if (newFiles.length === 0) return;
 
     for (const f of newFiles) {
       seenIncomingRef.current.add(fileKey(f));
-    }
-    // Prune keys that are no longer in the incoming list
-    const currentKeys = new Set(files.map(fileKey));
-    for (const key of seenIncomingRef.current) {
-      if (!currentKeys.has(key)) seenIncomingRef.current.delete(key);
     }
 
     try {
@@ -201,14 +240,29 @@ export function useIncomingFiles(options: UseIncomingFilesOptions): UseIncomingF
       }
       // Only notify for non-auto-accept mode — when auto-accept is on,
       // files are handled silently and a desktop notification would be
-      // noisy for something the user doesn't need to act on.
-      if (filtered.length > 0 && !settingsRef.current.autoAccept) {
+      // noisy for something the user doesn't need to act on. Called for
+      // EVERY snapshot (A6) so empty snapshots re-arm notification keys.
+      if (!settingsRef.current.autoAccept) {
         void notifyIncoming(filtered);
       }
-      if (settingsRef.current.autoAccept && filtered.length > 0) {
+      // A4: when BUSY, EVERY snapshot — including an EMPTY one and ones
+      // arriving while auto-accept is TEMPORARILY off — refreshes the
+      // busy-time queue. The latest snapshot REPLACES any previously queued
+      // input, so a file that vanished from the inbox is never accepted
+      // later (toggling auto-accept off then on must not resurrect it);
+      // files the ACTIVE batch already owns are excluded so an overlapping
+      // changed snapshot can never accept them twice.
+      if (autoAcceptingRef.current) {
+        const queued = filtered.filter((f) => !batchFilesRef.current.has(f.name));
+        pendingAutoAcceptRef.current = queued;
+        setIncomingFiles(queued);
+      } else if (settingsRef.current.autoAccept && filtered.length > 0) {
         setIncomingFiles([]);
         void autoAcceptFiles(filtered);
       } else {
+        // Not busy: an empty snapshot (or auto-accept off) simply renders
+        // the current list; empty snapshots also re-arm notification keys
+        // via notifyIncoming.
         setIncomingFiles(filtered);
       }
     },
