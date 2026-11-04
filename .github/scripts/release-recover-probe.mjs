@@ -261,7 +261,131 @@ const pin = JSON.parse(readFileSync(PIN_PATH, "utf8"));
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
-//  Probe 5: Phase9 YAML script — uses filename not display name
+//  Probe 4b: Phase4 YAML script — uses release ID not tag name
+// ═══════════════════════════════════════════════════════════════════════════════
+
+{
+  console.log("\n📦 Probe 4b: Phase4 YAML script — pinned by-ID release lookup...");
+  try {
+    const scriptBody = extractPhaseScript(yaml, "Phase 4 — Verify draft release 434359119");
+
+    // Must use getRelease (not getReleaseByTag) with release_id.
+    if (!scriptBody.includes(".repos.getRelease({")) {
+      fail("Phase4 script does not use getRelease — must use by-ID lookup");
+    }
+    if (scriptBody.includes("getReleaseByTag")) {
+      fail("Phase4 script still uses getReleaseByTag — must use getRelease with release_id");
+    }
+    if (!scriptBody.includes("release_id: pin.releaseId")) {
+      fail("Phase4 script does not pass release_id — must use pinned release ID");
+    }
+
+    // Execute Phase4 with mocked GitHub API that succeeds on getRelease and
+    // fails on getReleaseByTag (to verify the script uses the correct route).
+    process.env.GITHUB_WORKSPACE = REPO_ROOT;
+    process.env.PIN = JSON.stringify(pin);
+    const AsyncFunction = Object.getPrototypeOf(async function(){}).constructor;
+    let failures4b = [];
+    let outputs4b = {};
+    const core4b = {
+      setFailed: m => { failures4b.push(m); },
+      info: () => {},
+      setOutput: (k, v) => { outputs4b[k] = v; },
+    };
+    const context4b = {
+      repo: { owner: "cortexuvula", repo: "taildrop-gui" },
+    };
+    const callLog4b = [];
+    const github4b = {
+      rest: {
+        repos: {
+          getRelease: async ({ release_id }) => {
+            callLog4b.push({ method: "getRelease", release_id });
+            // Must be called with exact pinned ID
+            if (release_id !== pin.releaseId) {
+              return { data: null };
+            }
+            return {
+              data: {
+                id: pin.releaseId,
+                tag_name: pin.tagName,
+                draft: true,
+                published_at: null,
+                prerelease: false,
+                target_commitish: "master",
+              },
+            };
+          },
+          getReleaseByTag: async () => {
+            callLog4b.push({ method: "getReleaseByTag" });
+            throw new Error("Not Found — draft releases are not returned by by-tag endpoint");
+          },
+        },
+      },
+    };
+
+    await new AsyncFunction("github", "context", "core", scriptBody)(
+      github4b, context4b, core4b
+    );
+
+    // Verify getRelease was called (not getReleaseByTag).
+    const getReleaseCalls = callLog4b.filter(c => c.method === "getRelease");
+    if (getReleaseCalls.length === 0) {
+      fail("Phase4 probe: getRelease was never called");
+    }
+    if (callLog4b.some(c => c.method === "getReleaseByTag")) {
+      fail("Phase4 probe: getReleaseByTag was called (should use getRelease)");
+    }
+
+    // Verify success: no failures, output has release_id.
+    if (failures4b.length > 0) {
+      fail(`Phase4 probe (by-ID success): unexpected failures: ${JSON.stringify(failures4b)}`);
+    }
+    if (!outputs4b.release_id) {
+      fail("Phase4 probe: no release_id output set");
+    }
+    console.log("   ✓ Phase4 uses getRelease with pinned release_id (by-ID, not by-tag)");
+    console.log("   ✓ Phase4 by-ID success returns correct draft release");
+
+    // Test 4c: Phase4 with WRONG release ID must fail.
+    process.env.PIN = JSON.stringify({ ...pin, releaseId: 999999999 });
+    let failures4c = [];
+    const core4c = {
+      setFailed: m => { failures4c.push(m); },
+      info: () => {},
+      setOutput: () => {},
+    };
+    const context4c = {
+      repo: { owner: "cortexuvula", repo: "taildrop-gui" },
+    };
+    const github4c = {
+      rest: {
+        repos: {
+          getRelease: async () => {
+            throw new Error("Not Found");
+          },
+        },
+      },
+    };
+
+    await new AsyncFunction("github", "context", "core", scriptBody)(
+      github4c, context4c, core4c
+    );
+
+    if (failures4c.length === 0) {
+      fail("Phase4 probe (wrong ID): should have failed but didn't");
+    } else {
+      console.log("   ✓ Phase4 with wrong release ID correctly fails");
+    }
+
+    // Reset PIN for subsequent probes.
+    process.env.PIN = JSON.stringify(pin);
+  } catch (e) {
+    fail(`Phase4 probe failed: ${e.message}`);
+  }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
 // ═══════════════════════════════════════════════════════════════════════════════
 
 {
@@ -275,6 +399,17 @@ const pin = JSON.parse(readFileSync(PIN_PATH, "utf8"));
     }
     if (scriptBody.includes("context.workflow")) {
       fail("Phase9 script still references context.workflow — must use filename");
+    }
+
+    // Verify the script uses getRelease (by-ID) not getReleaseByTag for the release fetch.
+    if (!scriptBody.includes(".repos.getRelease({") && !scriptBody.includes("getRelease({")) {
+      fail("Phase9 script does not use getRelease — must use by-ID release lookup");
+    }
+    if (scriptBody.includes("getReleaseByTag")) {
+      fail("Phase9 script still uses getReleaseByTag — must use getRelease with release_id");
+    }
+    if (!scriptBody.includes("release_id: pin.releaseId")) {
+      fail("Phase9 script does not pass release_id — must use pinned release ID");
     }
 
     // Execute with mocked GitHub API
@@ -302,8 +437,8 @@ const pin = JSON.parse(readFileSync(PIN_PATH, "utf8"));
           },
         },
         repos: {
-          getReleaseByTag: async () => ({
-            data: { id: pin.releaseId, tag_name: pin.tagName, draft: true, published_at: null, prerelease: false, target_commitish: "master" },
+          getRelease: async ({ release_id }) => ({
+            data: { id: release_id, tag_name: pin.tagName, draft: true, published_at: null, prerelease: false, target_commitish: "master" },
           }),
           listReleaseAssets: async () => ({ data: [] }),
         },

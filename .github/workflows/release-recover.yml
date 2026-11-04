@@ -271,14 +271,16 @@ jobs:
 
             let release;
             try {
-              const { data } = await github.rest.repos.getReleaseByTag({
+              // Use pinned release ID (not by-tag) because draft releases
+              // are not returned by the by-tag endpoint.
+              const { data } = await github.rest.repos.getRelease({
                 owner: context.repo.owner,
                 repo: context.repo.repo,
-                tag: pin.tagName,
+                release_id: pin.releaseId,
               });
               release = data;
             } catch (e) {
-              core.setFailed(`Failed to get release by tag "${pin.tagName}": ${e.message}`);
+              core.setFailed(`Failed to get release by ID ${pin.releaseId}: ${e.message}`);
               return;
             }
 
@@ -522,10 +524,12 @@ jobs:
             // Re-fetch release.
             let release;
             try {
-              const { data } = await github.rest.repos.getReleaseByTag({
+              // Use pinned release ID (not by-tag) because draft releases
+              // are not returned by the by-tag endpoint.
+              const { data } = await github.rest.repos.getRelease({
                 owner: context.repo.owner,
                 repo: context.repo.repo,
-                tag: pin.tagName,
+                release_id: pin.releaseId,
               });
               release = data;
             } catch (e) {
