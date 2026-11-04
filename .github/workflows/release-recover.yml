@@ -360,6 +360,9 @@ jobs:
         env:
           ASSETS_JSON: ${{ steps.assets.outputs.asset_list }}
           PIN: ${{ steps.identity.outputs.pin }}
+          # gh needs GH_TOKEN explicitly mapped for shell steps; github-script
+          # steps get the token injected via octokit, but raw bash does not inherit it.
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           mkdir -p /tmp/recovery-assets
@@ -455,13 +458,18 @@ jobs:
 
             // List active workflow runs IN THIS WORKFLOW, excluding this run.
             // Use workflow-specific endpoint to narrow scope.
+            //
+            // GitHub's listWorkflowRuns API accepts the workflow FILENAME
+            // (e.g. "release-recover.yml") or numeric ID, NOT the display
+            // name.  The display name "Recover Existing v0.15.1" returns
+            // HTTP 404.
             const thisRunId = context.runId;
             let activeRuns = [];
             try {
-              // Fetch runs for this specific workflow (recover-v0.15.1) and
+              // Fetch runs for this specific workflow (release-recover.yml) and
               // for the parent release workflow (release.yml) — both could
               // interfere with publication.
-              for (const workflowName of [context.workflow, 'release.yml']) {
+              for (const workflowName of ['release-recover.yml', 'release.yml']) {
                 for (let page = 1; ; page++) {
                   const { data } = await github.rest.actions.listWorkflowRuns({
                     owner: context.repo.owner,
@@ -560,10 +568,11 @@ jobs:
             }
 
             // Re-check competitors.
+            // Use workflow filenames (not display names) as workflow_id.
             const thisRunId = context.runId;
             let activeRuns = [];
             try {
-              for (const wf of [context.workflow, 'release.yml']) {
+              for (const wf of ['release-recover.yml', 'release.yml']) {
                 for (let page = 1; ; page++) {
                   const { data } = await github.rest.actions.listWorkflowRuns({
                     owner: context.repo.owner,
@@ -647,7 +656,7 @@ jobs:
           RELEASE_ID: ${{ steps.publish.outputs.release_id }}
         with:
           script: |
-            const { checkDraftRelease, checkAssetSet, checkTagBinding } = await import(
+            const { checkPublishedRelease, checkAssetSet, checkTagBinding } = await import(
               `${process.env.GITHUB_WORKSPACE}/.github/scripts/release-recover-core.mjs`
             );
             const pin = JSON.parse(process.env.PIN);
@@ -705,25 +714,17 @@ jobs:
 
             const errors = [];
 
-            // Verify published (not draft) using core module.
-            const pubErrors = checkDraftRelease({
+            // Verify PUBLISHED (not draft) using checkPublishedRelease.
+            // This positively requires draft===false, non-null published_at,
+            // expected id/tag/prerelease/URL — no string-message suppression.
+            errors.push(...checkPublishedRelease({
               id: release.id,
               tagName: release.tag_name,
               draft: release.draft,
               publishedAt: release.published_at,
               prerelease: release.prerelease,
-              targetCommitish: release.target_commitish,
-            }, pin);
-            // For readback, we expect draft=false and published_at non-null.
-            // Accept draft=false as the expected published state.
-            for (const err of pubErrors) {
-              if (err.includes('not a draft') || err.includes('already published')) {
-                // These are expected — the release IS published now.
-                // But check the specific published_at value.
-                continue;
-              }
-              errors.push(`Readback: ${err}`);
-            }
+              html_url: release.html_url,
+            }, pin));
 
             // Verify tag unchanged using core module.
             const tagErrors = checkTagBinding({
@@ -747,7 +748,7 @@ jobs:
             core.info(
               `✓ Published: ${release.html_url}`
             );
-            core.info(`✓ Release ${release.id}: published_at=${release.published_at}, draft=false`);
+            core.info(`✓ Release ${release.id}: published_at=${release.published_at}, draft=${release.draft}`);
             core.info(`✓ All ${assets.length} assets unchanged (id, name, size, digest verified)`);
             core.info(`✓ Tag ${pin.tagName} unchanged (object ${pin.tagObjectSha} → commit ${pin.peeledSha})`);
             core.info(`✓ Original run #${pin.originalRunId} remains failed (expected)`);

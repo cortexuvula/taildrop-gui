@@ -19,6 +19,7 @@ import {
   checkTagBinding,
   checkOriginalRun,
   checkDraftRelease,
+  checkPublishedRelease,
   checkAssetSet,
   checkAssetBytes,
   checkCompetitor,
@@ -234,6 +235,56 @@ test("checkDraftRelease: already published fails", () => {
 test("checkDraftRelease: non-draft fails", () => {
   const e = checkDraftRelease({ ...GOOD_RELEASE, draft: false }, PIN);
   assert.ok(e.some((m) => m.includes("not a draft")));
+});
+
+// ─── Published release (readback) ─────────────────────────────────────────
+
+const GOOD_PUBLISHED = {
+  id: 434359119,
+  tagName: "v0.15.1",
+  draft: false,
+  publishedAt: "2026-11-04T20:00:00Z",
+  prerelease: false,
+  html_url: "https://github.com/cortexuvula/taildrop-gui/releases/tag/v0.15.1",
+};
+
+test("checkPublishedRelease: good published passes", () => {
+  assert.deepEqual(checkPublishedRelease(GOOD_PUBLISHED, PIN), []);
+});
+
+test("checkPublishedRelease: still draft fails", () => {
+  const e = checkPublishedRelease({ ...GOOD_PUBLISHED, draft: true, publishedAt: null }, PIN);
+  assert.ok(e.some((m) => m.includes("still a draft")), "expected 'still a draft' error");
+});
+
+test("checkPublishedRelease: null publishedAt fails", () => {
+  const e = checkPublishedRelease({ ...GOOD_PUBLISHED, publishedAt: null }, PIN);
+  assert.ok(e.some((m) => m.includes("no published_at")), "expected 'no published_at' error");
+});
+
+test("checkPublishedRelease: empty publishedAt fails", () => {
+  const e = checkPublishedRelease({ ...GOOD_PUBLISHED, publishedAt: "" }, PIN);
+  assert.ok(e.some((m) => m.includes("no published_at")), "expected 'no published_at' error");
+});
+
+test("checkPublishedRelease: wrong id fails", () => {
+  const e = checkPublishedRelease({ ...GOOD_PUBLISHED, id: 1 }, PIN);
+  assert.ok(e.some((m) => m.includes("Release id")));
+});
+
+test("checkPublishedRelease: wrong tag fails", () => {
+  const e = checkPublishedRelease({ ...GOOD_PUBLISHED, tagName: "v0.15.0" }, PIN);
+  assert.ok(e.some((m) => m.includes("Release tag")));
+});
+
+test("checkPublishedRelease: prerelease fails", () => {
+  const e = checkPublishedRelease({ ...GOOD_PUBLISHED, prerelease: true }, PIN);
+  assert.ok(e.some((m) => m.includes("prerelease")));
+});
+
+test("checkPublishedRelease: empty html_url fails", () => {
+  const e = checkPublishedRelease({ ...GOOD_PUBLISHED, html_url: "" }, PIN);
+  assert.ok(e.some((m) => m.includes("html_url")));
 });
 
 test("checkDraftRelease: prerelease fails", () => {

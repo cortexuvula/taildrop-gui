@@ -131,6 +131,38 @@ export function checkDraftRelease(rel, pin) {
   return e;
 }
 
+/**
+ * Verify that a release is in published (non-draft) state with all
+ * expected identity bindings intact.  This is the POST-publication
+ * readback check — the opposite of checkDraftRelease.
+ *
+ * @param {object} rel
+ * @param {number}              rel.id
+ * @param {string}              rel.tagName
+ * @param {boolean}             rel.draft       MUST be false
+ * @param {string|null}         rel.publishedAt MUST be a non-empty string
+ * @param {boolean}             rel.prerelease  MUST be false
+ * @param {string}              rel.html_url    MUST be a non-empty string
+ * @param {object} pin
+ * @returns {string[]}
+ */
+export function checkPublishedRelease(rel, pin) {
+  const e = [];
+  if (rel.id !== pin.releaseId)
+    e.push(`Readback: Release id ${rel.id} !== ${pin.releaseId}`);
+  if (rel.tagName !== pin.tagName)
+    e.push(`Readback: Release tag "${rel.tagName}" !== "${pin.tagName}"`);
+  if (rel.draft !== false)
+    e.push(`Readback: Release is still a draft (draft=${JSON.stringify(rel.draft)}) — expected published`);
+  if (!rel.publishedAt || typeof rel.publishedAt !== 'string' || rel.publishedAt.trim() === '')
+    e.push(`Readback: Release has no published_at (got "${rel.publishedAt}")`);
+  if (rel.prerelease !== false)
+    e.push(`Readback: Release prerelease=${JSON.stringify(rel.prerelease)}, expected false`);
+  if (!rel.html_url || typeof rel.html_url !== 'string' || rel.html_url.trim() === '')
+    e.push(`Readback: Release has no html_url`);
+  return e;
+}
+
 // ─── Asset set integrity ─────────────────────────────────────────────────────
 
 /**

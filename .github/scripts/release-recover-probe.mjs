@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 /**
  * release-recover-probe.mjs — Independent offline probe that exercises the
- * EXACT shell/script entrypoints the production YAML uses, with mocked
+ * EXACT YAML script entrypoints the production workflow uses, with mocked
  * external boundaries (no real GitHub API calls).
  *
  * This is NOT a test file.  It is a direct-execution probe that validates
@@ -13,13 +13,14 @@
  *
  * Exit 0 = all probes pass.  Exit 1 = at least one probe failed.
  *
- * TAILDROP-0151-PRESERVE-R-1569, R1 correction.
+ * TAILDROP-0151-RECOVERY-WIRING-R2-1588 — exercises literal YAML entrypoints
+ * for Phase6 (shell + GH_TOKEN), Phase8/9 (filename-based workflow_id), and
+ * Phase11 (checkPublishedRelease with draft===false requirement).
  */
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, writeFileSync, readFileSync, rmSync, existsSync } from "node:fs";
+import { readFileSync, existsSync } from "node:fs";
 import { join } from "node:path";
-import { tmpdir } from "node:os";
 import { spawnSync } from "node:child_process";
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -28,6 +29,7 @@ import { spawnSync } from "node:child_process";
 
 const REPO_ROOT = process.cwd();
 const PIN_PATH = join(REPO_ROOT, ".github/scripts/release-recover-v0151.json");
+const YAML_PATH = join(REPO_ROOT, ".github/workflows/release-recover.yml");
 
 /** Safe exit: print all errors then process.exit(1). */
 let globalFailures = [];
@@ -36,8 +38,78 @@ function fail(msg) {
 }
 
 /**
+ * Extract a named Phase script block from the YAML.
+ * Returns the indentation-stripped script body.
+ */
+function extractPhaseScript(yaml, phaseName) {
+  const lines = yaml.split("\n");
+  const phaseIdx = lines.findIndex(l => l.includes(`- name: ${phaseName}`));
+  if (phaseIdx < 0) throw new Error(`Phase "${phaseName}" not found in YAML`);
+
+  // Find the "script: |" line after this phase
+  const scriptIdx = lines.findIndex((l, i) => i > phaseIdx && l.trim() === "script: |");
+  if (scriptIdx < 0) throw new Error(`script: | not found for phase "${phaseName}"`);
+
+  // Read subsequent lines indented at 12 spaces (the YAML script block indent)
+  const body = [];
+  for (let i = scriptIdx + 1; i < lines.length; i++) {
+    const line = lines[i];
+    if (!line.trim()) continue; // skip blank lines
+    if (!line.startsWith("            ")) break; // script indent is 12 spaces
+    body.push(line.slice(12)); // strip the 12-space indent
+  }
+  if (body.length === 0) throw new Error(`Empty script body for phase "${phaseName}"`);
+  return body.join("\n");
+}
+
+/**
+ * Extract the env block from a named Phase in the YAML.
+ * Returns a map of env var names to values.
+ */
+function extractPhaseEnv(yaml, phaseName) {
+  const lines = yaml.split("\n");
+  const phaseIdx = lines.findIndex(l => l.includes(`- name: ${phaseName}`));
+  if (phaseIdx < 0) throw new Error(`Phase "${phaseName}" not found in YAML`);
+
+  const env = {};
+  let inEnv = false;
+  for (let i = phaseIdx + 1; i < lines.length; i++) {
+    const line = lines[i];
+    const trimmed = line.trim();
+    if (trimmed === "env:") { inEnv = true; continue; }
+    if (inEnv) {
+      if (!trimmed || trimmed.startsWith("-") || trimmed.startsWith("uses:") || trimmed.startsWith("with:") || trimmed.startsWith("shell:") || trimmed.startsWith("run:")) break;
+      const match = trimmed.match(/^(\w+):\s*(.+)$/);
+      if (match) env[match[1]] = match[2];
+    }
+  }
+  return env;
+}
+
+/**
+ * Extract the shell run block from a named Phase in the YAML.
+ */
+function extractPhaseRunBlock(yaml, phaseName) {
+  const lines = yaml.split("\n");
+  const phaseIdx = lines.findIndex(l => l.includes(`- name: ${phaseName}`));
+  if (phaseIdx < 0) throw new Error(`Phase "${phaseName}" not found in YAML`);
+
+  // Find "run: |" after this phase
+  const runIdx = lines.findIndex((l, i) => i > phaseIdx && l.trim() === "run: |");
+  if (runIdx < 0) throw new Error(`run: | not found for shell phase "${phaseName}"`);
+
+  const body = [];
+  for (let i = runIdx + 1; i < lines.length; i++) {
+    const line = lines[i];
+    if (!line.trim()) continue;
+    if (!line.startsWith("          ")) break; // run block indent is 10 spaces
+    body.push(line.slice(10)); // strip indent
+  }
+  return body.join("\n");
+}
+
+/**
  * Run a node script (the actual production entrypoint) with env and args.
- * Returns { stdout, stderr, exitCode }.
  */
 function runScript(scriptRelPath, args = [], env = {}) {
   const result = spawnSync(process.execPath, [scriptRelPath, ...args], {
@@ -54,6 +126,13 @@ function runScript(scriptRelPath, args = [], env = {}) {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
+//  Shared mock data
+// ═══════════════════════════════════════════════════════════════════════════════
+
+const yaml = readFileSync(YAML_PATH, "utf8");
+const pin = JSON.parse(readFileSync(PIN_PATH, "utf8"));
+
+// ═══════════════════════════════════════════════════════════════════════════════
 //  Probe 1: Core module imports cleanly and exports expected functions
 // ═══════════════════════════════════════════════════════════════════════════════
 
@@ -63,53 +142,47 @@ function runScript(scriptRelPath, args = [], env = {}) {
     const core = await import("./release-recover-core.mjs");
     const expectedExports = [
       "checkIdentity", "checkTagBinding", "checkOriginalRun",
-      "checkDraftRelease", "checkAssetSet", "checkAssetBytes",
-      "checkValidator", "checkCompetitor", "checkFinalRecheck",
-      "evaluateRecovery",
+      "checkDraftRelease", "checkPublishedRelease", "checkAssetSet",
+      "checkAssetBytes", "checkValidator", "checkCompetitor",
+      "checkFinalRecheck", "evaluateRecovery",
     ];
     for (const name of expectedExports) {
       if (typeof core[name] !== "function") {
         fail(`Core missing expected export: ${name}`);
       }
     }
-    console.log("   ✓ All expected exports present");
+    console.log("   ✓ All expected exports present (including checkPublishedRelease)");
   } catch (e) {
     fail(`Core module import failed: ${e.message}`);
   }
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
-//  Probe 2: Pin JSON is valid JSON with required fields
+//  Probe 2: Pin JSON is valid with required fields
 // ═══════════════════════════════════════════════════════════════════════════════
 
 {
   console.log("\n📦 Probe 2: Pin JSON validation...");
-  try {
-    const raw = readFileSync(PIN_PATH, "utf8");
-    const pin = JSON.parse(raw);
-    const required = [
-      "repo", "ref", "confirmation", "releaseId", "tagName",
-      "tagObjectSha", "peeledSha", "originalRunId", "originalRunAttempt",
-      "originalHeadSha", "requiredOriginalJobs", "assets", "requiredPlatforms",
-    ];
-    for (const key of required) {
-      if (pin[key] === undefined) fail(`Pin missing required field: ${key}`);
-    }
-    if (!Array.isArray(pin.assets) || pin.assets.length !== 14) {
-      fail(`Expected 14 assets, got ${pin.assets?.length}`);
-    }
-    for (const a of pin.assets) {
-      if (!a.id || !a.name || !a.size || !a.digest) {
-        fail(`Asset ${JSON.stringify(a.name)} missing required fields`);
-      }
-      if (!a.digest.startsWith("sha256:")) {
-        fail(`Asset ${a.name} digest doesn't start with sha256:`);
-      }
-    }
-    console.log("   ✓ Pin has all required fields and 14 valid assets");
-  } catch (e) {
-    fail(`Pin validation error: ${e.message}`);
+  const required = [
+    "repo", "ref", "confirmation", "releaseId", "tagName",
+    "tagObjectSha", "peeledSha", "originalRunId", "originalRunAttempt",
+    "originalHeadSha", "requiredOriginalJobs", "assets", "requiredPlatforms",
+  ];
+  for (const key of required) {
+    if (pin[key] === undefined) fail(`Pin missing required field: ${key}`);
   }
+  if (!Array.isArray(pin.assets) || pin.assets.length !== 14) {
+    fail(`Expected 14 assets, got ${pin.assets?.length}`);
+  }
+  for (const a of pin.assets) {
+    if (!a.id || !a.name || !a.size || !a.digest) {
+      fail(`Asset ${JSON.stringify(a.name)} missing required fields`);
+    }
+    if (!a.digest.startsWith("sha256:")) {
+      fail(`Asset ${a.name} digest doesn't start with sha256:`);
+    }
+  }
+  console.log("   ✓ Pin has all required fields and 14 valid assets");
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -119,16 +192,11 @@ function runScript(scriptRelPath, args = [], env = {}) {
 {
   console.log("\n📦 Probe 3: Unchanged validator syntax check...");
   const result = runScript(".github/scripts/validate-updater-manifest.mjs", ["--help"]);
-  // The validator doesn't have --help; it will exit 2 on missing args.
-  // We just check it doesn't crash with a module error.
   if (result.exitCode !== 2) {
-    // Exit 2 is the usage() error — that's expected for missing args.
-    // Any other exit (including 1) means syntax/fatal error.
-    if (result.exitCode === 0) {
-      // Unexpected success — might be an older version; accept it.
-      console.log("   ⚠ Validator accepted --help (exit 0)");
-    } else {
+    if (result.exitCode !== 0) {
       fail(`Validator syntax check failed (exit ${result.exitCode}): ${result.stderr}`);
+    } else {
+      console.log("   ⚠ Validator accepted --help (exit 0)");
     }
   } else {
     console.log("   ✓ Validator syntax OK (exit 2 as expected for missing args)");
@@ -136,211 +204,309 @@ function runScript(scriptRelPath, args = [], env = {}) {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
-//  Probe 4: Production YAML syntax validation (via `act` or yamllint)
+//  Probe 4: Phase8 YAML script — uses filename not display name
 // ═══════════════════════════════════════════════════════════════════════════════
 
 {
-  console.log("\n📦 Probe 4: YAML syntax check...");
-  const result = spawnSync("node", ["-e", `
-    try {
-      const { readFileSync } = require('fs');
-      // We can't truly parse YAML without a dep, but at least
-      // check the file loads and has expected structure markers.
-      const yml = readFileSync(
-        '${join(REPO_ROOT, ".github/workflows/release-recover.yml").replace(/\\/g, "/")}',
-        "utf8"
-      );
-      if (!yml.includes("name: Recover Existing v0.15.1"))
-        throw new Error("Missing workflow name");
-      if (!yml.includes("workflow_dispatch"))
-        throw new Error("Missing workflow_dispatch trigger");
-      if (!yml.includes("publish-existing-v0.15.1-434359119"))
-        throw new Error("Missing confirmation string");
-      if (!yml.includes("updateRelease"))
-        throw new Error("Missing publish step");
-      console.log("✓ YAML structure markers verified");
-    } catch (e) {
-      console.error("FAIL: " + e.message);
-      process.exit(1);
+  console.log("\n📦 Probe 4: Phase8 YAML script — filename-based workflow_id...");
+  try {
+    const scriptBody = extractPhaseScript(yaml, "Phase 8 — Check for active competing runs (fail-closed)");
+
+    // Verify the script uses 'release-recover.yml' (not context.workflow)
+    if (!scriptBody.includes("'release-recover.yml'")) {
+      fail("Phase8 script does not contain 'release-recover.yml' — still using display name?");
     }
-  `], {
-    encoding: "utf8",
-    timeout: 10_000,
-  });
-  if (result.status !== 0) {
-    fail(`YAML probe failed: ${result.stderr || result.stdout}`);
-  } else {
-    console.log(`   ✓ ${result.stdout.trim()}`);
-  }
-}
+    if (scriptBody.includes("context.workflow")) {
+      fail("Phase8 script still references context.workflow — must use filename");
+    }
 
-// ═══════════════════════════════════════════════════════════════════════════════
-//  Probe 5: Core module functions produce correct output for key scenarios
-// ═══════════════════════════════════════════════════════════════════════════════
-
-{
-  console.log("\n📦 Probe 5: Core module functional probes...");
-  const core = await import("./release-recover-core.mjs");
-  const pin = JSON.parse(readFileSync(PIN_PATH, "utf8"));
-
-  // 5a: Identity with matching remoteSha passes
-  const idOk = core.checkIdentity({
-    repo: pin.repo, event: "workflow_dispatch", ref: pin.ref,
-    confirmation: pin.confirmation,
-    execSha: pin.peeledSha, remoteSha: pin.peeledSha,
-  }, pin);
-  if (idOk.length !== 0) fail(`5a: Expected identity OK, got: ${JSON.stringify(idOk)}`);
-  else console.log("   ✓ 5a: Identity with matching remoteSha passes");
-
-  // 5b: Identity with wrong remoteSha fails
-  const idBad = core.checkIdentity({
-    repo: pin.repo, event: "workflow_dispatch", ref: pin.ref,
-    confirmation: pin.confirmation,
-    execSha: pin.peeledSha, remoteSha: "0000000000000000000000000000000000000000",
-  }, pin);
-  if (idBad.length === 0) fail("5b: Expected identity failure for wrong remoteSha");
-  else console.log("   ✓ 5b: Wrong remoteSha correctly rejected");
-
-  // 5c: Asset bytes with empty download fails
-  const bytesEmpty = core.checkAssetBytes([], pin);
-  if (bytesEmpty.length === 0) fail("5c: Expected empty-download rejection");
-  else console.log("   ✓ 5c: Empty download correctly rejected");
-
-  // 5d: Competitor with queued status fails
-  const compQueued = core.checkCompetitor(
-    [{ id: 1, name: "test", status: "queued" }], {}
-  );
-  if (compQueued.length === 0) fail("5d: Expected queued competitor rejection");
-  else console.log("   ✓ 5d: Queued competitor correctly rejected");
-
-  // 5e: Competitor with completed status passes
-  const compDone = core.checkCompetitor(
-    [{ id: 1, name: "test", status: "completed" }], {}
-  );
-  if (compDone.length !== 0) fail("5e: Expected completed competitor to pass");
-  else console.log("   ✓ 5e: Completed competitor passes");
-
-  // 5f: Final recheck catches tag object drift
-  const drift = core.checkFinalRecheck({
-    release: { id: pin.releaseId, tagName: pin.tagName, draft: true, publishedAt: null, prerelease: false, targetCommitish: "master" },
-    assets: pin.assets.map(a => ({ id: a.id, name: a.name, size: a.size, digest: a.digest })),
-    tag: { tagObjectSha: "0000000000000000000000000000000000000000", peeledSha: pin.peeledSha },
-  }, pin);
-  if (drift.length === 0) fail("5f: Expected final recheck to catch tag drift");
-  else console.log("   ✓ 5f: Final recheck catches tag object drift");
-
-  console.log("   ✓ All core function probes passed");
-}
-
-// ═══════════════════════════════════════════════════════════════════════════════
-//  Probe 6: Happy-path composed evaluateRecovery with proper mock bytes
-// ═══════════════════════════════════════════════════════════════════════════════
-
-{
-  console.log("\n📦 Probe 6: Composed evaluateRecovery happy path...");
-  const core = await import("./release-recover-core.mjs");
-  const pin = JSON.parse(readFileSync(PIN_PATH, "utf8"));
-  const { createHash } = await import("node:crypto");
-
-  const mockPin = JSON.parse(JSON.stringify(pin));
-  const mockDownloaded = mockPin.assets.map((exp) => {
-    const bytes = Buffer.from(exp.name);
-    return { id: exp.id, bytes };
-  });
-  for (let i = 0; i < mockPin.assets.length; i++) {
-    mockPin.assets[i].size = mockDownloaded[i].bytes.length;
-    const hash = createHash("sha256");
-    hash.update(mockDownloaded[i].bytes);
-    mockPin.assets[i].digest = "sha256:" + hash.digest("hex");
-  }
-
-  let calls = 0;
-  const result = await core.evaluateRecovery({
-    identity: { repo: pin.repo, event: "workflow_dispatch", ref: pin.ref, confirmation: pin.confirmation, execSha: pin.peeledSha, remoteSha: pin.peeledSha },
-    tag: { tagObjectSha: pin.tagObjectSha, peeledSha: pin.peeledSha },
-    originalRun: { runId: pin.originalRunId, attempt: pin.originalRunAttempt, headSha: pin.originalHeadSha, jobs: pin.requiredOriginalJobs.map(n => ({ name: n, conclusion: "success" })) },
-    release: { id: pin.releaseId, tagName: pin.tagName, draft: true, publishedAt: null, prerelease: false, targetCommitish: "master" },
-    assets: mockPin.assets.map(a => ({ id: a.id, name: a.name, size: a.size, digest: a.digest })),
-    downloaded: mockDownloaded,
-    manifest: { version: "0.15.1", pub_date: "2026-11-04T19:43:00Z", platforms: { "darwin-aarch64": { signature: "x", url: "https://example.com/TailDrop_universal.app.tar.gz" }, "darwin-x86_64": { signature: "x", url: "https://example.com/TailDrop_universal.app.tar.gz" }, "windows-x86_64": { signature: "x", url: "https://example.com/TailDrop_0.15.1_x64-setup.exe" }, "linux-x86_64": { signature: "x", url: "https://example.com/TailDrop_0.15.1_amd64.AppImage" } } },
-    assetNames: mockPin.assets.map(a => a.name),
-    activeRuns: [],
-    finalRecheck: {
-      release: { id: pin.releaseId, tagName: pin.tagName, draft: true, publishedAt: null, prerelease: false, targetCommitish: "master" },
-      assets: mockPin.assets.map(a => ({ id: a.id, name: a.name, size: a.size, digest: a.digest })),
-      tag: { tagObjectSha: pin.tagObjectSha, peeledSha: pin.peeledSha },
-    },
-  }, mockPin, () => { calls++; });
-
-  if (!result.ok) {
-    fail(`Happy path failed: ${JSON.stringify(result.errors)}`);
-  }
-  if (calls !== 1) {
-    fail(`Expected 1 publish call, got ${calls}`);
-  }
-  console.log("   ✓ evaluateRecovery happy path: published=true, 1 publish call");
-}
-
-// ═══════════════════════════════════════════════════════════════════════════════
-//  Probe 7: Refusal paths — zero publish calls
-// ═══════════════════════════════════════════════════════════════════════════════
-
-{
-  console.log("\n📦 Probe 7: Refusal paths — zero publish calls...");
-  const core = await import("./release-recover-core.mjs");
-  const pin = JSON.parse(readFileSync(PIN_PATH, "utf8"));
-
-  // Base happy state for all refusal scenarios
-  function baseReality() {
-    return {
-      identity: { repo: pin.repo, event: "workflow_dispatch", ref: pin.ref, confirmation: pin.confirmation, execSha: pin.peeledSha, remoteSha: pin.peeledSha },
-      tag: { tagObjectSha: pin.tagObjectSha, peeledSha: pin.peeledSha },
-      originalRun: { runId: pin.originalRunId, attempt: pin.originalRunAttempt, headSha: pin.originalHeadSha, jobs: pin.requiredOriginalJobs.map(n => ({ name: n, conclusion: "success" })) },
-      release: { id: pin.releaseId, tagName: pin.tagName, draft: true, publishedAt: null, prerelease: false, targetCommitish: "master" },
-      assets: pin.assets.map(a => ({ id: a.id, name: a.name, size: a.size, digest: a.digest })),
-      downloaded: [],
-      manifest: { version: "0.15.1", pub_date: "2026-11-04T19:43:00Z", platforms: { "darwin-aarch64": { signature: "x", url: "https://example.com/TailDrop_universal.app.tar.gz" }, "darwin-x86_64": { signature: "x", url: "https://example.com/TailDrop_universal.app.tar.gz" }, "windows-x86_64": { signature: "x", url: "https://example.com/TailDrop_0.15.1_x64-setup.exe" }, "linux-x86_64": { signature: "x", url: "https://example.com/TailDrop_0.15.1_amd64.AppImage" } } },
-      assetNames: pin.assets.map(a => a.name),
-      activeRuns: [],
-      finalRecheck: {
-        release: { id: pin.releaseId, tagName: pin.tagName, draft: true, publishedAt: null, prerelease: false, targetCommitish: "master" },
-        assets: pin.assets.map(a => ({ id: a.id, name: a.name, size: a.size, digest: a.digest })),
-        tag: { tagObjectSha: pin.tagObjectSha, peeledSha: pin.peeledSha },
+    // Execute the script with mocked GitHub API that validates filename-based workflow_id
+    process.env.GITHUB_WORKSPACE = REPO_ROOT;
+    const AsyncFunction = Object.getPrototypeOf(async function(){}).constructor;
+    const core = { setFailed: m => { throw new Error(m); }, info: () => {}, setOutput: () => {} };
+    const context = { repo: { owner: "cortexuvula", repo: "taildrop-gui" }, runId: 999 };
+    const callLog = [];
+    const github = {
+      rest: {
+        actions: {
+          listWorkflowRuns: async params => {
+            callLog.push(params);
+            // Must receive 'release-recover.yml' or 'release.yml' as workflow_id
+            if (!["release-recover.yml", "release.yml"].includes(params.workflow_id)) {
+              throw new Error(`404: display name "${params.workflow_id}" is not a valid workflow_id`);
+            }
+            return { data: { workflow_runs: [] } };
+          },
+        },
       },
     };
-  }
 
-  const scenarios = [
-    { name: "wrong repo", patch: (r) => { r.identity.repo = "other/repo"; } },
-    { name: "wrong event", patch: (r) => { r.identity.event = "push"; } },
-    { name: "wrong ref", patch: (r) => { r.identity.ref = "refs/heads/develop"; } },
-    { name: "wrong confirmation", patch: (r) => { r.identity.confirmation = "wrong"; } },
-    { name: "wrong tag object SHA", patch: (r) => { r.tag.tagObjectSha = "00".repeat(20); } },
-    { name: "wrong peeled SHA", patch: (r) => { r.tag.peeledSha = "00".repeat(20); } },
-    { name: "missing asset", patch: (r) => { r.assets = r.assets.slice(1); } },
-    { name: "extra asset", patch: (r) => { r.assets = [...r.assets, { id: 999, name: "x", size: 1, digest: "sha256:00" }]; } },
-    { name: "active competitor", patch: (r) => { r.activeRuns = [{ id: 100, name: "release", status: "in_progress" }]; } },
-    { name: "release already published", patch: (r) => { r.release.draft = false; r.release.publishedAt = "2026-11-04T20:00:00Z"; } },
-    { name: "empty download (no bytes)", patch: (r) => { r.downloaded = []; } },
-    { name: "remote SHA mismatch", patch: (r) => { r.identity.remoteSha = "00".repeat(20); } },
-    { name: "final recheck detects drift", patch: (r) => { r.finalRecheck.release.draft = false; r.finalRecheck.release.publishedAt = "2026-11-04T20:00:00Z"; } },
-  ];
+    await new AsyncFunction("github", "context", "core", scriptBody)(github, context, core);
 
-  let passed = 0;
-  for (const { name, patch } of scenarios) {
-    const reality = baseReality();
-    patch(reality);
-    let calls = 0;
-    const result = await core.evaluateRecovery(reality, pin, () => { calls++; });
-    if (calls !== 0) {
-      fail(`Probe 7: "${name}" — expected 0 publish calls, got ${calls}`);
-    } else if (result.published) {
-      fail(`Probe 7: "${name}" — expected published=false, got true`);
-    } else {
-      passed++;
+    // Verify we called both filenames
+    const calledIds = callLog.map(c => c.workflow_id);
+    if (calledIds.includes("Recover Existing v0.15.1")) {
+      fail("Phase8 called listWorkflowRuns with display name — should be filename");
     }
+    if (!calledIds.includes("release-recover.yml")) {
+      fail("Phase8 did not call listWorkflowRuns for release-recover.yml");
+    }
+    if (!calledIds.includes("release.yml")) {
+      fail("Phase8 did not call listWorkflowRuns for release.yml");
+    }
+    console.log("   ✓ Phase8 uses release-recover.yml + release.yml (filename-based, no display name)");
+  } catch (e) {
+    fail(`Phase8 probe failed: ${e.message}`);
   }
-  console.log(`   ✓ ${passed}/${scenarios.length} refusal paths — zero publish calls`);
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+//  Probe 5: Phase9 YAML script — uses filename not display name
+// ═══════════════════════════════════════════════════════════════════════════════
+
+{
+  console.log("\n📦 Probe 5: Phase9 YAML script — filename-based workflow_id...");
+  try {
+    const scriptBody = extractPhaseScript(yaml, "Phase 9 — Final recheck before publish (identity, tag, assets, competitors)");
+
+    // Verify the script uses 'release-recover.yml' (not context.workflow)
+    if (!scriptBody.includes("'release-recover.yml'")) {
+      fail("Phase9 script does not contain 'release-recover.yml' — still using display name?");
+    }
+    if (scriptBody.includes("context.workflow")) {
+      fail("Phase9 script still references context.workflow — must use filename");
+    }
+
+    // Execute with mocked GitHub API
+    process.env.GITHUB_WORKSPACE = REPO_ROOT;
+    process.env.PIN = JSON.stringify(pin);
+    process.env.RELEASE_ID = String(pin.releaseId);
+    const AsyncFunction = Object.getPrototypeOf(async function(){}).constructor;
+    const failures = [];
+    const core = {
+      setFailed: m => { failures.push(m); },
+      info: () => {},
+      setOutput: () => {},
+    };
+    const context = { repo: { owner: "cortexuvula", repo: "taildrop-gui" }, runId: 999 };
+    const callLog = [];
+    const github = {
+      rest: {
+        actions: {
+          listWorkflowRuns: async params => {
+            callLog.push(params);
+            if (!["release-recover.yml", "release.yml"].includes(params.workflow_id)) {
+              throw new Error(`404: display name "${params.workflow_id}" is not a valid workflow_id`);
+            }
+            return { data: { workflow_runs: [] } };
+          },
+        },
+        repos: {
+          getReleaseByTag: async () => ({
+            data: { id: pin.releaseId, tag_name: pin.tagName, draft: true, published_at: null, prerelease: false, target_commitish: "master" },
+          }),
+          listReleaseAssets: async () => ({ data: [] }),
+        },
+        git: {
+          getRef: async () => ({ data: { object: { sha: pin.tagObjectSha } } }),
+          getTag: async () => ({ data: { object: { sha: pin.peeledSha } } }),
+        },
+      },
+    };
+
+    // Wrap in try/catch because setFailed throws
+    try {
+      await new AsyncFunction("github", "context", "core", scriptBody)(github, context, core);
+    } catch (_) {
+      // Expected: the recheck will fail because release is still draft and has no published_at
+      // That's OK — we're checking the workflow_id, not the full validation
+    }
+
+    const calledIds = callLog.map(c => c.workflow_id);
+    if (calledIds.includes("Recover Existing v0.15.1")) {
+      fail("Phase9 called listWorkflowRuns with display name — should be filename");
+    }
+    if (!calledIds.includes("release-recover.yml")) {
+      fail("Phase9 did not call listWorkflowRuns for release-recover.yml");
+    }
+    if (!calledIds.includes("release.yml")) {
+      fail("Phase9 did not call listWorkflowRuns for release.yml");
+    }
+    console.log("   ✓ Phase9 uses release-recover.yml + release.yml (filename-based, no display name)");
+  } catch (e) {
+    fail(`Phase9 probe failed: ${e.message}`);
+  }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+//  Probe 6: Phase6 YAML env block includes GH_TOKEN
+// ═══════════════════════════════════════════════════════════════════════════════
+
+{
+  console.log("\n📦 Probe 6: Phase6 shell GH_TOKEN env mapping...");
+  try {
+    const env = extractPhaseEnv(yaml, "Phase 6 — Download and hash 14 asset bytes");
+
+    // Must have GH_TOKEN mapped
+    if (!env.GH_TOKEN) {
+      fail("Phase6 shell step missing GH_TOKEN env mapping");
+    }
+    if (!env.GH_TOKEN.includes("github.token")) {
+      fail(`Phase6 GH_TOKEN value "${env.GH_TOKEN}" does not reference github.token`);
+    }
+    if (!env.PIN) {
+      fail("Phase6 missing PIN env");
+    }
+    if (!env.ASSETS_JSON) {
+      fail("Phase6 missing ASSETS_JSON env");
+    }
+
+    // Verify the run block uses gh api
+    const runBlock = extractPhaseRunBlock(yaml, "Phase 6 — Download and hash 14 asset bytes");
+    if (!runBlock.includes("gh api")) {
+      fail("Phase6 run block does not contain gh api");
+    }
+
+    console.log("   ✓ Phase6 shell step has GH_TOKEN, PIN, ASSETS_JSON env vars");
+    console.log("   ✓ Phase6 run block uses gh api for downloads");
+  } catch (e) {
+    fail(`Phase6 probe failed: ${e.message}`);
+  }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+//  Probe 7: Phase11 YAML script — uses checkPublishedRelease (not broken suppression)
+// ═══════════════════════════════════════════════════════════════════════════════
+
+{
+  console.log("\n📦 Probe 7: Phase11 readback — uses checkPublishedRelease...");
+  try {
+    const scriptBody = extractPhaseScript(yaml, "Phase 11 — Readback published release and verify (full identity, assets, tag)");
+
+    // Must use checkPublishedRelease, not checkDraftRelease
+    if (!scriptBody.includes("checkPublishedRelease")) {
+      fail("Phase11 script does not import/use checkPublishedRelease");
+    }
+    if (scriptBody.includes("checkDraftRelease")) {
+      fail("Phase11 script still references checkDraftRelease — should use checkPublishedRelease");
+    }
+    if (scriptBody.includes("includes('not a draft')")) {
+      fail("Phase11 script still has draft-error suppression hack");
+    }
+    if (scriptBody.includes("includes('already published')")) {
+      fail("Phase11 script still has already-published suppression hack");
+    }
+
+    // Verify the function call shape — expects html_url, not targetCommitish
+    if (!scriptBody.includes("html_url")) {
+      fail("Phase11 script does not pass html_url to checkPublishedRelease");
+    }
+
+    // Test 7a: Execute Phase11 with PUBLISHED state (should pass)
+    process.env.GITHUB_WORKSPACE = REPO_ROOT;
+    process.env.PIN = JSON.stringify(pin);
+    process.env.RELEASE_ID = String(pin.releaseId);
+    const AsyncFunction = Object.getPrototypeOf(async function(){}).constructor;
+    const publishedRelease = {
+      id: pin.releaseId,
+      tag_name: pin.tagName,
+      draft: false,
+      published_at: "2026-11-04T20:00:00Z",
+      prerelease: false,
+      html_url: "https://github.com/cortexuvula/taildrop-gui/releases/tag/v0.15.1",
+    };
+
+    let failures7a = [];
+    let infos = [];
+    const core7a = {
+      setFailed: m => { failures7a.push(m); },
+      info: m => { infos.push(m); },
+      setOutput: (k, v) => {},
+    };
+    const context7a = {
+      repo: { owner: "cortexuvula", repo: "taildrop-gui" },
+      runId: 999,
+    };
+    const github7a = {
+      rest: {
+        repos: {
+          getRelease: async () => ({ data: publishedRelease }),
+          listReleaseAssets: async () => ({
+            data: pin.assets.map(a => ({ id: a.id, name: a.name, size: a.size, digest: a.digest, url: "", browser_download_url: "" })),
+          }),
+        },
+        git: {
+          getRef: async () => ({ data: { object: { sha: pin.tagObjectSha } } }),
+          getTag: async () => ({ data: { object: { sha: pin.peeledSha } } }),
+        },
+      },
+    };
+
+    await new AsyncFunction("github", "context", "core", scriptBody)(
+      github7a, context7a,
+      { setFailed: m => { failures7a.push(m); }, info: m => { infos.push(m); }, setOutput: (k, v) => {} }
+    );
+
+    if (failures7a.length > 0) {
+      fail(`Phase11 PROBE 7a (published state): unexpected failures: ${JSON.stringify(failures7a)}`);
+    } else {
+      console.log("   ✓ 7a: Phase11 accepts properly published release (draft=false, published_at set)");
+    }
+
+    // Test 7b: Execute Phase11 with STILL-DRAFT state (must FAIL)
+    const draftRelease = {
+      id: pin.releaseId,
+      tag_name: pin.tagName,
+      draft: true,
+      published_at: null,
+      prerelease: false,
+      html_url: null,
+    };
+
+    let failures7b = [];
+    const core7b = {
+      setFailed: m => { failures7b.push(m); },
+      info: () => {},
+      setOutput: (k, v) => {},
+    };
+    const context7b = {
+      repo: { owner: "cortexuvula", repo: "taildrop-gui" },
+      runId: 999,
+    };
+    const github7b = {
+      rest: {
+        repos: {
+          getRelease: async () => ({ data: draftRelease }),
+          listReleaseAssets: async () => ({
+            data: pin.assets.map(a => ({ id: a.id, name: a.name, size: a.size, digest: a.digest, url: "", browser_download_url: "" })),
+          }),
+        },
+        git: {
+          getRef: async () => ({ data: { object: { sha: pin.tagObjectSha } } }),
+          getTag: async () => ({ data: { object: { sha: pin.peeledSha } } }),
+        },
+      },
+    };
+
+    await new AsyncFunction("github", "context", "core", scriptBody)(
+      github7b, context7b,
+      { setFailed: m => { failures7b.push(m); }, info: () => {}, setOutput: (k, v) => {} }
+    );
+
+    if (failures7b.length === 0) {
+      fail("Phase11 PROBE 7b: still-draft release was ACCEPTED — must refuse draft publications");
+    } else {
+      const hasDraftMsg = failures7b.some(m => m.includes("still a draft") || m.includes("no published_at"));
+      if (!hasDraftMsg) {
+        fail(`Phase11 PROBE 7b: failures don't mention draft: ${JSON.stringify(failures7b)}`);
+      }
+      console.log(`   ✓ 7b: Phase11 correctly refuses still-draft release (${failures7b.length} error(s))`);
+    }
+
+    console.log("   ✓ Phase11 correctly uses checkPublishedRelease with no error suppression");
+  } catch (e) {
+    fail(`Phase11 probe failed: ${e.message}`);
+  }
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
