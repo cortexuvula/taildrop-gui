@@ -5,6 +5,7 @@ import { TransferHistory } from "./components/TransferHistory";
 import { Settings } from "./components/Settings";
 import { DebugPanel } from "./components/DebugPanel";
 import { StagingRecovery } from "./components/StagingRecovery";
+import { TwoPaneView } from "./components/browser/TwoPaneView";
 import { ToastProvider, useToast } from "./components/ToastProvider";
 import { useTailscale, type SendErrorInfoLike } from "./hooks/useTailscale";
 import { useUpdater } from "./hooks/useUpdater";
@@ -108,6 +109,10 @@ function App() {
     ? visiblePeers.find((p) => p.id === selectedPeerId) ?? null
     : null;
 
+  // Browser M1: "Send / Files" view switch in the main column. The Files
+  // view owns its own hooks (hosts/panes/transfers) and mounts lazily.
+  const [view, setView] = useState<"send" | "files">("send");
+
   const [showSettings, setShowSettings] = useState(false);
   const [showDebug, setShowDebug] = useState(false);
   // Review dialog for staging recovery — opened explicitly, never auto-opened.
@@ -131,6 +136,42 @@ function App() {
       />
 
       <div className={`main ${incomingFiles.length > 0 || transfers.some(t => t.status === "sending" || t.status === "receiving" || t.status === "pending") ? "has-activity" : ""}`}>
+        <div className="view-switch" role="tablist" aria-label="Main view">
+          <button
+            type="button"
+            role="tab"
+            aria-selected={view === "send"}
+            className={view === "send" ? "active" : ""}
+            onClick={() => setView("send")}
+          >
+            Send
+          </button>
+          <button
+            type="button"
+            role="tab"
+            aria-selected={view === "files"}
+            className={view === "files" ? "active" : ""}
+            onClick={() => setView("files")}
+          >
+            Files
+          </button>
+        </div>
+
+        {view === "files" ? (
+          <TwoPaneView
+            seedPeer={
+              selectedPeer
+                ? {
+                    id: selectedPeer.id,
+                    hostname: selectedPeer.hostname,
+                    dns_name: selectedPeer.dns_name,
+                    ips: selectedPeer.ips,
+                  }
+                : null
+            }
+          />
+        ) : (
+        <>
         {pollError && (
           <div className="poll-error-banner" role="alert">
             <span className="poll-error-icon" aria-hidden="true">⚠</span>
@@ -209,6 +250,8 @@ function App() {
             onClearError={clearStagingOpError}
             onClose={() => setReviewOpen(false)}
           />
+        )}
+        </>
         )}
       </div>
 
