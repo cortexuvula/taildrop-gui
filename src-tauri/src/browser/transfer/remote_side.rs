@@ -449,6 +449,16 @@ impl<'a> RemoteSink<'a> {
                             errors.push((staged_rel.to_string(), format!("staged unlink: {e}")));
                         }
                     }
+                    // Advertised but actually unsupported (M0: advertisement
+                    // does not prove operation semantics): DOCUMENTED downgrade
+                    // to the check-then-rename tier. Consent semantics are
+                    // unchanged — this path only runs where the caller already
+                    // verified the destination absent. unsupported ≠ failed:
+                    // a genuine hardlink failure still verifies-then-errors.
+                    Err(e) if e.kind == ErrorKind::Unsupported => {
+                        self.check_then_rename(&src_path, dst_path, staged_rel, errors, conflicts)
+                            .await;
+                    }
                     Err(_) => {
                         // VERIFY the collision like the spike does: if the
                         // destination now exists, it's a conflict; anything
@@ -466,16 +476,35 @@ impl<'a> RemoteSink<'a> {
                 }
             }
             RemoteTier::CheckThenRename => {
-                if let Err(e) = self.t.rename(&src_path, dst_path).await {
-                    if self.t.lstat(dst_path).await?.is_some() {
-                        conflicts.push(staged_rel.to_string());
-                    } else {
-                        errors.push((staged_rel.to_string(), e.message));
-                    }
-                }
+                self.check_then_rename(&src_path, dst_path, staged_rel, errors, conflicts)
+                    .await;
             }
         }
         Ok(())
+    }
+
+    /// The check-then-rename placement tier: rename a staged item onto a
+    /// destination the caller verified absent, with the documented TOCTOU
+    /// ceiling (report §7.4 v1: servers differ on whether a vanilla rename
+    /// replaces — Tailscale SSH replaced, macOS/Windows OpenSSH refused —
+    /// so this tier NEVER assumes refusal; the pre-check + consent is the
+    /// guard, and a mid-flight appearance of the destination is inside the
+    /// documented ceiling).
+    async fn check_then_rename(
+        &self,
+        src_path: &str,
+        dst_path: &str,
+        staged_rel: &str,
+        errors: &mut Vec<(String, String)>,
+        conflicts: &mut Vec<String>,
+    ) {
+        if let Err(e) = self.t.rename(src_path, dst_path).await {
+            if self.t.lstat(dst_path).await.unwrap_or(None).is_some() {
+                conflicts.push(staged_rel.to_string());
+            } else {
+                errors.push((staged_rel.to_string(), e.message));
+            }
+        }
     }
 
     /// Replace path (explicit consent): remove the destination item, then
