@@ -324,6 +324,15 @@ async fn agent_auth(
 /// raw VERSION extension map captured from the wire (M0: the high-level
 /// session exposes only selected features; the raw map retains unknown
 /// extension names too).
+impl std::fmt::Debug for RusshTransport {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RusshTransport")
+            .field("user", &self.user)
+            .field("flavor", &self.flavor)
+            .finish_non_exhaustive()
+    }
+}
+
 pub struct RusshTransport {
     ssh: client::Handle<ClientHandler>,
     sftp: SftpSession,

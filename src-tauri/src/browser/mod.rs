@@ -18,6 +18,8 @@
 //! module tree is purely additive.
 
 pub mod commands;
+#[cfg(test)]
+pub mod fake;
 pub mod guards;
 pub mod listing;
 pub mod probe;

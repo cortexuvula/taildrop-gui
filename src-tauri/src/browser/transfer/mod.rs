@@ -95,6 +95,7 @@ pub trait CopySink: Send {
 }
 
 /// Outcome of a copy attempt (before failure aggregation).
+#[derive(Debug)]
 pub struct CopyOutcome {
     pub skipped: u32,
     /// Real bytes streamed (outcome surface for job snapshots).
