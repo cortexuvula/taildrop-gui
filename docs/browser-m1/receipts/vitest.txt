@@ -1,0 +1,12 @@
+# npx vitest run — HEAD 2c33425742289655536fcc552cee4cd72d2ea80a
+$ npx vitest run
+
+ RUN  v4.1.10 /Users/cortexuvula/Development/taildrop-gui-browser-m1
+
+
+ Test Files  17 passed (17)
+      Tests  178 passed (178)
+   Start at  15:18:31
+   Duration  3.68s (transform 1.20s, setup 0ms, import 1.89s, tests 5.42s, environment 2.83s)
+
+EXIT=0

@@ -1,0 +1,16 @@
+# npm run build — HEAD 2c33425742289655536fcc552cee4cd72d2ea80a
+$ npm run build
+
+> taildrop-gui@0.15.1 build
+> tsc && vite build
+
+vite v7.3.6 building client environment for production...
+transforming...
+✓ 79 modules transformed.
+rendering chunks...
+computing gzip size...
+dist/index.html                   0.46 kB │ gzip:  0.29 kB
+dist/assets/index-BTssCk3b.css   35.25 kB │ gzip:  6.41 kB
+dist/assets/index-sba-6Qzs.js   300.05 kB │ gzip: 91.86 kB
+✓ built in 401ms
+EXIT=0

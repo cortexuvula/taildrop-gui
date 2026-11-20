@@ -1,0 +1,4 @@
+# cargo clippy --all-targets -- -D warnings — HEAD 2c33425742289655536fcc552cee4cd72d2ea80a
+$ CARGO_INCREMENTAL=0 cargo clippy --all-targets -- -D warnings
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.19s
+EXIT=0

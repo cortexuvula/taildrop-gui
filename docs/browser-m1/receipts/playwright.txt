@@ -1,0 +1,75 @@
+# npx playwright test — HEAD 2c33425742289655536fcc552cee4cd72d2ea80a
+$ npx playwright test
+
+Running 53 tests using 14 workers
+
+[1/53] [chromium] › e2e/focus-trap.test.ts:16:1 › Settings dialog: Shift+Tab from overlay wraps to last focusable
+[2/53] [chromium] › e2e/browser.test.ts:73:3 › browser layout › minimum 760×460: panes fit, both meta columns drop, names keep room
+[3/53] [chromium] › e2e/browser.test.ts:296:3 › browser peer behaviors › auth failure shows the error pane with Change user + Retry
+[4/53] [chromium] › e2e/browser.test.ts:41:3 › browser layout › panes side by side; column drop follows the QML thresholds per pane width
+[5/53] [chromium] › e2e/browser.test.ts:261:3 › browser peer behaviors › sidebar peer selection seeds the right pane
+[6/53] [chromium] › e2e/browser.test.ts:139:3 › browser dialogs › mkdir dialog traps focus, validates names, and Escape closes
+[7/53] [chromium] › e2e/contrast.test.ts:111:1 › Muted text meets WCAG AA 4.5:1 contrast against transfer-panel background
+[8/53] [chromium] › e2e/browser.test.ts:272:3 › browser peer behaviors › windows peer: browse + pull only (write actions disabled with a note)
+[9/53] [chromium] › e2e/contrast.test.ts:71:1 › Accept button hover state meets WCAG AA 4.5:1 contrast
+[10/53] [chromium] › e2e/browser.test.ts:286:3 › browser peer behaviors › android/phone peers stay out of the machine picker
+[11/53] [chromium] › e2e/contrast.test.ts:37:1 › Accept button meets WCAG AA 4.5:1 contrast
+[12/53] [chromium] › e2e/browser.test.ts:192:3 › browser copy queue › collision → failed row with Replace → consented replace succeeds
+[13/53] [chromium] › e2e/browser.test.ts:94:3 › browser keyboard navigation › j/k move the cursor, Enter descends, Backspace goes up, Space marks, Tab switches panes
+[14/53] [chromium] › e2e/browser.test.ts:240:3 › browser copy queue › cancel stops a running job and the row shows cancelled
+[chromium] › e2e/contrast.test.ts:111:1 › Muted text meets WCAG AA 4.5:1 contrast against transfer-panel background
+Muted text contrast: 7.15:1 (fg: rgb(160,164,184), bg: rgb(22,24,34))
+
+[chromium] › e2e/contrast.test.ts:37:1 › Accept button meets WCAG AA 4.5:1 contrast
+Accept button contrast: 4.79:1 (bg: rgb(47,111,216), fg: rgb(255,255,255))
+
+[15/53] [chromium] › e2e/focus-trap.test.ts:31:1 › Settings dialog: Tab from last element wraps to first
+[16/53] [chromium] › e2e/focus-trap.test.ts:46:1 › Settings dialog: Escape closes the dialog
+[17/53] [chromium] › e2e/focus-trap.test.ts:57:1 › Settings dialog: aria-labelledby references existing heading
+[18/53] [chromium] › e2e/layout.test.ts:8:1 › Last Accept button is reachable at 700×500 with 12 incoming files
+[19/53] [chromium] › e2e/layout.test.ts:49:1 › Transfer history remains visible at 700×500
+[20/53] [chromium] › e2e/layout.test.ts:70:1 › Incoming section is bounded at 40% of transfer panel
+[21/53] [chromium] › e2e/recovery-app.test.ts:81:3 › workspace with ten duplicate-filename groups + incoming + active transfer stays a two-column layout at 700x500
+[22/53] [chromium] › e2e/recovery-app.test.ts:102:3 › single recovery group keeps the workspace usable at 700x500
+[23/53] [chromium] › e2e/recovery-app.test.ts:81:3 › workspace with ten duplicate-filename groups + incoming + active transfer stays a two-column layout at 960x640
+[chromium] › e2e/layout.test.ts:70:1 › Incoming section is bounded at 40% of transfer panel
+Transfer panel: 380px, Incoming section: 151px (39.7%)
+
+[24/53] [chromium] › e2e/recovery-app.test.ts:102:3 › single recovery group keeps the workspace usable at 960x640
+[25/53] [chromium] › e2e/recovery-app.test.ts:81:3 › workspace with ten duplicate-filename groups + incoming + active transfer stays a two-column layout at 1280x800
+[26/53] [chromium] › e2e/recovery-app.test.ts:102:3 › single recovery group keeps the workspace usable at 1280x800
+[27/53] [chromium] › e2e/recovery-app.test.ts:113:1 › no recovery groups: no notice, workspace unchanged
+[chromium] › e2e/layout.test.ts:8:1 › Last Accept button is reachable at 700×500 with 12 incoming files
+Last Accept button position: y=270, height=23, bottom=293px (viewport: 500px)
+
+[28/53] [chromium] › e2e/recovery-app.test.ts:126:1 › Review dialog: ten distinct groups, scroll to the last, activate its Recover; others survive
+[29/53] [chromium] › e2e/recovery-app.test.ts:163:1 › exact sizes are shown: 40 KB, 4 B, 8 B and 0 B; zero-byte files are never auto-deleted
+[30/53] [chromium] › e2e/recovery-app.test.ts:187:1 › discard: confirmation names group and files; Cancel is default focus and never discards; Escape cancels confirmation
+[31/53] [chromium] › e2e/recovery-app.test.ts:228:1 › failed recover shows an inline error on the correct group; repeated clicks never duplicate the request
+[32/53] [chromium] › e2e/recovery-app.test.ts:250:1 › keyboard: safe initial focus, wrap cycle, details activation, background inertness, Escape restores Review
+[chromium] › e2e/contrast.test.ts:71:1 › Accept button hover state meets WCAG AA 4.5:1 contrast
+Accept button hover contrast: 6.77:1 (bg: rgb(37,88,176), fg: rgb(255,255,255))
+
+[33/53] [chromium] › e2e/recovery-app.test.ts:303:1 › in-flight recover survives Done/Escape/backdrop close+reopen — exactly one request until settlement
+[34/53] [chromium] › e2e/recovery-app.test.ts:357:1 › live staging-recovery-found event renders the notice through the event route
+[35/53] [chromium] › e2e/recovery-app.test.ts:377:1 › long paths and 200% text never collide with controls
+[36/53] [chromium] › e2e/settings.test.ts:57:1 › renders the grouped production layout with version footer
+[37/53] [chromium] › e2e/settings.test.ts:69:1 › initial focus lands on the first focusable element (close button) and the background is inert
+[38/53] [chromium] › e2e/settings.test.ts:83:1 › show offline nodes / show Mullvad-exit nodes toggles update the correct settings keys
+[39/53] [chromium] › e2e/settings.test.ts:96:1 › restored toggles reflect supplied persisted values
+[40/53] [chromium] › e2e/settings.test.ts:120:1 › directory and search inputs have explicit accessible names
+[41/53] [chromium] › e2e/settings.test.ts:128:1 › save-directory validation is associated with its input and keeps alert semantics
+[42/53] [chromium] › e2e/settings.test.ts:146:1 › search filters by name, no-match is distinct from no-devices, clear restores the list
+[43/53] [chromium] › e2e/settings.test.ts:181:1 › "No devices discovered yet" is distinct from "No matching devices"
+[44/53] [chromium] › e2e/settings.test.ts:193:1 › clicking a device row toggle switches its hiddenNodes entry
+[45/53] [chromium] › e2e/settings.test.ts:227:1 › start-on-boot toggles the mocked autostart plugin, not real preferences
+[46/53] [chromium] › e2e/settings.test.ts:240:1 › Browse opens the mocked directory dialog and leaves the path unchanged on cancel
+[47/53] [chromium] › e2e/settings.test.ts:254:1 › Check for updates consults the updater and reports up-to-date via the production toast
+[48/53] [chromium] › e2e/settings.test.ts:266:1 › Tab wraps from last to first, Shift+Tab wraps from first to last
+[49/53] [chromium] › e2e/settings.test.ts:287:1 › Escape closes, focus returns to the trigger, and the dialog reopens cleanly
+[50/53] [chromium] › e2e/settings.test.ts:311:1 › at the 700x500 minimum, header and footer stay reachable and the body scrolls the device list
+[51/53] [chromium] › e2e/settings.test.ts:365:1 › panel keeps its ~460px width at the configured 960x640 default
+[52/53] [chromium] › e2e/settings.test.ts:374:1 › enlarged-text emulation (~150% zoom) keeps controls reachable
+[53/53] [chromium] › e2e/settings.test.ts:396:1 › DebugPanel retains its scrolling layout over the shared panel CSS
+  53 passed (3.2s)
+EXIT=0

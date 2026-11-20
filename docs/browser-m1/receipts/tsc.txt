@@ -1,0 +1,3 @@
+# npx tsc --noEmit — HEAD 2c33425742289655536fcc552cee4cd72d2ea80a
+$ npx tsc --noEmit
+EXIT=0
