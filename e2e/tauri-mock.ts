@@ -50,6 +50,11 @@ interface E2eApi {
   releaseRecover: () => void;
   /** Resolve a discard held by ?holdDiscard=1 (no-op when nothing is held). */
   releaseDiscard: () => void;
+  /** Browser (M1) mock surface. */
+  browserJobsNow: () => Array<Record<string, unknown>>;
+  browserFsNow: (target: string) => unknown;
+  browserConfigNow: () => { hosts: Record<string, { user: string | null }>; last: string };
+  emitCopy: (payload: unknown) => void;
 }
 
 declare global {
@@ -183,6 +188,190 @@ function pushSalvagedReceipts(dir: MockStagingDir) {
   }
 }
 
+
+// ---------------------------------------------------------------------------
+// Browser (M1) mock: in-memory filesystem per target + serial copy-job
+// simulation with real browser-copy-event emissions. Collisions follow the
+// production rules: copying a name that already exists at the destination
+// fails with kind "exists" unless replace=true (then it overwrites).
+// ---------------------------------------------------------------------------
+
+interface MockNode {
+  type: "dir" | "file";
+  size?: number;
+  mtime?: number;
+  perm?: number;
+  children?: Record<string, MockNode>;
+}
+
+function file(size = 1024): MockNode {
+  return { type: "file", size, mtime: 1700000000, perm: 0o644 };
+}
+function dir(children: Record<string, MockNode>): MockNode {
+  return { type: "dir", mtime: 1700000000, perm: 0o755, children };
+}
+
+const browserFS: Record<string, MockNode> = {
+  local: dir({
+    "Documents": dir({ "report.pdf": file(20480) }),
+    "notes.txt": file(120),
+    "photo.jpg": file(900000),
+    ".hiddenrc": file(8),
+  }),
+  "studio-mac": dir({
+    "notes.txt": file(999), // deliberate collision with local/notes.txt
+    "incoming": dir({}),
+    "music": dir({ "track.flac": file(30000000) }),
+  }),
+  winbox: dir({ "stuff": dir({}) }),
+};
+
+const browserPeers = [
+  {
+    host: "studio-mac", name: "studio-mac", dns: "studio-mac.tail.ps.net.",
+    ip: "100.79.10.43", os: "macos", online: true, user: "",
+    tailscaleSsh: true, browsable: true, isSelf: false,
+  },
+  {
+    host: "winbox", name: "winbox", dns: "winbox.tail.ps.net.",
+    ip: "100.44.55.66", os: "windows", online: true, user: "",
+    tailscaleSsh: false, browsable: true, isSelf: false,
+  },
+  {
+    host: "pixel", name: "pixel", dns: "pixel.tail.ps.net.",
+    ip: "100.77.88.99", os: "android", online: true, user: "",
+    tailscaleSsh: true, browsable: false, isSelf: false,
+  },
+];
+
+interface MockJob {
+  id: number;
+  state: "queued" | "running" | "done" | "failed" | "cancelled";
+  label: string;
+  pct: number;
+  rate: string;
+  file: string;
+  skipped: number;
+  error?: string;
+  kind?: string;
+  names?: string[];
+  request: Record<string, unknown>;
+  created: number;
+}
+
+const browserState = {
+  jobs: [] as MockJob[],
+  nextJobId: 1,
+  config: { hosts: {} as Record<string, { user: string | null }>, last: "" },
+  timers: new Map<number, ReturnType<typeof setInterval>>(),
+};
+
+const browserFlags = {
+  failAuth: params.get("browserFailAuth") === "1",
+  slowCopy: params.get("slowCopy") === "1",
+};
+
+function nodeAt(target: string, path: string): MockNode | null {
+  const root = browserFS[target];
+  if (!root) return null;
+  const clean = (path || "/").replace(/\/+$/, "") || "/";
+  if (clean === "/") return root;
+  let cur = root;
+  for (const part of clean.split("/").filter(Boolean)) {
+    if (cur.type !== "dir" || !cur.children || !cur.children[part]) return null;
+    cur = cur.children[part];
+  }
+  return cur;
+}
+
+function listingFor(target: string, path: string) {
+  const node = nodeAt(target, path);
+  if (!node || node.type !== "dir") {
+    throw { message: `${path} not found on ${target}`, kind: "notfound" };
+  }
+  const clean = (path || "/").replace(/\/+$/, "") || "/";
+  const entries = Object.entries(node.children ?? {}).map(([name, n]) => ({
+    name,
+    type: n.type === "dir" ? "dir" : "file",
+    link: false,
+    size: n.size ?? 0,
+    mtime: n.mtime ?? 0,
+    perm: n.perm ?? 0o644,
+  }));
+  entries.sort((a, b) => a.name.localeCompare(b.name));
+  return {
+    path: clean,
+    entries,
+    skipped: 0,
+    user: target === "local" ? "" : "peeruser",
+    home: "/",
+  };
+}
+
+function startJob(req: Record<string, unknown>): number {
+  const id = browserState.nextJobId++;
+  const names = (req.names as string[]) ?? [];
+  const job: MockJob = {
+    id,
+    state: "queued",
+    label: names.length === 1 ? names[0] : `${names.length} items`,
+    pct: 0,
+    rate: "",
+    file: "",
+    skipped: 0,
+    request: req,
+    created: Date.now(),
+  };
+  browserState.jobs.push(job);
+  emit("browser-copy-event", { jobId: id, event: "start", count: names.length });
+  job.state = "running";
+  const dstTarget = String(req.dstTarget);
+  const dstDir = String(req.dstDir);
+  const replace = Boolean(req.replace);
+  let pct = 0;
+  const tickMs = browserFlags.slowCopy ? 300 : 25;
+  const tickPct = browserFlags.slowCopy ? 5 : 34;
+  const timer = setInterval(() => {
+    pct += tickPct;
+    if (pct < 100) {
+      job.pct = pct;
+      job.rate = "12 MB/s";
+      job.file = names[0] ?? "";
+      emit("browser-copy-event", {
+        jobId: id, event: "progress", pct, rate: job.rate, file: job.file,
+      });
+      return;
+    }
+    browserState.timers.delete(id);
+    job.pct = 100;
+    // Collision rule: any name already at the destination, without consent.
+    const collide = names.filter((n) => nodeAt(dstTarget, `${dstDir}/${n}`.replace("//", "/")));
+    if (collide.length > 0 && !replace) {
+      job.state = "failed";
+      job.kind = "exists";
+      job.names = collide;
+      job.error = `${collide.join(", ")} already exist in ${dstDir}`;
+      emit("browser-copy-event", {
+        jobId: id, event: "done", ok: false, kind: "exists", names: collide, error: job.error,
+      });
+      return;
+    }
+    // Success: apply to the mock FS.
+    const dst = nodeAt(dstTarget, dstDir);
+    if (dst && dst.type === "dir" && dst.children) {
+      const src = nodeAt(String(req.srcTarget), String(req.srcDir));
+      for (const n of names) {
+        const node = src?.children?.[n];
+        dst.children[n] = node ? JSON.parse(JSON.stringify(node)) : file(1);
+      }
+    }
+    job.state = "done";
+    emit("browser-copy-event", { jobId: id, event: "done", ok: true, skipped: 0 });
+  }, tickMs);
+  browserState.timers.set(id, timer);
+  return id;
+}
+
 async function handle(cmd: string, args: InvokeArgs): Promise<unknown> {
   switch (cmd) {
     case "plugin:event|listen": {
@@ -264,6 +453,93 @@ async function handle(cmd: string, args: InvokeArgs): Promise<unknown> {
       state.staging = state.staging.filter((d) => d.path !== args?.path);
       return "ok";
     }
+    // ---- Browser (M1) commands ----
+    case "browser_peers":
+      return browserPeers;
+    case "browser_config":
+      return browserState.config;
+    case "browser_probe":
+      return {
+        system: args?.host === "winbox" ? "Windows 11" : "macOS 15",
+        posix: args?.host !== "winbox",
+        home: "/",
+        flavor: "tailscale-ssh",
+        user: "peeruser",
+        extensions: { "hardlink@openssh.com": "1" },
+      };
+    case "browser_ls": {
+      const target = String(args?.target);
+      if (target !== "local" && browserFlags.failAuth) {
+        throw { message: `denied: no tailnet identity for ${target}`, kind: "auth" };
+      }
+      return listingFor(target, String(args?.path ?? ""));
+    }
+    case "browser_mkdir": {
+      const path = String(args?.path);
+      const parent = path.substring(0, path.lastIndexOf("/")) || "/";
+      const name = path.substring(path.lastIndexOf("/") + 1);
+      const node = nodeAt(String(args?.target), parent);
+      if (!node || node.type !== "dir") throw { message: "no such folder", kind: "notfound" };
+      if (node.children![name]) throw { message: `${name} already exists`, kind: "exists" };
+      node.children![name] = dir({});
+      return null;
+    }
+    case "browser_rename": {
+      const oldP = String(args?.old);
+      const newP = String(args?.new);
+      const t = String(args?.target);
+      const oParent = nodeAt(t, oldP.substring(0, oldP.lastIndexOf("/")) || "/");
+      const oName = oldP.substring(oldP.lastIndexOf("/") + 1);
+      const nName = newP.substring(newP.lastIndexOf("/") + 1);
+      if (!oParent?.children?.[oName]) throw { message: "gone", kind: "notfound" };
+      const nParent = nodeAt(t, newP.substring(0, newP.lastIndexOf("/")) || "/");
+      if (nParent?.children?.[nName]) throw { message: `${nName} already exists`, kind: "exists" };
+      nParent!.children![nName] = oParent.children[oName];
+      delete oParent.children[oName];
+      return null;
+    }
+    case "browser_delete": {
+      const t = String(args?.target);
+      const paths = (args?.paths as string[]) ?? [];
+      let done = 0;
+      for (const pth of paths) {
+        const parent = nodeAt(t, pth.substring(0, pth.lastIndexOf("/")) || "/");
+        const name = pth.substring(pth.lastIndexOf("/") + 1);
+        if (parent?.children?.[name]) {
+          delete parent.children[name];
+          done++;
+        }
+      }
+      return { trashed: t === "local", done };
+    }
+    case "browser_open":
+      return `/private/tmp/e2e-opened/${String(args?.path).split("/").pop()}`;
+    case "browser_copy":
+      return startJob((args?.job as Record<string, unknown>) ?? {});
+    case "browser_cancel_copy": {
+      const id = Number(args?.jobId);
+      const job = browserState.jobs.find((j) => j.id === id);
+      const timer = browserState.timers.get(id);
+      if (timer) clearInterval(timer);
+      browserState.timers.delete(id);
+      if (job && (job.state === "running" || job.state === "queued")) {
+        job.state = "cancelled";
+        emit("browser-copy-event", { jobId: id, event: "done", ok: false, cancelled: true });
+      }
+      return null;
+    }
+    case "browser_copy_jobs":
+      return browserState.jobs.map((j) => ({ ...j }));
+    case "browser_set_user": {
+      const host = String(args?.host);
+      const user = (args?.user as string | null) ?? null;
+      if (user === null) delete browserState.config.hosts[host];
+      else browserState.config.hosts[host] = { user };
+      return null;
+    }
+    case "browser_set_last":
+      browserState.config.last = String(args?.host);
+      return null;
     case "show_in_folder":
     case "send_file":
       return null;
@@ -300,6 +576,10 @@ window.__TAURI_EVENT_PLUGIN_INTERNALS__ = {
 
 window.__e2e = {
   calls: state.calls,
+  browserJobsNow: () => browserState.jobs.map((j) => ({ ...j })),
+  browserFsNow: (target: string) => browserFS[target],
+  browserConfigNow: () => browserState.config,
+  emitCopy: (payload: unknown) => emit("browser-copy-event", payload),
   stagingNow: () => state.staging,
   receiptsNow: () => state.receipts,
   emit,

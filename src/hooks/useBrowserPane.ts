@@ -59,7 +59,14 @@ export function useBrowserPane(opts: UseBrowserPaneOptions) {
   const [filterText, setFilterText] = useState("");
   const [cursor, setCursor] = useState(0);
   const [marks, setMarks] = useState<ReadonlySet<string>>(new Set());
-  const [selectAfterLoad, setSelectAfterLoad] = useState<string | null>(null);
+  const [selectAfterLoad, setSelectAfterLoadState] = useState<string | null>(null);
+  // Ref mirror so load() (a stable callback) can read the pending name and
+  // the rows effect can consume it after the DISPLAYED rows are computed.
+  const selectAfterLoadRef = useRef<string | null>(null);
+  const setSelectAfterLoad = useCallback((v: string | null) => {
+    selectAfterLoadRef.current = v;
+    setSelectAfterLoadState(v);
+  }, []);
   const [pathEditing, setPathEditing] = useState(false);
 
   const reqSeq = useRef(0);
@@ -100,19 +107,11 @@ export function useBrowserPane(opts: UseBrowserPaneOptions) {
         setSkipped(listing.skipped);
         setError(null);
         setMarks(new Set());
-        // Select-after-load (goUp selects the folder we came from; mkdir /
-        // rename select the new name — plugin selectAfterLoad).
-        setSelectAfterLoad((want) => {
-          if (want) {
-            const idx = listing.entries.findIndex((e) => e.name === want);
-            // +1 when an up-row is present (not at root).
-            const offset = paths.isRoot(listing.path) ? 0 : 1;
-            setCursor(idx >= 0 ? idx + offset : 0);
-          } else {
-            setCursor(0);
-          }
-          return null;
-        });
+        // Cursor placement for a pending selectAfterLoad (goUp selects the
+        // folder we came from; mkdir/rename select the new name) happens in
+        // the rows effect below — it must index the DISPLAYED rows (sorted,
+        // hidden-filtered, up-row included), not the raw server order.
+        if (!selectAfterLoadRef.current) setCursor(0);
       } catch (e) {
         if (!mounted.current || seq !== reqSeq.current) return; // stale
         const err = toBrowserError(e);
@@ -201,6 +200,18 @@ export function useBrowserPane(opts: UseBrowserPaneOptions) {
   useEffect(() => {
     setCursor((c) => Math.min(c, Math.max(0, rows.length - 1)));
   }, [rows.length]);
+
+  // Consume a pending selectAfterLoad against the DISPLAYED rows.
+  useEffect(() => {
+    const want = selectAfterLoadRef.current;
+    if (want == null) return;
+    const idx = rows.findIndex(
+      (r) => (r.rowKind === "entry" ? r.entry.name : r.name) === want,
+    );
+    if (idx >= 0) setCursor(idx);
+    selectAfterLoadRef.current = null;
+    setSelectAfterLoadState(null);
+  }, [rows]);
 
   // ---- selection: marks-else-cursor (FilePane.qml:318-331) ----
   const cursorRow = rows.length > 0 ? rows[Math.min(cursor, rows.length - 1)] : null;
