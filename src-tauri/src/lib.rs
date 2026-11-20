@@ -1,3 +1,4 @@
+mod browser;
 mod debug_log;
 mod receipts;
 mod tailscale;
@@ -851,6 +852,16 @@ pub fn run() {
             // TD-05: forward receipt-store broadcasts to the webview.
             let handle = app.handle().clone();
             tauri::async_runtime::spawn(receipt_emitter(handle));
+            // Browser (M1): manage shared state and start the serial copy
+            // pump. Jobs live in Rust so copies survive webview suspension.
+            let config_dir = app
+                .path()
+                .app_config_dir()
+                .unwrap_or_else(|_| std::env::temp_dir().join("taildrop-gui"));
+            let browser_state =
+                std::sync::Arc::new(browser::commands::BrowserState::new(config_dir));
+            browser_state.start_pump(app.handle().clone());
+            app.manage(browser_state);
             // TD-05: global handle for commands reading shared state outside
             // Tauri injection (staging recovery needs the save dir).
             *APP_HANDLE.lock().unwrap_or_else(|p| p.into_inner()) = Some(app.handle().clone());
@@ -884,6 +895,19 @@ pub fn run() {
             show_in_folder,
             get_debug_logs,
             get_env_info,
+            browser::commands::browser_peers,
+            browser::commands::browser_probe,
+            browser::commands::browser_ls,
+            browser::commands::browser_copy,
+            browser::commands::browser_cancel_copy,
+            browser::commands::browser_copy_jobs,
+            browser::commands::browser_mkdir,
+            browser::commands::browser_rename,
+            browser::commands::browser_delete,
+            browser::commands::browser_open,
+            browser::commands::browser_set_user,
+            browser::commands::browser_set_last,
+            browser::commands::browser_config,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

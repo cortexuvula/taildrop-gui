@@ -2629,6 +2629,15 @@ pub async fn fetch_status() -> Result<Vec<Peer>, String> {
     Ok(peers)
 }
 
+/// Additive (browser M1): expose the raw `tailscale status --json` payload so
+/// the browser can read fields the Taildrop `Peer` struct intentionally drops
+/// — notably the SSH capability hints (`CapMap` `cap/ssh`, `sshHostKeys`).
+/// This does NOT modify `fetch_status` or the existing Taildrop flow; it is a
+/// read-only passthrough to the same platform call.
+pub async fn fetch_status_json_raw() -> Result<Vec<u8>, String> {
+    platform::fetch_status_json().await
+}
+
 pub async fn send_file_to_peer(
     peer_id: &str,
     peer_name: &str,
