@@ -576,6 +576,12 @@ pub struct LocalSink {
     removed: bool,
 }
 
+impl std::fmt::Debug for LocalSink {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("LocalSink").finish_non_exhaustive()
+    }
+}
+
 impl LocalSink {
     pub fn open(dst_dir: &str, tag: &str) -> Result<Self, BrowserError> {
         Self::open_with(dst_dir, tag, Box::new(RealRename))
@@ -986,4 +992,494 @@ impl CopySink for LocalSink {
 #[allow(dead_code)]
 fn osstring_from_raw(raw: Vec<u8>) -> OsString {
     OsString::from_vec(raw)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::browser::transfer::{stage_dir_name, CopySink};
+    use std::path::{Path, PathBuf};
+    use tokio_util::sync::CancellationToken;
+
+    /// Isolated temp dir, removed on drop (invariant: tests never share a
+    /// fixed scratch path).
+    struct TmpDir(PathBuf);
+    impl TmpDir {
+        fn new(tag: &str) -> TmpDir {
+            use rand::Rng as _;
+            let n: u64 = rand::rng().random();
+            let dir = std::env::temp_dir().join(format!(
+                "taildrop-m1-local-{tag}-{}-{n:016x}",
+                std::process::id()
+            ));
+            std::fs::create_dir_all(&dir).expect("create temp dir");
+            TmpDir(std::fs::canonicalize(&dir).expect("canonicalize"))
+        }
+        fn path(&self) -> &Path {
+            &self.0
+        }
+    }
+    impl Drop for TmpDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    /// Injected rename behavior (the documented test seam): every
+    /// no-replace rename fails with `nr`, every replacing rename with `r`.
+    struct FakeRename {
+        nr: i32,
+        r: i32,
+    }
+    impl RenameNoReplace for FakeRename {
+        fn rename_noreplace(
+            &self,
+            _sfd: RawFd,
+            _sname: &CStr,
+            _dfd: RawFd,
+            _dname: &CStr,
+        ) -> Result<(), i32> {
+            Err(self.nr)
+        }
+        fn rename_replace(
+            &self,
+            _sfd: RawFd,
+            _sname: &CStr,
+            _dfd: RawFd,
+            _dname: &CStr,
+        ) -> Result<(), i32> {
+            Err(self.r)
+        }
+    }
+
+    fn stage_leftovers(dir: &Path) -> Vec<String> {
+        std::fs::read_dir(dir)
+            .map(|rd| {
+                rd.filter_map(|e| e.ok())
+                    .map(|e| e.file_name().to_string_lossy().to_string())
+                    .filter(|n| n.starts_with(crate::browser::STAGE_PREFIX))
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    fn set_mtime(path: &Path, secs: i64) {
+        use std::os::unix::ffi::OsStrExt;
+        let c = std::ffi::CString::new(path.as_os_str().as_bytes()).expect("path cstr");
+        let ts = libc::timespec {
+            tv_sec: secs,
+            tv_nsec: 0,
+        };
+        let times = [ts, ts];
+        unsafe {
+            libc::utimensat(libc::AT_FDCWD, c.as_ptr(), times.as_ptr(), 0);
+        }
+    }
+
+    // ---- staging creation attacks ----
+
+    /// A pre-planted SYMLINK at the exact stage name must be refused
+    /// (mkdirat EEXIST) — and never followed, so the victim is untouched.
+    #[test]
+    fn preplanted_symlink_stage_is_refused() {
+        let root = TmpDir::new("preplant-link");
+        let dst = root.path().join("dst");
+        let victim = root.path().join("victim");
+        std::fs::create_dir_all(&dst).unwrap();
+        std::fs::create_dir_all(&victim).unwrap();
+        std::fs::write(victim.join("secret.txt"), b"secret").unwrap();
+        let tag = "0123456789abcdef";
+        std::os::unix::fs::symlink(&victim, dst.join(stage_dir_name(tag))).unwrap();
+
+        let e = LocalSink::open(dst.to_str().unwrap(), tag)
+            .expect_err("planted symlink at the stage name must be refused");
+        assert_eq!(e.kind, ErrorKind::Exists);
+        // Victim untouched, link still a link (never followed, never unlinked).
+        assert_eq!(std::fs::read(victim.join("secret.txt")).unwrap(), b"secret");
+        assert!(dst
+            .join(stage_dir_name(tag))
+            .symlink_metadata()
+            .unwrap()
+            .is_symlink());
+    }
+
+    /// A pre-planted non-empty DIRECTORY (even with plausible mode) must be
+    /// refused — the sink never writes into an existing folder.
+    #[test]
+    fn preplanted_dir_stage_is_refused() {
+        let root = TmpDir::new("preplant-dir");
+        let dst = root.path().join("dst");
+        std::fs::create_dir_all(&dst).unwrap();
+        let tag = "fedcba9876543210";
+        let planted = dst.join(stage_dir_name(tag));
+        std::fs::create_dir(&planted).unwrap();
+        std::fs::write(planted.join("attacker.txt"), b"evil").unwrap();
+
+        let e = LocalSink::open(dst.to_str().unwrap(), tag)
+            .expect_err("planted directory must be refused");
+        assert_eq!(e.kind, ErrorKind::Exists);
+        assert_eq!(
+            std::fs::read(planted.join("attacker.txt")).unwrap(),
+            b"evil"
+        );
+    }
+
+    /// Swap-before-unlink: after the sink opened its stage, an attacker
+    /// replaces the stage NAME with a symlink to a victim dir. Cleanup must
+    /// empty only the held fd (the orphaned original) and NEVER unlink the
+    /// planted name — dev/ino identity guard.
+    #[tokio::test]
+    async fn swapped_stage_name_is_never_unlinked() {
+        let root = TmpDir::new("swap-stage");
+        let dst = root.path().join("dst");
+        let victim = root.path().join("victim");
+        std::fs::create_dir_all(&dst).unwrap();
+        std::fs::create_dir_all(&victim).unwrap();
+        std::fs::write(victim.join("secret.txt"), b"secret").unwrap();
+        let tag = "aaaaaaaaaaaaaaaa";
+        let mut sink = LocalSink::open(dst.to_str().unwrap(), tag).expect("open stage");
+        // Stage some content through the normal sink path.
+        sink.file_begin("a.txt").await.unwrap();
+        sink.file_chunk(b"payload").await.unwrap();
+        sink.file_end(0o644, 0).await.unwrap();
+
+        // Attacker swaps the stage name for a symlink to the victim.
+        let stage = dst.join(stage_dir_name(tag));
+        std::fs::remove_dir_all(&stage).unwrap();
+        std::os::unix::fs::symlink(&victim, &stage).unwrap();
+
+        // Cleanup runs (as it does on every exit path): must not touch the
+        // planted name or anything under the victim.
+        sink.remove().await.unwrap();
+        assert!(victim.join("secret.txt").exists(), "victim untouched");
+        assert!(
+            stage.symlink_metadata().unwrap().is_symlink(),
+            "planted link was NOT unlinked (dev/ino guard)"
+        );
+    }
+
+    // ---- rename seam injection: EXDEV + non-atomic fail closed ----
+
+    async fn stage_one_file(dst: &str, tag: &str, errno_nr: i32) -> LocalSink {
+        let mut sink = LocalSink::open_with(
+            dst,
+            tag,
+            Box::new(FakeRename {
+                nr: errno_nr,
+                r: libc::EIO,
+            }),
+        )
+        .expect("open_with fake renamer");
+        sink.file_begin("a.txt").await.unwrap();
+        sink.file_chunk(b"hello").await.unwrap();
+        sink.file_end(0o644, 0).await.unwrap();
+        sink
+    }
+
+    /// EXDEV (cross-device) must fail closed: the error is aggregated for
+    /// the row, and NOTHING is placed by any fallback copy.
+    #[tokio::test]
+    async fn exdev_rename_fails_closed() {
+        let root = TmpDir::new("exdev");
+        let dst = root.path().join("dst");
+        std::fs::create_dir_all(&dst).unwrap();
+        let tag = "bbbbbbbbbbbbbbbb";
+        let mut sink = stage_one_file(dst.to_str().unwrap(), tag, libc::EXDEV).await;
+        let (conflicts, errors) = sink
+            .place(&["a.txt".to_string()], false)
+            .await
+            .expect("place aggregates, never throws for row errors");
+        assert!(conflicts.is_empty());
+        assert_eq!(errors.len(), 1);
+        assert_eq!(errors[0].0, "a.txt");
+        // Fail closed: no fallback copy landed the file.
+        assert!(!dst.join("a.txt").exists());
+        sink.remove().await.unwrap();
+        assert!(stage_leftovers(&dst).is_empty());
+    }
+
+    /// A filesystem where renameat2/renameatx_np is unavailable
+    /// (EINVAL/ENOSYS/EOPNOTSUPP) must fail closed with the non-atomic
+    /// message — never silently downgrade to a replacing rename.
+    #[tokio::test]
+    async fn non_atomic_fs_fails_closed() {
+        let root = TmpDir::new("nonatomic");
+        let dst = root.path().join("dst");
+        std::fs::create_dir_all(&dst).unwrap();
+        let tag = "cccccccccccccccc";
+        let mut sink = stage_one_file(dst.to_str().unwrap(), tag, libc::EINVAL).await;
+        let (conflicts, errors) = sink.place(&["a.txt".to_string()], false).await.unwrap();
+        assert!(conflicts.is_empty());
+        assert_eq!(errors.len(), 1);
+        assert!(
+            errors[0].1.contains("atomically"),
+            "expected non-atomic message, got {:?}",
+            errors[0].1
+        );
+        assert!(!dst.join("a.txt").exists());
+        sink.remove().await.unwrap();
+        assert!(stage_leftovers(&dst).is_empty());
+    }
+
+    // ---- full local→local copy runs (RealRename, kernel semantics) ----
+
+    use crate::browser::transfer::{self, Side};
+    use crate::browser::CopyRequest;
+    use std::sync::{Arc, Mutex};
+
+    fn local_req(src: &str, dst: &str, names: &[&str], replace: bool) -> CopyRequest {
+        CopyRequest {
+            src_target: "local".to_string(),
+            src_user: None,
+            src_dir: src.to_string(),
+            dst_target: "local2".to_string(),
+            dst_user: None,
+            dst_dir: dst.to_string(),
+            names: names.iter().map(|s| s.to_string()).collect(),
+            replace,
+        }
+    }
+
+    fn noop_emit() -> Arc<dyn Fn(u8, String, String) + Send + Sync> {
+        Arc::new(|_p, _r, _f| ())
+    }
+
+    #[tokio::test]
+    async fn local_to_local_fidelity() {
+        let root = TmpDir::new("l2l-fidelity");
+        let src = root.path().join("src");
+        let dst = root.path().join("dst");
+        std::fs::create_dir_all(&src).unwrap();
+        std::fs::create_dir_all(&dst).unwrap();
+        std::fs::write(src.join("hello.txt"), b"hello world").unwrap();
+        std::fs::create_dir(src.join("sub")).unwrap();
+        std::fs::write(src.join("sub/inner.bin"), vec![5u8; 1000]).unwrap();
+        std::os::unix::fs::symlink("hello.txt", src.join("link.txt")).unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(
+            src.join("hello.txt"),
+            std::fs::Permissions::from_mode(0o644),
+        )
+        .unwrap();
+        std::fs::set_permissions(src.join("sub"), std::fs::Permissions::from_mode(0o750)).unwrap();
+        set_mtime(&src.join("hello.txt"), 1_600_000_000);
+
+        let outcome = transfer::run_copy(
+            &local_req(
+                src.to_str().unwrap(),
+                dst.to_str().unwrap(),
+                &["hello.txt", "sub", "link.txt"],
+                false,
+            ),
+            &Side::Local,
+            &Side::Local,
+            CancellationToken::new(),
+            noop_emit(),
+        )
+        .await
+        .expect("local→local copy succeeds");
+        assert_eq!(outcome.skipped, 0);
+        assert_eq!(outcome.bytes, 11 + 1000);
+
+        // Content, links-as-links, modes, mtime.
+        assert_eq!(
+            std::fs::read(dst.join("hello.txt")).unwrap(),
+            b"hello world"
+        );
+        assert_eq!(
+            std::fs::read(dst.join("sub/inner.bin")).unwrap(),
+            vec![5u8; 1000]
+        );
+        let lm = std::fs::symlink_metadata(dst.join("link.txt")).unwrap();
+        assert!(lm.is_symlink());
+        assert_eq!(
+            std::fs::read_link(dst.join("link.txt"))
+                .unwrap()
+                .to_str()
+                .unwrap(),
+            "hello.txt"
+        );
+        assert_eq!(
+            std::fs::metadata(dst.join("hello.txt"))
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o7777,
+            0o644
+        );
+        assert_eq!(
+            std::fs::metadata(dst.join("sub"))
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o7777,
+            0o750
+        );
+        let mt = std::fs::metadata(dst.join("hello.txt"))
+            .unwrap()
+            .modified()
+            .unwrap()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        assert_eq!(mt, 1_600_000_000);
+        // Cleanup on the done path.
+        assert!(stage_leftovers(&dst).is_empty());
+    }
+
+    #[tokio::test]
+    async fn local_exact_name_conflict_refuses_then_replaces_with_consent() {
+        let root = TmpDir::new("l2l-conflict");
+        let src = root.path().join("src");
+        let dst = root.path().join("dst");
+        std::fs::create_dir_all(&src).unwrap();
+        std::fs::create_dir_all(&dst).unwrap();
+        std::fs::write(src.join("hello.txt"), b"NEW").unwrap();
+        std::fs::write(dst.join("hello.txt"), b"OLD").unwrap();
+
+        // Without consent: refused (renameat2 RENAME_NOREPLACE → EEXIST),
+        // destination untouched, staging cleaned.
+        let e = transfer::run_copy(
+            &local_req(
+                src.to_str().unwrap(),
+                dst.to_str().unwrap(),
+                &["hello.txt"],
+                false,
+            ),
+            &Side::Local,
+            &Side::Local,
+            CancellationToken::new(),
+            noop_emit(),
+        )
+        .await
+        .expect_err("conflict without consent");
+        assert_eq!(e.kind, ErrorKind::Exists);
+        assert_eq!(std::fs::read(dst.join("hello.txt")).unwrap(), b"OLD");
+        assert!(stage_leftovers(&dst).is_empty());
+
+        // With explicit consent: replaced atomically.
+        transfer::run_copy(
+            &local_req(
+                src.to_str().unwrap(),
+                dst.to_str().unwrap(),
+                &["hello.txt"],
+                true,
+            ),
+            &Side::Local,
+            &Side::Local,
+            CancellationToken::new(),
+            noop_emit(),
+        )
+        .await
+        .expect("consented replace");
+        assert_eq!(std::fs::read(dst.join("hello.txt")).unwrap(), b"NEW");
+        assert!(stage_leftovers(&dst).is_empty());
+    }
+
+    /// Case-insensitive clash: the FILESYSTEM decides (renameat2 EEXIST),
+    /// never a string comparison. Adaptive: on a case-sensitive volume the
+    /// copy simply succeeds and both names coexist.
+    #[tokio::test]
+    async fn case_clash_asks_the_filesystem() {
+        let root = TmpDir::new("l2l-case");
+        let src = root.path().join("src");
+        let dst = root.path().join("dst");
+        std::fs::create_dir_all(&src).unwrap();
+        std::fs::create_dir_all(&dst).unwrap();
+        std::fs::write(src.join("file.txt"), b"lower").unwrap();
+        std::fs::write(dst.join("File.txt"), b"upper").unwrap();
+        // Ask the filesystem, not strings:
+        let case_insensitive = dst.join("FILE.TXT").exists();
+
+        let r = transfer::run_copy(
+            &local_req(
+                src.to_str().unwrap(),
+                dst.to_str().unwrap(),
+                &["file.txt"],
+                false,
+            ),
+            &Side::Local,
+            &Side::Local,
+            CancellationToken::new(),
+            noop_emit(),
+        )
+        .await;
+        if case_insensitive {
+            let e = r.expect_err("case-insensitive FS must refuse the clash");
+            assert_eq!(e.kind, ErrorKind::Exists);
+            assert_eq!(std::fs::read(dst.join("File.txt")).unwrap(), b"upper");
+        } else {
+            r.expect("case-sensitive FS places both names");
+            assert_eq!(std::fs::read(dst.join("file.txt")).unwrap(), b"lower");
+            assert_eq!(std::fs::read(dst.join("File.txt")).unwrap(), b"upper");
+        }
+        assert!(stage_leftovers(&dst).is_empty());
+    }
+
+    /// Mid-copy cancel on the LOCAL destination leaves no stage and no
+    /// partially placed files (pre-cancelled token: refused before
+    /// staging exists).
+    #[tokio::test]
+    async fn local_precancelled_copy_creates_nothing() {
+        let root = TmpDir::new("l2l-cancel");
+        let src = root.path().join("src");
+        let dst = root.path().join("dst");
+        std::fs::create_dir_all(&src).unwrap();
+        std::fs::create_dir_all(&dst).unwrap();
+        std::fs::write(src.join("a.txt"), b"a").unwrap();
+        let cancel = CancellationToken::new();
+        cancel.cancel();
+        let e = transfer::run_copy(
+            &local_req(
+                src.to_str().unwrap(),
+                dst.to_str().unwrap(),
+                &["a.txt"],
+                false,
+            ),
+            &Side::Local,
+            &Side::Local,
+            cancel,
+            noop_emit(),
+        )
+        .await
+        .expect_err("pre-cancelled");
+        assert!(transfer::is_cancelled(&e));
+        assert!(stage_leftovers(&dst).is_empty());
+        assert!(!dst.join("a.txt").exists());
+    }
+
+    /// Progress events are real-byte based: a multi-chunk local copy emits
+    /// through the same ProgressReporter path (smoke: completes and counts
+    /// every byte exactly once).
+    #[tokio::test]
+    async fn local_copy_counts_real_bytes() {
+        let root = TmpDir::new("l2l-bytes");
+        let src = root.path().join("src");
+        let dst = root.path().join("dst");
+        std::fs::create_dir_all(&src).unwrap();
+        std::fs::create_dir_all(&dst).unwrap();
+        let big = vec![42u8; crate::browser::transfer::CHUNK * 3 + 17];
+        std::fs::write(src.join("big.bin"), &big).unwrap();
+        let pcts: Arc<Mutex<Vec<u8>>> = Arc::new(Mutex::new(Vec::new()));
+        let p2 = pcts.clone();
+        let emit: Arc<dyn Fn(u8, String, String) + Send + Sync> =
+            Arc::new(move |p: u8, _r: String, _f: String| p2.lock().unwrap().push(p));
+        let outcome = transfer::run_copy(
+            &local_req(
+                src.to_str().unwrap(),
+                dst.to_str().unwrap(),
+                &["big.bin"],
+                false,
+            ),
+            &Side::Local,
+            &Side::Local,
+            CancellationToken::new(),
+            emit,
+        )
+        .await
+        .unwrap();
+        assert_eq!(outcome.bytes as usize, big.len());
+        assert_eq!(std::fs::read(dst.join("big.bin")).unwrap(), big);
+        assert!(stage_leftovers(&dst).is_empty());
+    }
 }
