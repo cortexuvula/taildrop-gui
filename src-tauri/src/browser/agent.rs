@@ -584,6 +584,79 @@ impl Default for AgentCapCache {
 // Physical delete re-check
 // ---------------------------------------------------------------------------
 
+/// S-3: does `stderr` carry the shell's COMMAND-NOT-FOUND shape for the
+/// delete helper's command (`xargs`, the first word of `posix_delete_cmd`)?
+/// The spelling varies by the remote's shell — all observed shapes, all
+/// with rc 127:
+///   bash (macOS /bin/sh): "xargs: No such file or directory"
+///   dash (Linux /bin/sh): "xargs: not found"
+///   zsh:                  "command not found: xargs"
+/// Callers gate this on `rc == 127` (the shells' not-found exit code) AND
+/// the helper mention below, so an rc 127 with unrelated stderr stays a
+/// typed error — never a fallback. When this shape matches, the helper
+/// NEVER RAN (exec failed before any path was touched), so taking the
+/// documented SFTP-walk fallback cannot double-delete.
+pub fn delete_helper_missing(stderr: &str) -> bool {
+    let helper = posix_delete_cmd()
+        .split_whitespace()
+        .next()
+        .unwrap_or("xargs")
+        .to_lowercase();
+    let m = stderr.to_lowercase();
+    m.contains(&helper) && (m.contains("not found") || m.contains("no such file or directory"))
+}
+
+/// Pure mapping of the delete helper's failed exit (extracted from
+/// `agent_delete` so every shape is unit-testable without a transport):
+///   - refusal text ("Refusing to delete" / unresolvable home) → Denied,
+///     NEVER a fallback (Codie's multi-path probe pinned no-double-delete:
+///     a refusal means paths may already be deleted — the SFTP walk must
+///     not re-walk them);
+///   - S-3: rc 127 + the helper's command-not-found shape → Unsupported,
+///     the documented SFTP-walk fallback arm (M2a behavior on hosts whose
+///     perl exec lane works but that lack `xargs`);
+///   - no exit code → Unreachable (bounded wait expired; nothing deleted);
+///   - anything else → classified from the stderr text (typed error).
+///
+/// The message keeps the last non-empty stderr line (capped 300 chars) or
+/// an honest "Delete failed (exit n)" when stderr is empty.
+pub fn classify_delete_failure(rc: Option<u32>, stderr: &str) -> BrowserError {
+    let Some(n) = rc else {
+        return BrowserError::new(
+            ErrorKind::Unreachable,
+            "the delete check on the other machine timed out — nothing was deleted",
+        );
+    };
+    let tail: String = stderr
+        .lines()
+        .rfind(|l| !l.trim().is_empty())
+        .unwrap_or("")
+        .trim()
+        .chars()
+        .take(300)
+        .collect();
+    // The physical re-check REFUSED (home-equivalent target at delete time)
+    // or the home is unresolvable — fail closed, Denied, never something to
+    // fall back around.
+    let refused =
+        stderr.contains("Refusing to delete") || stderr.contains("cannot resolve the home folder");
+    let kind = if refused {
+        ErrorKind::Denied
+    } else if n == 127 && delete_helper_missing(stderr) {
+        // S-3: the helper command itself is missing → the exec delete lane
+        // is unavailable on this host → the documented SFTP-walk fallback.
+        ErrorKind::Unsupported
+    } else {
+        classify_message(stderr)
+    };
+    let message = if tail.is_empty() {
+        format!("Delete failed (exit {n})")
+    } else {
+        tail
+    };
+    BrowserError::new(kind, message)
+}
+
 /// Delete `paths` (absolute, parent-resolved by the caller's guards) through
 /// the exec agent: the vendored POSIX script re-resolves each parent with
 /// `cd -P` AT DELETE TIME and re-runs the home guard against the physical
@@ -593,9 +666,11 @@ impl Default for AgentCapCache {
 /// → REFUSED. NOTE: `xargs` flattens every non-zero child status (BSD → 1,
 /// GNU → 123), so — exactly like the plugin (`fail(error_text(err),
 /// classify(err))`, bin/tailfiles:2641-2644) — the MEANING is read from
-/// stderr: a "Refusing to delete" / unresolvable-home line is a Denied
-/// decision (never fall back around it); anything else is classified from
-/// the stderr text.
+/// stderr via `classify_delete_failure`: a "Refusing to delete" /
+/// unresolvable-home line is a Denied decision (never fall back around it);
+/// an rc-127 command-not-found for the helper is Unsupported (S-3: the
+/// documented SFTP-walk fallback); anything else is classified from the
+/// stderr text.
 pub async fn agent_delete(t: &dyn SftpTransport, paths: &[String]) -> Result<(), BrowserError> {
     if paths.is_empty() {
         return Ok(());
@@ -616,38 +691,9 @@ pub async fn agent_delete(t: &dyn SftpTransport, paths: &[String]) -> Result<(),
     ch.close_stdin().await?;
     let rc = ch.wait_exit(DELETE_WAIT).await;
     let stderr = ch.stderr_tail();
-    let tail: String = stderr
-        .lines()
-        .rfind(|l| !l.trim().is_empty())
-        .unwrap_or("")
-        .trim()
-        .chars()
-        .take(300)
-        .collect();
     match rc {
         Some(0) => Ok(()),
-        None => Err(BrowserError::new(
-            ErrorKind::Unreachable,
-            "the delete check on the other machine timed out — nothing was deleted",
-        )),
-        Some(n) => {
-            // The physical re-check REFUSED (home-equivalent target at
-            // delete time) or the home is unresolvable — fail closed,
-            // Denied, never something to fall back around.
-            let refused = stderr.contains("Refusing to delete")
-                || stderr.contains("cannot resolve the home folder");
-            let kind = if refused {
-                ErrorKind::Denied
-            } else {
-                classify_message(&stderr)
-            };
-            let message = if tail.is_empty() {
-                format!("Delete failed (exit {n})")
-            } else {
-                tail
-            };
-            Err(BrowserError::new(kind, message))
-        }
+        other => Err(classify_delete_failure(other, &stderr)),
     }
 }
 
@@ -1115,6 +1161,62 @@ mod tests {
         // Only the LAST non-empty stderr line rides along (capped 300 chars).
         let e = classify_agent_failure(Some(2), "noise\nshort input\n");
         assert!(e.message.starts_with("short input"), "{e:?}");
+    }
+
+    /// S-3: every delete-failure shape the brief pins — the command-not-found
+    /// arm (all three real shell spellings), the rc-127-with-unrelated-stderr
+    /// arm (typed error, NEVER a fallback), and the refusal arm (Denied,
+    /// never a fallback — Codie's multi-path probe pinned no-double-delete).
+    #[test]
+    fn delete_failure_classification_shapes() {
+        // rc 127 + the helper's not-found shape → Unsupported (SFTP-walk
+        // fallback arm). Observed spellings per shell:
+        for stderr in [
+            "/bin/sh: xargs: No such file or directory\n", // bash-as-sh (macOS)
+            "sh: 1: xargs: not found\n",                   // dash (Linux /bin/sh)
+            "zsh:1: command not found: xargs\n",           // zsh
+        ] {
+            let e = classify_delete_failure(Some(127), stderr);
+            assert_eq!(
+                e.kind,
+                ErrorKind::Unsupported,
+                "{stderr:?} must map to the fallback arm: {e:?}"
+            );
+        }
+        // rc 127 with UNRELATED stderr → typed error, never the fallback.
+        let e = classify_delete_failure(Some(127), "the helper exploded weirdly\n");
+        assert_eq!(e.kind, ErrorKind::Other, "{e:?}");
+        // A not-found spelling WITHOUT the helper mention → not the shape.
+        let e = classify_delete_failure(Some(127), "config.json: not found\n");
+        assert_eq!(e.kind, ErrorKind::Notfound, "{e:?}");
+        assert!(!delete_helper_missing("config.json: not found"));
+        // The not-found shape WITHOUT rc 127 → stays a typed error.
+        let e = classify_delete_failure(Some(1), "/bin/sh: xargs: No such file or directory\n");
+        assert_eq!(e.kind, ErrorKind::Notfound, "{e:?}");
+        // REFUSALS are never a fallback, whatever the rc (Codie probe pin):
+        let e = classify_delete_failure(Some(5), "Refusing to delete /home/u/x (home inside)\n");
+        assert_eq!(e.kind, ErrorKind::Denied, "{e:?}");
+        let e = classify_delete_failure(Some(1), "Refusing to delete /private/tmp/home\n");
+        assert_eq!(e.kind, ErrorKind::Denied, "{e:?}");
+        // A refusal wins even in a bizarre rc-127 + not-found combination.
+        let e = classify_delete_failure(
+            Some(127),
+            "Refusing to delete /home/u\nsh: xargs: not found\n",
+        );
+        assert_eq!(e.kind, ErrorKind::Denied, "{e:?}");
+        // Unresolvable home → Denied (fail closed).
+        let e = classify_delete_failure(Some(1), "cannot resolve the home folder\n");
+        assert_eq!(e.kind, ErrorKind::Denied, "{e:?}");
+        // No exit code → Unreachable timeout (nothing deleted).
+        let e = classify_delete_failure(None, "");
+        assert_eq!(e.kind, ErrorKind::Unreachable, "{e:?}");
+        assert!(e.message.contains("nothing was deleted"), "{e:?}");
+        // Empty stderr keeps the exit code visible; a tail rides along.
+        let e = classify_delete_failure(Some(127), "");
+        assert_eq!(e.message, "Delete failed (exit 127)");
+        let e = classify_delete_failure(Some(1), "noise\nrm: /x/y: Permission denied\n");
+        assert_eq!(e.kind, ErrorKind::Denied, "{e:?}");
+        assert_eq!(e.message, "rm: /x/y: Permission denied");
     }
 
     #[test]
@@ -1715,6 +1817,37 @@ mod loopback_tests {
             std::fs::read(home.join("secret.txt")).unwrap(),
             b"HOME SECRET"
         );
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// S-3 (Codie M2b review): a perl host WITHOUT `xargs` — the delete
+    /// helper's command-not-found shape (rc 127 + "not found" stderr) must
+    /// map to Unsupported so browser_delete takes the documented SFTP-walk
+    /// fallback (M2a behavior preserved). The failed helper deletes nothing.
+    #[tokio::test]
+    async fn loopback_delete_xargs_missing_is_unsupported_fallback() {
+        let (base, home, work) = delete_home_setup("agent-del-noxargs");
+        let mut t = LoopTransport::new();
+        t.home_override = Some(home.to_str().unwrap().to_string());
+        // PATH without xargs: the shell itself still runs (spawned by
+        // absolute path), but it can't FIND `xargs` → rc 127 with the
+        // shell's own not-found spelling (bash-as-sh on macOS: "xargs: No
+        // such file or directory"; dash: "xargs: not found"; zsh: "command
+        // not found: xargs" — delete_helper_missing covers all three).
+        t.path_override = Some(String::new());
+        let e = agent_delete(&t, &[work.to_str().unwrap().to_string()])
+            .await
+            .expect_err("a missing xargs must fail the delete helper");
+        assert_eq!(
+            e.kind,
+            ErrorKind::Unsupported,
+            "command-not-found must map to the SFTP-fallback arm: {e:?}"
+        );
+        assert!(
+            work.exists(),
+            "the failed helper deleted nothing (fail closed before fallback)"
+        );
+        assert_eq!(t.exec_opens(), 1, "one helper exec, then the typed error");
         let _ = std::fs::remove_dir_all(&base);
     }
 
