@@ -3572,6 +3572,14 @@ mod tests {
         // --- (b) A fresh staging-root guard succeeds despite the residue ---
         {
             let _iso = super::staging_guard::StagingRootGuard::new("ra01_after_residue");
+            // The successful accept RECORDS a receipt into the shared store:
+            // hold TEST_STORE_LOCK like every other receipt-recording test,
+            // or this write races the receipt-count assertions elsewhere
+            // (acknowledge_returns_recorded_path_without_draining
+            // intermittently saw 2 receipts for photo.jpg).
+            let _g = crate::receipts::TEST_STORE_LOCK
+                .lock()
+                .unwrap_or_else(|p| p.into_inner());
             let dir = temp_test_dir("ra01_after_residue");
             let result = accept_file_with_getter(
                 "photo.jpg",
