@@ -437,6 +437,7 @@ fn typed_or_recorded<E: std::fmt::Display>(
                 kind,
                 names: None,
                 sftp_status: None,
+                agent_rc: None,
             };
         }
     }
@@ -447,6 +448,7 @@ fn typed_or_recorded<E: std::fmt::Display>(
         kind,
         names: None,
         sftp_status: None,
+        agent_rc: None,
     }
 }
 
@@ -604,6 +606,7 @@ pub async fn connect(params: ConnectParams) -> Result<RusshTransport, BrowserErr
                     kind,
                     names: None,
                     sftp_status: None,
+                    agent_rc: None,
                 });
             }
         }

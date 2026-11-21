@@ -112,6 +112,15 @@ pub struct BrowserError {
         skip_serializing_if = "Option::is_none"
     )]
     pub sftp_status: Option<u32>,
+    /// M2c S-1: exit code of the remote-helper run (copy agent / delete
+    /// re-check) that produced this error — absent for every other error.
+    /// The TYPED marker (never text-sniffed) for the rc-9 "perl here is too
+    /// old" self-heal: the commands layer downgrades that host+account's
+    /// cached AgentCap so the next transfer takes the SFTP tiers instead of
+    /// re-failing the agent tier. Backend-internal; the UI renders from
+    /// `kind` only.
+    #[serde(default, rename = "agentRc", skip_serializing_if = "Option::is_none")]
+    pub agent_rc: Option<u32>,
 }
 
 impl BrowserError {
@@ -120,6 +129,7 @@ impl BrowserError {
             message: message.into(),
             kind,
             sftp_status: None,
+            agent_rc: None,
             names: None,
         }
     }
@@ -130,12 +140,20 @@ impl BrowserError {
             kind: ErrorKind::Exists,
             names: Some(names),
             sftp_status: None,
+            agent_rc: None,
         }
     }
 
     /// Attach the raw SSH_FXP_STATUS code (B6-R probe disambiguation).
     pub fn with_sftp_status(mut self, code: u32) -> Self {
         self.sftp_status = Some(code);
+        self
+    }
+
+    /// Attach the remote helper's exit code (M2c S-1: the rc-9 typed marker
+    /// for the capability-cache self-heal).
+    pub fn with_agent_rc(mut self, rc: u32) -> Self {
+        self.agent_rc = Some(rc);
         self
     }
 

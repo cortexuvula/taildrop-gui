@@ -27,6 +27,12 @@ export interface BrowserError {
    * (B6-R Windows junction probe); the UI renders from `kind` only.
    */
   sftpStatus?: number;
+  /**
+   * Exit code of the remote helper run (copy agent / delete re-check) that
+   * produced this error. Backend-internal detail (M2c S-1: the rc-9
+   * "perl too old" self-heal marker); the UI renders from `kind` only.
+   */
+  agentRc?: number;
 }
 
 export type EntryKind = "dir" | "file";

@@ -2987,6 +2987,10 @@ mod tests {
         /// Optional cancel-after-N-bytes hook on exec-stream writes (the
         /// mid-copy cancel test — the agent-tier twin of CancelAfterBytes).
         cancel: Option<(CancellationToken, u64, Arc<AtomicU64>)>,
+        /// S-1: when set, `open_exec` runs THIS sh command instead of the
+        /// requested one — the "perl too old" host double: it consumes
+        /// stdin, then bails rc 9 with the vendored agent's exact stderr.
+        shim: Option<&'a str>,
     }
 
     #[cfg(unix)]
@@ -3099,6 +3103,8 @@ mod tests {
             cmd: &str,
         ) -> Result<Box<dyn crate::browser::agent::ExecChannel>, BrowserError> {
             self.exec_opens.fetch_add(1, Ordering::SeqCst);
+            // S-1: the "perl too old" host double replaces the agent command.
+            let cmd = self.shim.unwrap_or(cmd);
             let ch = crate::browser::agent::loopback::LocalExecChannel::spawn(cmd).await?;
             Ok(match &self.cancel {
                 Some((tok, threshold, written)) => Box::new(CountingExec {
@@ -3133,6 +3139,7 @@ mod tests {
             cap: crate::browser::agent::AgentCap::PerlExec,
             exec_opens: Arc::new(AtomicU64::new(0)),
             cancel: None,
+            shim: None,
         };
         let (emit, _p) = collector();
         let outcome = transfer::run_copy(
@@ -3196,6 +3203,7 @@ mod tests {
             exec_opens: Arc::new(AtomicU64::new(0)),
             // Cancel once the first real chunk has gone into the agent.
             cancel: Some((cancel.clone(), CHUNK as u64, Arc::new(AtomicU64::new(0)))),
+            shim: None,
         };
         let (emit, _p) = collector();
         let e = transfer::run_copy(
@@ -3240,6 +3248,7 @@ mod tests {
             cap: crate::browser::agent::AgentCap::ExecNoPerl,
             exec_opens: Arc::new(AtomicU64::new(0)),
             cancel: None,
+            shim: None,
         };
         let (emit, _p) = collector();
         transfer::run_copy(
@@ -3283,6 +3292,7 @@ mod tests {
             cap: crate::browser::agent::AgentCap::PerlExec,
             exec_opens: Arc::new(AtomicU64::new(0)),
             cancel: None,
+            shim: None,
         };
         let (emit, _p) = collector();
         transfer::run_copy(
@@ -3307,6 +3317,145 @@ mod tests {
             "windows destinations must never open an exec channel"
         );
         Box::new(t).close().await.unwrap();
+    }
+
+    // ---- S-1: rc-9 "perl too old" capability self-heal ---------------------
+
+    /// The "perl too old" host double: consumes stdin (so the bail surfaces
+    /// at `place`, exactly like the real agent's rc-9 path), then exits 9
+    /// with the vendored agent's exact stderr line.
+    #[cfg(unix)]
+    const RC9_SHIM: &str =
+        "cat >/dev/null; printf 'perl here is too old (needs 5.22 or newer)\\n' >&2; exit 9";
+
+    /// S-1 end-to-end (the brief's flow): first copy fails with the rc-9
+    /// typed error → the self-heal downgrades the cached cap to ExecNoPerl →
+    /// the SECOND copy lands the bytes through RemoteSink with ZERO
+    /// agent-tier exec opens (mirrors `engine_sftp_tier_unchanged_without_perl`).
+    /// The commands-layer hook itself (execute_copy + browser_delete calling
+    /// `downgrade_on_perl_too_old`) is tripwire-pinned below.
+    /// Pre-fix RED: without the self-heal the cap stayed PerlExec and the
+    /// second copy re-opened + re-failed the agent tier
+    /// (m2c-red-s1-demo.txt receipt).
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn engine_rc9_selfheal_second_copy_takes_sftp_tier() {
+        let srv = FakeServer::start(FakeConfig::tailscale(temp_root("agent-rc9-heal"))).await;
+        std::fs::create_dir_all(srv.root.join("src")).unwrap();
+        std::fs::write(srv.root.join("src/a.txt"), b"aaa").unwrap();
+        std::fs::create_dir_all(srv.root.join("dst")).unwrap();
+        let t = srv.connect(&temp_root("trustAGENTRC9")).await;
+
+        // The bootstrap probe passed (exit 2 needs nothing modern)...
+        let cache = AgentCapCache::new();
+        cache.put("h", "u", AgentCap::PerlExec);
+
+        // Copy 1: agent tier, the host's perl bails rc 9 "too old".
+        let o1 = Arc::new(AtomicU64::new(0));
+        let w1 = ExecCapable {
+            inner: &t,
+            cap: cache.get("h", "u").unwrap(),
+            exec_opens: Arc::clone(&o1),
+            cancel: None,
+            shim: Some(RC9_SHIM),
+        };
+        let (emit, _p) = collector();
+        let e1 = transfer::run_copy(
+            &r2r_req("/src", "/dst", &["a.txt"], false),
+            &Side::Remote {
+                transport: &t,
+                windows: false,
+            },
+            &Side::Remote {
+                transport: &w1,
+                windows: false,
+            },
+            CancellationToken::new(),
+            emit,
+        )
+        .await
+        .expect_err("the rc-9 copy fails with a typed error");
+        assert_eq!(e1.kind, ErrorKind::Unsupported, "{e1:?}");
+        assert!(
+            crate::browser::agent::is_perl_too_old(&e1),
+            "rc-9 marker rides the typed error: {e1:?}"
+        );
+        assert!(e1.message.contains("too old"), "{e1:?}");
+        assert!(o1.load(Ordering::SeqCst) >= 1, "the agent tier was used");
+        assert!(
+            !srv.root.join("dst/a.txt").exists(),
+            "the failed copy landed nothing"
+        );
+        assert!(
+            stage_leftovers(&srv.root.join("dst")).is_empty(),
+            "the failed agent run left no stage"
+        );
+
+        // The self-heal (the commands layer calls exactly this on any copy
+        // error; the method gates on the rc-9 marker itself).
+        cache.downgrade_on_perl_too_old("h", "u", &e1);
+        assert_eq!(
+            cache.get("h", "u"),
+            Some(AgentCap::ExecNoPerl),
+            "the cached cap self-healed to ExecNoPerl"
+        );
+
+        // Copy 2: SFTP tier, ZERO exec opens, bytes land unchanged.
+        let o2 = Arc::new(AtomicU64::new(0));
+        let w2 = ExecCapable {
+            inner: &t,
+            cap: cache.get("h", "u").unwrap(),
+            exec_opens: Arc::clone(&o2),
+            cancel: None,
+            shim: None, // moot: the SFTP tier never execs
+        };
+        let (emit, _p) = collector();
+        transfer::run_copy(
+            &r2r_req("/src", "/dst", &["a.txt"], false),
+            &Side::Remote {
+                transport: &t,
+                windows: false,
+            },
+            &Side::Remote {
+                transport: &w2,
+                windows: false,
+            },
+            CancellationToken::new(),
+            emit,
+        )
+        .await
+        .expect("the second copy lands via the unchanged SFTP tiers");
+        assert_eq!(std::fs::read(srv.root.join("dst/a.txt")).unwrap(), b"aaa");
+        assert_eq!(
+            o2.load(Ordering::SeqCst),
+            0,
+            "the self-healed host never re-opens the agent tier"
+        );
+        assert!(stage_leftovers(&srv.root.join("dst")).is_empty());
+        Box::new(t).close().await.unwrap();
+    }
+
+    /// S-1 + S-2 interaction: a downgraded entry SHORT-CIRCUITS
+    /// `get_or_probe` — no re-probe (the bootstrap would just re-classify
+    /// PerlExec and re-arm the failing tier). Recovery stays the explicit
+    /// invalidation (forget-host / account change / restart).
+    #[tokio::test]
+    async fn downgraded_cap_short_circuits_get_or_probe() {
+        let cache = AgentCapCache::new();
+        cache.put("h", "u", AgentCap::PerlExec);
+        let e9 = crate::browser::agent::classify_agent_failure(
+            Some(9),
+            "perl here is too old (needs 5.22 or newer)\n",
+        );
+        cache.downgrade_on_perl_too_old("h", "u", &e9);
+        assert_eq!(cache.get("h", "u"), Some(AgentCap::ExecNoPerl));
+        let t = GatedProbeTransport::new();
+        assert_eq!(cache.get_or_probe("h", "u", &t).await, AgentCap::ExecNoPerl);
+        assert_eq!(
+            t.exec_opens(),
+            0,
+            "the self-healed entry is a cache hit — never a re-probe"
+        );
     }
 
     // ---- S-2: single-flight probe doubles ----------------------------------
@@ -3528,6 +3677,11 @@ mod tests {
         assert!(
             asrc.contains("pub fn classify_delete_failure"),
             "the delete-helper failure mapping is pure + shape-pinned (S-3)"
+        );
+        assert_eq!(
+            csrc.matches("downgrade_on_perl_too_old").count(),
+            2,
+            "the rc-9 self-heal is wired at BOTH agent lanes: copy (execute_copy) and delete (browser_delete) (S-1)"
         );
         assert_eq!(
             csrc.matches("agent_caps.invalidate_host").count(),

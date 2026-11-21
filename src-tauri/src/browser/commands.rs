@@ -675,6 +675,33 @@ async fn execute_copy(
 
     let result = run_with_sides(app, state, id, req, cancel, &src_side, dst_side.as_ref()).await;
 
+    // S-1 self-heal (Codie M2b review): if the DESTINATION's agent bailed
+    // rc-9 ("perl here is too old" — typed marker, never text-sniffed),
+    // downgrade that host+account's cached capability so the NEXT copy goes
+    // straight to the SFTP tiers instead of re-failing the agent tier. The
+    // cache method itself gates on the marker; every other error is a no-op.
+    // The rc-9 error can only come from the destination's agent tier (the
+    // source side never execs), and same-host copies borrow the src
+    // transport — resolve the destination account from whichever holds it.
+    if let Err(e) = &result {
+        let dst_transport = if dst_same_as_src {
+            match &src_side {
+                OwnedSide::Remote(remote) => Some(&remote.transport),
+                _ => None,
+            }
+        } else {
+            match &dst_side {
+                Some(OwnedSide::Remote(remote)) => Some(&remote.transport),
+                _ => None,
+            }
+        };
+        if let Some(transport) = dst_transport {
+            state
+                .agent_caps
+                .downgrade_on_perl_too_old(&req.dst_target, transport.user(), e);
+        }
+    }
+
     // Close transports on every path (cooperative cleanup ordering: staging
     // was already removed by run_copy before we get here).
     close_side(src_side).await;
@@ -1140,13 +1167,29 @@ pub async fn browser_delete(
                         done: resolved.len(),
                     });
                 }
-                Err(e) if e.kind == ErrorKind::Unsupported => {
-                    log::info!(
-                        "browser delete: exec agent unavailable at delete time ({e}) — \
-                         falling back to the SFTP walk (documented M2b fallback)"
-                    );
+                Err(e) => {
+                    // S-1 self-heal: the rc-9 typed marker (exit-code based,
+                    // never text-sniffed) downgrades the cached capability;
+                    // every other error is a no-op here. A Denied refusal
+                    // (exit 5 shape) NEVER falls back and never downgrades
+                    // (Codie's no-double-delete pin).
+                    state
+                        .agent_caps
+                        .downgrade_on_perl_too_old(&target, transport.user(), &e);
+                    if e.kind == ErrorKind::Unsupported {
+                        // S-3: Unsupported now also covers the delete
+                        // helper's command-not-found shape (rc 127 + the
+                        // shell's not-found spelling for `xargs`) — the
+                        // documented SFTP-walk fallback preserves M2a
+                        // behavior on hosts without xargs.
+                        log::info!(
+                            "browser delete: exec agent unavailable at delete time ({e}) — \
+                             falling back to the SFTP walk (documented M2b fallback)"
+                        );
+                    } else {
+                        return Err(e);
+                    }
                 }
-                Err(e) => return Err(e),
             }
         }
         let mut done = 0usize;

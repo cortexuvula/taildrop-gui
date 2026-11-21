@@ -398,7 +398,22 @@ pub fn classify_agent_failure(rc: Option<u32>, stderr: &str) -> BrowserError {
         Some(9) => ErrorKind::Unsupported, // "perl here is too old"
         _ => classify_message(stderr),
     };
-    BrowserError::new(kind, message)
+    let e = BrowserError::new(kind, message);
+    match rc {
+        // S-1: the exit code rides along as a TYPED marker (never
+        // text-sniffed) — rc 9 is the one failure that self-heals the
+        // capability cache (see `is_perl_too_old`).
+        Some(n) => e.with_agent_rc(n),
+        None => e,
+    }
+}
+
+/// S-1 marker (Codie M2b review): is this error the remote helper's rc-9
+/// "perl here is too old" typed Unsupported? Identified by the exit-code
+/// marker, never by message text. This is the ONLY agent failure that
+/// self-heals the capability cache (`AgentCapCache::downgrade_on_perl_too_old`).
+pub fn is_perl_too_old(e: &BrowserError) -> bool {
+    e.kind == ErrorKind::Unsupported && e.agent_rc == Some(9)
 }
 
 #[async_trait]
@@ -604,6 +619,43 @@ impl AgentCapCache {
         *cell.get_or_init(|| probe_agent_cap(t)).await
     }
 
+    /// S-1 self-heal (Codie M2b review): a host whose perl passes the
+    /// bootstrap probe (exit 2 needs nothing modern) but fails copies with
+    /// rc 9 ("perl here is too old") must not keep the agent tier pinned —
+    /// every later transfer would re-fail instead of taking the SFTP tiers
+    /// that work fine. On EXACTLY that typed failure (`is_perl_too_old`,
+    /// matched by exit-code marker, never by text), downgrade this
+    /// host+user's cached cap to `ExecNoPerl`.
+    ///
+    /// Downgrade — NOT invalidation: re-probing would just re-classify
+    /// `PerlExec` (the bootstrap still passes), re-arming the failing tier.
+    /// Monotonic: only `PerlExec` is downgraded; `ExecNoPerl`/`SftpOnly`/
+    /// absent entries are untouched (this call never upgrades). Recovery is
+    /// the EXISTING invalidation (forget-host / account change / restart) —
+    /// e.g. after the host's perl is upgraded. No silent SFTP downgrade:
+    /// the SFTP tiers are the documented fallback, unchanged.
+    pub fn downgrade_on_perl_too_old(&self, host: &str, user: &str, e: &BrowserError) {
+        if !is_perl_too_old(e) {
+            return;
+        }
+        let mut map = self.inner.lock().unwrap_or_else(|p| p.into_inner());
+        let key = Self::key(host, user);
+        let pinned = matches!(
+            map.get(&key).and_then(|cell| cell.get()),
+            Some(AgentCap::PerlExec)
+        );
+        if !pinned {
+            return;
+        }
+        let cell = Arc::new(OnceCell::new());
+        let _ = cell.set(AgentCap::ExecNoPerl); // fresh, exclusively held
+        map.insert(key, cell);
+        log::info!(
+            "browser agent: perl on {host} is too old for the copy agent — \
+             cached capability downgraded to ExecNoPerl (SFTP tiers, no re-probe)"
+        );
+    }
+
     /// Drop every cached capability for a host (account change / forget).
     pub fn invalidate_host(&self, host: &str) {
         let mut map = self.inner.lock().unwrap_or_else(|p| p.into_inner());
@@ -691,7 +743,7 @@ pub fn classify_delete_failure(rc: Option<u32>, stderr: &str) -> BrowserError {
     } else {
         tail
     };
-    BrowserError::new(kind, message)
+    BrowserError::new(kind, message).with_agent_rc(n)
 }
 
 /// Delete `paths` (absolute, parent-resolved by the caller's guards) through
@@ -1277,6 +1329,77 @@ mod tests {
         c.put("host", "u", AgentCap::PerlExec);
         c.invalidate_host("hos");
         assert_eq!(c.get("host", "u"), Some(AgentCap::PerlExec));
+    }
+
+    /// S-1: the rc-9 "perl too old" marker is exit-code typed (never
+    /// text-sniffed), and the self-heal downgrade is scoped + monotonic.
+    #[test]
+    fn perl_too_old_marker_and_cache_self_heal() {
+        // The rc-9 typed Unsupported carries the marker.
+        let e9 = classify_agent_failure(Some(9), "perl here is too old (needs 5.22 or newer)\n");
+        assert_eq!(e9.kind, ErrorKind::Unsupported);
+        assert!(is_perl_too_old(&e9), "{e9:?}");
+        // Nothing else does — same text, different/absent rc: not the marker.
+        assert!(!is_perl_too_old(&classify_agent_failure(
+            Some(3),
+            "Can't open dst (File exists)\n"
+        )));
+        assert!(!is_perl_too_old(&classify_agent_failure(
+            Some(1),
+            "perl here is too old\n"
+        )));
+        assert!(!is_perl_too_old(&classify_agent_failure(
+            None,
+            "perl here is too old\n"
+        )));
+        assert!(!is_perl_too_old(&BrowserError::unsupported(
+            "perl here is too old (needs 5.22 or newer)"
+        )));
+        // Delete failures carry their exit code too (the marker needs BOTH
+        // rc 9 AND the Unsupported kind — a random rc-9 delete stays out).
+        let d9 = classify_delete_failure(Some(9), "whatever happened\n");
+        assert_eq!(d9.agent_rc, Some(9));
+        assert!(!is_perl_too_old(&d9), "{d9:?}");
+
+        // The downgrade: PerlExec → ExecNoPerl, scoped to host+account.
+        let c = AgentCapCache::new();
+        c.put("h", "alice", AgentCap::PerlExec);
+        c.put("h", "bob", AgentCap::PerlExec);
+        c.put("h2", "alice", AgentCap::PerlExec);
+        c.downgrade_on_perl_too_old("h", "alice", &e9);
+        assert_eq!(
+            c.get("h", "alice"),
+            Some(AgentCap::ExecNoPerl),
+            "the failing host+account drops to the SFTP tiers"
+        );
+        assert_eq!(
+            c.get("h", "bob"),
+            Some(AgentCap::PerlExec),
+            "other accounts untouched"
+        );
+        assert_eq!(
+            c.get("h2", "alice"),
+            Some(AgentCap::PerlExec),
+            "other hosts untouched"
+        );
+        // Non-rc-9 agent failures never downgrade (real failures stay
+        // visible; the agent tier is still the right choice next time).
+        let e3 = classify_agent_failure(Some(3), "Can't open dst (File exists)\n");
+        c.downgrade_on_perl_too_old("h", "bob", &e3);
+        assert_eq!(c.get("h", "bob"), Some(AgentCap::PerlExec));
+        // Monotonic: never upgrades, never touches SftpOnly or absent
+        // entries (a re-probe would just re-classify PerlExec anyway).
+        c.put("h3", "u", AgentCap::SftpOnly);
+        c.downgrade_on_perl_too_old("h3", "u", &e9);
+        assert_eq!(c.get("h3", "u"), Some(AgentCap::SftpOnly));
+        c.downgrade_on_perl_too_old("h4", "u", &e9);
+        assert_eq!(c.get("h4", "u"), None);
+        // Idempotent: a second rc-9 on the downgraded entry changes nothing.
+        c.downgrade_on_perl_too_old("h", "alice", &e9);
+        assert_eq!(c.get("h", "alice"), Some(AgentCap::ExecNoPerl));
+        // Recovery is the EXISTING invalidation (forget-host / set-user).
+        c.invalidate_host("h");
+        assert_eq!(c.get("h", "alice"), None);
     }
 
     // ---- vendoring integrity (sha256 pins from THIRD_PARTY.md) -----------
