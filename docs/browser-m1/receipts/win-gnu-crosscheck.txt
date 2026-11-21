@@ -1,100 +1,18 @@
-# Receipt: Windows GNU cross-check — PASSED (real local type-check of all cfg(windows) paths)
-# date: 2026-11-21T04:05:22Z  host: macOS Darwin 25.6.0 arm64, rustc rustc 1.99.0 (b940084d7 2026-09-28)
-# toolchain: rustup target x86_64-pc-windows-gnu + brew mingw-w64 14.0.0 (x86_64-w64-mingw32-gcc)
-# cmd: CARGO_INCREMENTAL=0 cargo check --target x86_64-pc-windows-gnu --lib --tests
-# result: exit 0 — lib AND lib-test type-check for Windows, including every
-#   cfg(windows)/cfg(not(unix)) branch added by this fix (session.rs named-pipe
-#   agent, fake.rs windows helpers, trust.rs FileTimes). Remaining warnings are
-#   pre-existing dead_code items in UNTOUCHED files (listing/place/tailscale)
-#   that are only consumed by cfg(unix) code — warnings, not errors; CI windows
-#   job runs cargo test without -D warnings.
-# NOTE: gnu != msvc ABI, but cfg(windows) type-checking is equivalent; ring
-#   compiled via mingw here and precompiles fine on CI msvc (proven by run
-#   44859283804 where russh/ring built OK and only OUR crate errored).
+# Receipt: Windows GNU cross-check + clippy — continuation 8
+# date: 2026-11-21T04:56:39Z  host: macOS Darwin 25.6.0 arm64, rustc rustc 1.99.0 (b940084d7 2026-09-28)
+# toolchain: rustup target x86_64-pc-windows-gnu + brew mingw-w64 14.0.0
+# cmds + exit codes:
+#   CARGO_INCREMENTAL=0 cargo check  --target x86_64-pc-windows-gnu --lib --tests                 -> exit 0
+#   CARGO_INCREMENTAL=0 cargo clippy --target x86_64-pc-windows-gnu --lib --tests -- -D warnings -> exit 0 (run below)
+# S1 goal MET: Codie's 15 windows-gnu dead-code/lint errors are gone; clippy -D warnings exits 0.
+# MSVC target still not cross-compilable on this Mac (ring C build, no MSVC SDK) — see
+# win-crosscheck-attempt.txt (continuation 7). GitHub Actions windows-latest remains the
+# authoritative msvc compile+RUNTIME gate; this receipt is type-check + lint evidence only.
 
-warning: function `local_home` is never used
-   --> src/browser/listing.rs:268:8
-    |
-268 | pub fn local_home() -> String {
-    |        ^^^^^^^^^^
-    |
-    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+=== cargo check --target x86_64-pc-windows-gnu --lib --tests ===
+    Checking taildrop-gui v0.16.0 (/Users/cortexuvula/Development/taildrop-gui/src-tauri)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 1.85s
 
-warning: enum `ItemKind` is never used
-  --> src/browser/transfer/place.rs:32:10
-   |
-32 | pub enum ItemKind {
-   |          ^^^^^^^^
-
-warning: enum `RenameOutcome` is never used
-  --> src/browser/transfer/place.rs:39:10
-   |
-39 | pub enum RenameOutcome {
-   |          ^^^^^^^^^^^^^
-
-warning: variants `Placed`, `FailNonAtomic`, and `FailOther` are never constructed
-  --> src/browser/transfer/place.rs:52:5
-   |
-50 | pub enum PlaceAction {
-   |          ----------- variants in this enum
-51 |     /// Item is in place; nothing more to do.
-52 |     Placed,
-   |     ^^^^^^
-...
-62 |     FailNonAtomic,
-   |     ^^^^^^^^^^^^^
-63 |     /// Any other placement failure — item left in staging, copy fails.
-64 |     FailOther,
-   |     ^^^^^^^^^
-   |
-   = note: `PlaceAction` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
-
-warning: function `place_action` is never used
-  --> src/browser/transfer/place.rs:69:8
-   |
-69 | pub fn place_action(
-   |        ^^^^^^^^^^^^
-
-warning: function `url_encode` is never used
-    --> src/tailscale.rs:1054:4
-     |
-1054 | fn url_encode(s: &str) -> String {
-     |    ^^^^^^^^^^
-
-warning: function `parse_content_length` is never used
-    --> src/tailscale.rs:1082:4
-     |
-1082 | fn parse_content_length(headers: &str) -> Result<u64, String> {
-     |    ^^^^^^^^^^^^^^^^^^^^
-
-warning: function `validate_received_length` is never used
-    --> src/tailscale.rs:1105:4
-     |
-1105 | fn validate_received_length(advertised: u64, written: u64) -> Result<(), String> {
-     |    ^^^^^^^^^^^^^^^^^^^^^^^^
-
-warning: struct `TempFileForTest` is never constructed
-    --> src/tailscale.rs:3741:12
-     |
-3741 |     struct TempFileForTest {
-     |            ^^^^^^^^^^^^^^^
-
-warning: method `cleanup` is never used
-    --> src/tailscale.rs:3747:12
-     |
-3746 |     impl TempFileForTest {
-     |     -------------------- method in this implementation
-3747 |         fn cleanup(self) {
-     |            ^^^^^^^
-
-warning: function `tempfile_for_tests` is never used
-    --> src/tailscale.rs:3753:8
-     |
-3753 |     fn tempfile_for_tests(label: &str) -> TempFileForTest {
-     |        ^^^^^^^^^^^^^^^^^^
-
-warning: `taildrop-gui` (lib) generated 8 warnings
-warning: `taildrop-gui` (lib test) generated 5 warnings (2 duplicates)
-    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.22s
-
-# cargo exit code: 0
+=== cargo clippy --target x86_64-pc-windows-gnu --lib --tests -- -D warnings ===
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.24s
+# clippy exit: 0

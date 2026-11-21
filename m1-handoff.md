@@ -325,6 +325,77 @@ build fails first (no MSVC SDK; receipts/win-crosscheck-attempt.txt). The
 Windows COMPILE+TEST gate is GitHub Actions windows-latest; see
 receipts/SUMMARY.md for the windows-gnu cross-check status.
 
+### Continuation 8 — C1 fix + Codie S1–S4
+
+**C1 (the one blocker in Codie's review of continuation 7).** Windows CI run
+44865268846 failed in `listing_skips_control_char_name_exactly_once`: the
+fixture SETUP writes a real `"bad\nname"` file, and Win32 forbids 0x01–0x1F
+in filenames (Os code 123 InvalidFilename) — production code was never
+reached. Fixed per Codie's option (a): the real-file test is now
+`#[cfg(unix)]` (unchanged otherwise — real-file coverage stays on Unix), a
+new `FakeConfig::control_char_names` knob injects the name synthetically
+into READDIR responses without touching the host filesystem (same pattern
+as `non_utf8_names`), and a new ALL-PLATFORM twin
+`listing_skips_synthetic_control_char_name_exactly_once` asserts the
+skip-and-count rule (skipped exactly once, never returned, never guessed).
+
+**Windows agent-auth scope (S2).** Windows ssh-agent auth = the
+Windows-OpenSSH service pipe `\\.\pipe\openssh-ssh-agent` ONLY. Pageant
+(PuTTY) is NOT supported in M1 — russh exposes `connect_pageant`, but it is
+deliberately not wired; a user with only Pageant running gets the typed
+no-credential error listing what was tried (never a silent skip-as-success).
+russh's ERROR_PIPE_BUSY retry loop has no limit of its own but is bounded by
+the 25 s AUTH_TIMEOUT around the whole auth phase, so a permanently busy
+pipe ends in the typed auth-timeout error, not a hang (S3 comment at the
+connect site in session.rs).
+
+**Tests that cannot run on Windows hosts (S4).** 17 `#[cfg(unix)]` tests in
+fake.rs, each gated with a one-line reason at the site:
+
+- 16 drive `run_copy` through `Side::Local` — the local engine is Unix-only
+  by M1 design (local_side.rs is whole-module `#[cfg(unix)]`; callers fail
+  closed via `local_unsupported()`), so these cannot exercise real behavior
+  on a Windows host:
+  `hardlink_lies_end_to_end_copy_uses_documented_fallback`,
+  `pull_skips_non_utf8_names_and_counts_them`,
+  `copy_local_to_remote_fidelity_and_cleanup`,
+  `copy_onto_existing_without_consent_refuses_and_cleans`,
+  `copy_replace_consent_replaces_and_cleans`,
+  `cancel_midcopy_leaves_no_stage_and_no_destination`,
+  `windows_pull_skips_junctions_never_follows`,
+  `windows_pull_descends_plain_dirs_answering_failure`,
+  `windows_pull_tolerates_dir_vanished_before_probe`,
+  `posix_pull_never_probes_dir_readlink`,
+  `write_failure_midcopy_reports_primary_error_and_cleans`,
+  `pre_cancelled_copy_creates_nothing`, `pull_copies_remote_symlink_as_link`,
+  `pull_size_changed_fails_and_cleans`,
+  `pull_read_error_not_masked_by_close_error`,
+  `cancel_remote_source_leaves_no_stage`.
+- 1 writes a real control-char filename in its setup (NTFS/Win32 forbids
+  0x01–0x1F in names): `listing_skips_control_char_name_exactly_once` — the
+  RULE stays covered on Windows by the knob-based twin above (C1).
+
+Related Unix-only coverage by design (not new): the entire local_side.rs
+test module (handle-bound local-engine attack tests) and trust.rs
+`pin_file_is_0600` (0600/0700 mode bits are a Unix concept). What still
+runs on Windows: all transport/auth/trust/extension/listing tests in
+fake.rs, the 4 platform-neutral remote_side tests (probe semantics,
+never-probe, staging/placement, stream roundtrip), the C1 synthetic twin,
+and every pure-unit module (plan, guards, winnames, probe, session, trust,
+place decision tables).
+
+**S1 (hygiene, no behavior change).** `#[cfg_attr(not(unix),
+allow(dead_code))]` with per-item reasons on the items that are dead in
+Windows builds because their only consumers are Unix-gated: listing.rs
+`local_home`; place.rs `ItemKind`/`RenameOutcome`/`PlaceAction`/
+`place_action`; tailscale.rs `url_encode`/`parse_content_length`/
+`validate_received_length` + the `TempFileForTest` framing-test helpers
+(pre-M1 items; attribute/lint touches only). Also fixed the Windows-only
+clippy `unnecessary_map_err` in tailscale.rs's Windows `accept_file`
+(`map_err` that returned `e` unchanged → behavior-identical `inspect_err`).
+Result: `cargo clippy --target x86_64-pc-windows-gnu --lib --tests
+-- -D warnings` exits 0.
+
 ## What M2/M3 inherit
 
 - `browser/fake.rs`: configurable hostile-server harness (banners,

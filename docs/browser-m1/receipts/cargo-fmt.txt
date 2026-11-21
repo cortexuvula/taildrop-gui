@@ -1,5 +1,4 @@
-# Receipt: cargo fmt --check
-# date: 2026-11-21T04:04:46Z
-# cmd: cargo fmt -- --check
+# Receipt: cargo fmt -- --check — continuation 8
+# date: 2026-11-21T04:56:39Z
+# EXIT CODE: 0 (empty diff below = clean)
 
-# exit: 0 (no output above = clean)

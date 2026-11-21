@@ -1,6 +1,49 @@
 # M1 gate receipts
 
-## Windows compile fix (continuation 7) — CURRENT
+## C1 fix + Codie S1–S4 (continuation 8) — CURRENT
+
+Fixes the ONE blocker in Codie's review of continuation 7
+(codie-winfix-review.md, REQUEST CHANGES): Windows CI run 44865268846
+failed `browser::fake::tests::listing_skips_control_char_name_exactly_once`
+— the fixture setup writes a real `"bad\nname"` file and Win32 forbids
+0x01–0x1F in filenames (Os code 123 InvalidFilename). Fixed per Codie's
+recommended option (a):
+
+- C1: real-file test gated `#[cfg(unix)]` (unchanged otherwise); new
+  `FakeConfig::control_char_names` knob injects the name synthetically into
+  READDIR (mirrors `non_utf8_names`); new ALL-PLATFORM twin
+  `listing_skips_synthetic_control_char_name_exactly_once` keeps the
+  skip-and-count rule covered on Windows (skipped exactly once, never
+  returned, never guessed).
+- S1: `#[cfg_attr(not(unix), allow(dead_code))]` + one-line reasons on the
+  Windows-dead items Codie listed (listing.rs `local_home`; place.rs
+  `ItemKind`/`RenameOutcome`/`PlaceAction`/`place_action`; tailscale.rs
+  `url_encode`/`parse_content_length`/`validate_received_length` +
+  `TempFileForTest` helpers — attribute/lint touches only in that pre-M1
+  file), plus the behavior-identical `map_err`→`inspect_err` fix at
+  tailscale.rs:2508. Goal MET: windows-gnu clippy `-D warnings` exits 0
+  (was 15 errors in Codie's run).
+- S2/S4: m1-handoff.md — Windows agent auth = OpenSSH service pipe only
+  (Pageant not supported in M1, honest typed error instead); full list of
+  the 17 Unix-only fake.rs tests with reasons and what still runs on
+  Windows.
+- S3: session.rs comment — russh's ERROR_PIPE_BUSY retry is bounded by the
+  25 s AUTH_TIMEOUT (busy pipe → typed timeout error, never a hang).
+
+| Gate | Command (cwd src-tauri) | Exit | Result | Raw log |
+|---|---|---|---|---|
+| Rust tests (host) | `CARGO_INCREMENTAL=0 cargo test --lib` | 0 | **229 passed, 0 failed** (228 prior + 1 new knob twin; 224 original all still green) | cargo-test.txt |
+| Rust format | `cargo fmt -- --check` | 0 | clean | cargo-fmt.txt |
+| Rust lint (host) | `CARGO_INCREMENTAL=0 cargo clippy --all-targets -- -D warnings` | 0 | 0 warnings | cargo-clippy.txt |
+| Windows lint (local, GNU) | `CARGO_INCREMENTAL=0 cargo clippy --target x86_64-pc-windows-gnu --lib --tests -- -D warnings` | 0 | **PASS — S1 goal met** (Codie's 15 dead-code/lint errors gone) | win-gnu-crosscheck.txt |
+| Windows type-check (local, GNU) | `CARGO_INCREMENTAL=0 cargo check --target x86_64-pc-windows-gnu --lib --tests` | 0 | PASS — lib + tests incl. new knob code | win-gnu-crosscheck.txt |
+| Windows compile+test (CI, msvc) | GitHub Actions windows-latest "Rust tests" | pending | **Remains the authoritative runtime gate** — no Windows host available locally; the C1 failure class (runtime fixture behavior, not typing) is only provable there. Frikkie pushes; do NOT tag v0.16.x until it is green (Codie's instruction). | — |
+
+MSVC cross-check from macOS remains impossible (ring C build needs the MSVC
+SDK — win-crosscheck-attempt.txt, continuation 7). TS/frontend untouched in
+this round → tsc/vitest/playwright skipped per brief.
+
+## Windows compile fix (continuation 7)
 
 CI windows-latest `cargo test` failed to COMPILE at master 07969c1 (run
 44859283804, job 136709470314): 27 errors — Unix-only APIs without platform

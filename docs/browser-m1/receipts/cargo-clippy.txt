@@ -1,6 +1,5 @@
-# Receipt: cargo clippy --all-targets -- -D warnings (host aarch64-apple-darwin)
-# date: 2026-11-21T04:04:46Z, rustc rustc 1.99.0 (b940084d7 2026-09-28)
-# cmd: CARGO_INCREMENTAL=0 cargo clippy --all-targets -- -D warnings
+# Receipt: cargo clippy --all-targets -- -D warnings (host aarch64-apple-darwin) — continuation 8
+# date: 2026-11-21T04:56:39Z, rustc rustc 1.99.0 (b940084d7 2026-09-28)
+# EXIT CODE: 0
 
-    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.24s
-# exit: 0
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.22s
