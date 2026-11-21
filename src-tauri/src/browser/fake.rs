@@ -2893,4 +2893,80 @@ mod tests {
         Box::new(t_a).close().await.unwrap();
         Box::new(t_b).close().await.unwrap();
     }
+
+    /// W-1 (Codie M2a review, throwaway probe promoted permanently):
+    /// same-host SAME-account copy — ONE transport serves both sides,
+    /// exactly the `dst_same_as_src` shape commands.rs takes when
+    /// dst_target == src_target && dst_user == src_user (single connection,
+    /// single close). `/a` → `/b` on one FakeServer: a file spanning three
+    /// chunk boundaries (+9 bytes) and a nested folder. Asserts byte
+    /// fidelity, mtime travel, source untouched, and stage cleanup on both
+    /// "sides" (one filesystem here). All platforms — no local side.
+    #[tokio::test]
+    async fn remote_to_remote_same_host_one_transport() {
+        let srv = FakeServer::start(FakeConfig::tailscale(temp_root("r2r-one"))).await;
+        let payload = vec![3u8; CHUNK * 3 + 9];
+        std::fs::create_dir_all(srv.root.join("a/folder/sub")).unwrap();
+        std::fs::write(srv.root.join("a/big.bin"), &payload).unwrap();
+        set_mtime_secs(&srv.root.join("a/big.bin"), 1_700_000_789);
+        std::fs::write(srv.root.join("a/folder/sub/inner.txt"), b"inner").unwrap();
+        std::fs::create_dir_all(srv.root.join("b")).unwrap();
+
+        let t = srv.connect(&temp_root("trustR2RONE")).await;
+        let req = CopyRequest {
+            src_target: "host-a".into(),
+            src_user: Some("fakeuser".into()),
+            src_dir: "/a".into(),
+            dst_target: "host-a".into(),
+            dst_user: Some("fakeuser".into()),
+            dst_dir: "/b".into(),
+            names: vec!["big.bin".into(), "folder".into()],
+            replace: false,
+        };
+        let (emit, _pcts) = collector();
+        // BOTH sides borrow the same transport value — the engine must read
+        // and stage over one connection without deadlocking or leaking.
+        let side = Side::Remote {
+            transport: &t,
+            windows: false,
+        };
+        let outcome = transfer::run_copy(&req, &side, &side, CancellationToken::new(), emit)
+            .await
+            .expect("same-host same-account copy succeeds on ONE transport");
+        assert_eq!(outcome.skipped, 0);
+        assert_eq!(
+            outcome.bytes,
+            payload.len() as u64 + 5, // big.bin + folder/sub/inner.txt
+            "every acknowledged byte counted through the single connection"
+        );
+        assert_eq!(
+            std::fs::read(srv.root.join("b/big.bin")).unwrap(),
+            payload,
+            "3×CHUNK+9 bytes land with fidelity"
+        );
+        assert_eq!(
+            mtime_secs(&srv.root.join("b/big.bin")),
+            1_700_000_789,
+            "source mtime travels"
+        );
+        assert_eq!(
+            std::fs::read(srv.root.join("b/folder/sub/inner.txt")).unwrap(),
+            b"inner",
+            "folder structure lands"
+        );
+        assert!(
+            stage_leftovers(&srv.root.join("b")).is_empty(),
+            "stage cleaned on the destination side"
+        );
+        assert!(
+            stage_leftovers(&srv.root.join("a")).is_empty(),
+            "no stage debris on the source side either"
+        );
+        assert_eq!(
+            std::fs::read(srv.root.join("a/big.bin")).unwrap(),
+            payload,
+            "source untouched"
+        );
+        Box::new(t).close().await.unwrap();
+    }
 }
