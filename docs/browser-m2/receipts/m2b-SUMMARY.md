@@ -18,7 +18,7 @@ command, commit SHA and UTC date in their headers.
 | `cargo clippy --target x86_64-pc-windows-gnu --lib --tests -- -D warnings` | m2b-cargo-clippy-windows-gnu.txt | exit 0 |
 | `cargo check --target x86_64-pc-windows-gnu` | m2b-cargo-check-windows-gnu.txt | exit 0 |
 | `npx tsc --noEmit` | m2b-tsc-noemit.txt | exit 0 |
-| `npx vitest run` | m2b-vitest.txt | **193 passed** (19 files; unchanged — M2b adds no frontend surface, no capability badge per design) |
+| `npx vitest run` | m2b-vitest.txt | **193 passed** (19 files; count moved 190/18 → 193/19 — no NEW production view/badge: the +3 tests pin the owner-decided notify-sync effect and the instant-refusal mirror) |
 | `npx playwright test` | m2b-playwright.txt | **62 passed** (chromium, 11.5s) |
 
 Review round-1 fixes (both test-only, no production code, no test weakened):
