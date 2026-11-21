@@ -776,14 +776,31 @@ pub async fn agent_delete(t: &dyn SftpTransport, paths: &[String]) -> Result<(),
         payload.push(0);
     }
     let mut ch = t.open_exec(&posix_delete_cmd()).await?;
-    ch.write_all(&payload).await?;
-    ch.close_stdin().await?;
+    // A helper that exits BEFORE consuming stdin (e.g. a command-not-found
+    // delete helper exits 127 immediately) can EPIPE the payload write —
+    // ubuntu CI proved the race where macOS wins it. That is not a transport
+    // failure: the child's exit code + stderr carry the real classification
+    // (S-3). Any OTHER write error is a genuine failure and propagates.
+    match ch.write_all(&payload).await {
+        Ok(()) => ch.close_stdin().await?,
+        Err(e) if is_broken_pipe(&e) => {
+            // Best-effort EOF; the reader may already be gone.
+            let _ = ch.close_stdin().await;
+        }
+        Err(e) => return Err(e),
+    }
     let rc = ch.wait_exit(DELETE_WAIT).await;
     let stderr = ch.stderr_tail();
     match rc {
         Some(0) => Ok(()),
         other => Err(classify_delete_failure(other, &stderr)),
     }
+}
+
+/// EPIPE from an exec child's closed stdin. `ExecChannel` flattens the
+/// io::Error into the message, so detect the unix rendering.
+fn is_broken_pipe(e: &BrowserError) -> bool {
+    e.message.contains("Broken pipe") || e.message.contains("os error 32")
 }
 
 // ---------------------------------------------------------------------------
@@ -836,6 +853,31 @@ pub mod loopback {
             }
         }
         "perl".to_string()
+    }
+
+    /// Test-only channel wrapper: the payload write fails EPIPE immediately,
+    /// everything else delegates to the real loopback child.
+    struct WriteEpipeChannel(Box<dyn ExecChannel>);
+
+    #[async_trait]
+    impl ExecChannel for WriteEpipeChannel {
+        async fn write_all(&mut self, _data: &[u8]) -> Result<(), BrowserError> {
+            Err(BrowserError::other(
+                "agent stream write: Broken pipe (os error 32)",
+            ))
+        }
+        async fn read(&mut self, buf: &mut [u8]) -> Result<usize, BrowserError> {
+            self.0.read(buf).await
+        }
+        async fn close_stdin(&mut self) -> Result<(), BrowserError> {
+            self.0.close_stdin().await
+        }
+        async fn wait_exit(&mut self, timeout: Duration) -> Option<u32> {
+            self.0.wait_exit(timeout).await
+        }
+        fn stderr_tail(&self) -> String {
+            self.0.stderr_tail()
+        }
     }
 
     /// An `ExecChannel` backed by a local `sh -c <cmd>` child. Same framing,
@@ -1008,6 +1050,9 @@ pub mod loopback {
         pub refuse_exec: bool,
         pub path_override: Option<String>,
         pub home_override: Option<String>,
+        /// Test-only: the payload write fails EPIPE immediately (the child
+        /// already exited before consuming stdin — the ubuntu CI race).
+        pub epipe_on_write: bool,
     }
 
     impl LoopTransport {
@@ -1018,6 +1063,7 @@ pub mod loopback {
                 refuse_exec: false,
                 path_override: None,
                 home_override: None,
+                epipe_on_write: false,
             }
         }
         pub fn exec_opens(&self) -> u64 {
@@ -1125,12 +1171,16 @@ pub mod loopback {
             }
             self.exec_opens
                 .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-            LocalExecChannel::spawn_opts(
+            let ch = LocalExecChannel::spawn_opts(
                 cmd,
                 self.path_override.as_deref(),
                 self.home_override.as_deref(),
             )
-            .await
+            .await?;
+            if self.epipe_on_write {
+                return Ok(Box::new(WriteEpipeChannel(ch)));
+            }
+            Ok(ch)
         }
     }
 }
@@ -1997,6 +2047,29 @@ mod loopback_tests {
             std::fs::read(home.join("secret.txt")).unwrap(),
             b"HOME SECRET"
         );
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// S-3 race pinned deterministically (ubuntu CI 44957791846): a helper
+    /// that exits before consuming stdin EPIPEs the payload write. The
+    /// write error must NOT be the reported failure — the child's rc 127 +
+    /// not-found stderr classifies to the SFTP-fallback arm.
+    #[tokio::test]
+    async fn delete_epipe_on_write_still_classifies_command_not_found() {
+        let (base, home, work) = delete_home_setup("agent-del-epipe");
+        let mut t = LoopTransport::new();
+        t.home_override = Some(home.to_str().unwrap().to_string());
+        t.path_override = Some(String::new());
+        t.epipe_on_write = true;
+        let e = agent_delete(&t, &[work.to_str().unwrap().to_string()])
+            .await
+            .expect_err("a missing xargs must fail the delete helper");
+        assert_eq!(
+            e.kind,
+            ErrorKind::Unsupported,
+            "EPIPE on the payload write must not mask the rc-127 classification: {e:?}"
+        );
+        assert!(work.exists(), "the failed helper deleted nothing");
         let _ = std::fs::remove_dir_all(&base);
     }
 
