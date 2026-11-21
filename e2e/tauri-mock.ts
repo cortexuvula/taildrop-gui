@@ -13,6 +13,9 @@
  *   ?slowRecover=1                recover/discard take ~400ms (busy-state tests)
  *   ?holdRecover=1                recover never settles until __e2e.releaseRecover()
  *   ?holdDiscard=1                discard never settles until __e2e.releaseDiscard()
+ *   ?lastHost=H                   browser config seed: persisted last-remote H
+ *   ?savedUser=host:user          browser config seed: persisted per-host account
+ *   ?pins=0                       start with an empty known-hosts pin list
  */
 
 type InvokeArgs = Record<string, unknown> | undefined;
@@ -54,6 +57,8 @@ interface E2eApi {
   browserJobsNow: () => Array<Record<string, unknown>>;
   browserFsNow: (target: string) => unknown;
   browserConfigNow: () => { hosts: Record<string, { user: string | null }>; last: string };
+  /** M2a: current known-hosts pin list (Forget mutates it). */
+  browserPinsNow: () => Array<{ host: string; flavor: string; fingerprint: string }>;
   emitCopy: (payload: unknown) => void;
 }
 
@@ -223,6 +228,12 @@ const browserFS: Record<string, MockNode> = {
     "incoming": dir({}),
     "music": dir({ "track.flac": file(30000000) }),
   }),
+  // M2a: second remote for the remote→remote copy tests (no notes.txt at the
+  // root, so studio-mac:/notes.txt → linux-box:/ never collides).
+  "linux-box": dir({
+    "incoming": dir({}),
+    "shared": dir({ "todo.md": file(64) }),
+  }),
   winbox: dir({ "stuff": dir({}) }),
 };
 
@@ -230,6 +241,11 @@ const browserPeers = [
   {
     host: "studio-mac", name: "studio-mac", dns: "studio-mac.tail.ps.net.",
     ip: "100.79.10.43", os: "macos", online: true, user: "",
+    tailscaleSsh: true, browsable: true, isSelf: false,
+  },
+  {
+    host: "linux-box", name: "linux-box", dns: "linux-box.tail.ps.net.",
+    ip: "100.79.10.44", os: "linux", online: true, user: "",
     tailscaleSsh: true, browsable: true, isSelf: false,
   },
   {
@@ -272,12 +288,42 @@ interface MockJob {
   created: number;
 }
 
+// M2a config seeds: ?lastHost= persists the last-remote selection, and
+// ?savedUser=host:user persists a per-host account (restart-memory e2e).
+function seededConfig(): { hosts: Record<string, { user: string | null }>; last: string } {
+  const hosts: Record<string, { user: string | null }> = {};
+  const savedUser = params.get("savedUser");
+  if (savedUser) {
+    const idx = savedUser.indexOf(":");
+    if (idx > 0) hosts[savedUser.slice(0, idx)] = { user: savedUser.slice(idx + 1) };
+  }
+  return { hosts, last: params.get("lastHost") ?? "" };
+}
+
 const browserState = {
   jobs: [] as MockJob[],
   nextJobId: 1,
-  config: { hosts: {} as Record<string, { user: string | null }>, last: "" },
+  config: seededConfig(),
   timers: new Map<number, ReturnType<typeof setInterval>>(),
 };
+
+// M2a known-hosts pins (mutable — Forget removes rows). ?pins=0 starts empty.
+interface MockPin {
+  host: string;
+  flavor: string;
+  fingerprint: string;
+}
+let browserPins: MockPin[] =
+  params.get("pins") === "0"
+    ? []
+    : [
+        {
+          host: "studio-mac",
+          flavor: "tailscale-ssh",
+          fingerprint: "SHA256:WnFigd6vxW1unbyFJHKepROv0zUUHGzEQZiaKA2ez/4",
+        },
+        { host: "linux-box", flavor: "openssh", fingerprint: "" },
+      ];
 
 const browserFlags = {
   failAuth: params.get("browserFailAuth") === "1",
@@ -356,6 +402,10 @@ function startJob(req: Record<string, unknown>): number {
       return;
     }
     browserState.timers.delete(id);
+    // Actually STOP the interval: without this the settled job keeps ticking,
+    // and a no-collision copy flips done→failed on the next pass (the file it
+    // just landed now "collides" with itself). The cancel path already clears.
+    clearInterval(timer);
     job.pct = 100;
     // Collision rule: any name already at the destination, without consent.
     const collide = names.filter((n) => nodeAt(dstTarget, `${dstDir}/${n}`.replace("//", "/")));
@@ -553,6 +603,19 @@ async function handle(cmd: string, args: InvokeArgs): Promise<unknown> {
     case "browser_set_last":
       browserState.config.last = String(args?.host);
       return null;
+    // ---- M2a: known-hosts pin management (M1 gap 4) ----
+    case "browser_known_hosts":
+      return browserPins.map((p) => ({ ...p }));
+    case "browser_forget_host_key": {
+      const host = String(args?.host);
+      const flavor = String(args?.flavor);
+      const before = browserPins.length;
+      browserPins = browserPins.filter((p) => !(p.host === host && p.flavor === flavor));
+      if (browserPins.length === before) {
+        throw { message: `no pinned ${flavor} key for ${host}`, kind: "notfound" };
+      }
+      return null;
+    }
     case "show_in_folder":
     case "send_file":
       return null;
@@ -592,6 +655,7 @@ window.__e2e = {
   browserJobsNow: () => browserState.jobs.map((j) => ({ ...j })),
   browserFsNow: (target: string) => browserFS[target],
   browserConfigNow: () => browserState.config,
+  browserPinsNow: () => browserPins.map((p) => ({ ...p })),
   emitCopy: (payload: unknown) => emit("browser-copy-event", payload),
   stagingNow: () => state.staging,
   receiptsNow: () => state.receipts,

@@ -258,23 +258,180 @@ test.describe('browser copy queue', () => {
 });
 
 test.describe('browser copy scope', () => {
-  test('remote→remote copy is refused in the UI with the M2 note (B5)', async ({ page }) => {
+  test('remote→remote copy streams through the app (M2a: B5 refusal lifted)', async ({ page }) => {
     await page.setViewportSize({ width: 1180, height: 740 });
     await openFilesView(page);
-    // Put BOTH panes on a remote machine.
+    // Put BOTH panes on DIFFERENT remote machines — the M1 mirror refusal is
+    // gone; the copy must enqueue and land in the destination's mock FS.
     await pickMachine(page, 'left', 'studio-mac');
-    await pickMachine(page, 'right', 'studio-mac');
+    await pickMachine(page, 'right', 'linux-box');
     await expect(pane(page, 'left').locator('.machine-label')).toHaveText('studio-mac');
-    await expect(pane(page, 'right').locator('.machine-label')).toHaveText('studio-mac');
-    // Select a file and try to copy — must be refused before any IPC.
+    await expect(pane(page, 'right').locator('.machine-label')).toHaveText('linux-box');
+    await expect(pane(page, 'right').getByText('shared')).toBeVisible();
+
+    // Select studio-mac:/notes.txt and copy left → right (remote → remote).
     await pane(page, 'left').locator('.pane-row[data-name="notes.txt"]').click();
     await focusList(page, 'left');
     await page.keyboard.press('c');
-    await expect(page.locator('.browser-status')).toContainText('M2');
+
+    // The job runs to done — no refusal notice, no local hop.
+    const row = page.getByTestId('queue-row-1');
+    await expect(row).toBeVisible();
+    await expect(row).toHaveAttribute('data-state', 'done', { timeout: 5000 });
+
+    // The wire carries BOTH remote targets.
+    const copies = await page.evaluate(() =>
+      window.__e2e!.calls.filter((c) => c.cmd === 'browser_copy').map((c) => c.args),
+    );
+    expect(copies).toHaveLength(1);
+    const job = (copies[0] as { job: Record<string, unknown> }).job;
+    expect(job.srcTarget).toBe('studio-mac');
+    expect(job.srcDir).toBe('/');
+    expect(job.dstTarget).toBe('linux-box');
+    expect(job.dstDir).toBe('/');
+    expect(job.names).toEqual(['notes.txt']);
+
+    // The bytes landed on the OTHER remote (size 999 = studio-mac's copy).
+    const size = await page.evaluate(() => {
+      const fs = window.__e2e!.browserFsNow('linux-box') as {
+        children: Record<string, { size?: number }>;
+      };
+      return fs.children['notes.txt']?.size;
+    });
+    expect(size).toBe(999);
+
+    // Reloading the destination pane SHOWS the copied file. (Click a row
+    // first — mousedown is what flips the ACTIVE pane; DOM focus alone
+    // doesn't, and "r" refreshes the active pane.)
+    await pane(page, 'right').locator('.pane-row[data-name="shared"]').click();
+    await focusList(page, 'right');
+    await page.keyboard.press('r');
+    await expect(pane(page, 'right').getByText('notes.txt')).toBeVisible();
+  });
+
+  test('same folder on one machine is still refused before any IPC', async ({ page }) => {
+    await page.setViewportSize({ width: 1180, height: 740 });
+    await openFilesView(page);
+    // Both panes on the SAME remote folder: nothing to stream, refused in the
+    // UI (the server preflight keeps the same-host-two-account refusal).
+    await pickMachine(page, 'left', 'studio-mac');
+    await pickMachine(page, 'right', 'studio-mac');
+    await pane(page, 'left').locator('.pane-row[data-name="notes.txt"]').click();
+    await focusList(page, 'left');
+    await page.keyboard.press('c');
+    await expect(page.locator('.browser-status')).toContainText('same folder');
     const copies = await page.evaluate(
       () => window.__e2e!.calls.filter((c) => c.cmd === 'browser_copy').length,
     );
     expect(copies).toBe(0);
+  });
+});
+
+test.describe('browser M2a parity', () => {
+  test('= mirrors the active pane onto the other pane', async ({ page }) => {
+    await page.setViewportSize({ width: 1180, height: 740 });
+    await openFilesView(page);
+    await pickMachine(page, 'left', 'studio-mac');
+    await expect(pane(page, 'left').getByText('music')).toBeVisible();
+
+    // Left is active (studio-mac); right is still local. "=" mirrors LEFT→RIGHT.
+    await focusList(page, 'left');
+    await page.keyboard.press('=');
+    await expect(pane(page, 'right').locator('.machine-label')).toHaveText('studio-mac');
+    await expect(pane(page, 'right').getByText('music')).toBeVisible();
+    // The active pane did not move.
+    await expect(pane(page, 'left').locator('.machine-label')).toHaveText('studio-mac');
+  });
+
+  test('g/G jump to top/bottom; h goes up; l opens', async ({ page }) => {
+    await page.setViewportSize({ width: 1180, height: 740 });
+    await openFilesView(page);
+    await focusList(page, 'left');
+    // Rows: Documents (dir), notes.txt, photo.jpg — cursor starts on row 0.
+    const rows = pane(page, 'left').locator('.pane-row');
+    await page.keyboard.press('G');
+    await expect(rows.nth(2)).toHaveClass(/cursor/);
+    await page.keyboard.press('g');
+    await expect(rows.nth(0)).toHaveClass(/cursor/);
+    // l opens the folder under the cursor (Documents).
+    await page.keyboard.press('l');
+    await expect(pane(page, 'left').locator('.path-display')).toHaveText('/Documents');
+    // h climbs back to the parent.
+    await page.keyboard.press('h');
+    await expect(pane(page, 'left').locator('.path-display')).toHaveText('/');
+  });
+
+  test('? opens the help overlay (F1 too), Esc closes it', async ({ page }) => {
+    await page.setViewportSize({ width: 1180, height: 740 });
+    await openFilesView(page);
+    await focusList(page, 'left');
+    await page.keyboard.press('?');
+    const help = page.getByTestId('help-dialog');
+    await expect(help).toBeVisible();
+    await expect(help.getByText('Keyboard shortcuts')).toBeVisible();
+    // A few real bindings are listed (truthfulness is pinned by vitest).
+    await expect(help.locator('kbd', { hasText: 'j / ↓' })).toBeVisible();
+    await expect(help.locator('kbd', { hasText: '=' })).toBeVisible();
+    await page.keyboard.press('Escape');
+    await expect(help).toHaveCount(0);
+    await page.keyboard.press('F1');
+    await expect(help).toBeVisible();
+  });
+
+  test('Known hosts dialog lists pins; Forget wires to browser_forget_host_key', async ({ page }) => {
+    await page.setViewportSize({ width: 1180, height: 740 });
+    await openFilesView(page);
+    await page.getByTestId('known-hosts-button').click();
+    const dialog = page.getByTestId('known-hosts-dialog');
+    await expect(dialog).toBeVisible();
+    const rows = dialog.getByTestId('known-host-row');
+    await expect(rows).toHaveCount(2);
+    await expect(rows.nth(0)).toContainText('studio-mac');
+    await expect(rows.nth(0)).toContainText('Tailscale SSH');
+    await expect(rows.nth(0)).toContainText('SHA256:WnFigd6vxW1unbyFJHKepROv0zUUHGzEQZiaKA2ez/4');
+    // The unparseable pin shows the placeholder, never an invented fingerprint.
+    await expect(rows.nth(1)).toContainText('—');
+
+    await dialog
+      .getByRole('button', { name: /Forget the Tailscale SSH key for studio-mac/i })
+      .click();
+    await expect(rows).toHaveCount(1);
+    const forgets = await page.evaluate(() =>
+      window.__e2e!.calls.filter((c) => c.cmd === 'browser_forget_host_key').map((c) => c.args),
+    );
+    expect(forgets).toEqual([{ host: 'studio-mac', flavor: 'tailscale-ssh' }]);
+    const pins = await page.evaluate(() => window.__e2e!.browserPinsNow());
+    expect(pins).toEqual([{ host: 'linux-box', flavor: 'openssh', fingerprint: '' }]);
+  });
+
+  test('empty pin list shows the empty-state hint', async ({ page }) => {
+    await page.setViewportSize({ width: 1180, height: 740 });
+    await openFilesView(page, 'pins=0');
+    await page.getByTestId('known-hosts-button').click();
+    const dialog = page.getByTestId('known-hosts-dialog');
+    await expect(dialog.getByTestId('known-hosts-empty')).toBeVisible();
+  });
+
+  test('last-remote + saved account restore on load (restart memory)', async ({ page }) => {
+    await page.setViewportSize({ width: 1180, height: 740 });
+    await openFilesView(page, 'lastHost=studio-mac&savedUser=studio-mac:alice');
+    // The right pane seeds from the persisted last-remote on config load.
+    await expect(pane(page, 'right').locator('.machine-label')).toHaveText('studio-mac', {
+      timeout: 5000,
+    });
+    await expect(pane(page, 'right').getByText('music')).toBeVisible();
+    // The persisted account rides along as asUser on the listing call…
+    const ls = await page.evaluate(() =>
+      window.__e2e!.calls.filter((c) => c.cmd === 'browser_ls').map((c) => c.args),
+    );
+    expect(
+      ls.some((a) => {
+        const args = a as { target?: string; asUser?: string | null };
+        return args.target === 'studio-mac' && args.asUser === 'alice';
+      }),
+    ).toBe(true);
+    // …and is surfaced in the machine picker button.
+    await expect(pane(page, 'right').locator('.machine-user').first()).toHaveText('alice@');
   });
 });
 
