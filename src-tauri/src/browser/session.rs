@@ -313,6 +313,10 @@ async fn agent_connect() -> Option<DynAgent> {
 /// unaffected.
 #[cfg(windows)]
 async fn agent_connect() -> Option<DynAgent> {
+    // russh retries ERROR_PIPE_BUSY every 50 ms with no limit of its own,
+    // but the whole auth phase runs inside tokio::time::timeout(AUTH_TIMEOUT
+    // = 25 s) — a permanently busy pipe ends in the typed auth-timeout
+    // error, never a hang.
     match AgentClient::connect_named_pipe(r"\\.\pipe\openssh-ssh-agent").await {
         Ok(a) => Some(a.dynamic()),
         Err(_) => None, // ssh-agent service not running / pipe absent
