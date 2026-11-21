@@ -30,7 +30,7 @@ log = "0.4"
 env_logger = "0.11"
 # Browser (M1): pure-SFTP transport over Tailscale SSH. Versions pinned to the
 # exact pair proven by the M0 fleet spike (m0-spike/Cargo.lock).
-russh = { version = "=0.65.2", default-features = false, features = ["ring", "rsa"] }
+russh = { version = "=0.65.2", default-features = false, features = ["ring"] }
 russh-sftp = "=3.0.1"
 async-trait = "0.1"
 # Random 64-bit staging tags (.tailfiles-incoming-<16hex>).

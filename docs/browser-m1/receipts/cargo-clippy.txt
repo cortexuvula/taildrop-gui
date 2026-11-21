@@ -1,4 +1,5 @@
-# cargo clippy --all-targets -- -D warnings — fix round — HEAD 6562689576372926490ab084af3664d7e70b6b26
+# cargo clippy --all-targets -- -D warnings — B7 — HEAD 361eacd + this change
 $ CARGO_INCREMENTAL=0 cargo clippy --all-targets -- -D warnings
-    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.22s
+   Compiling taildrop-gui v0.15.1 (/Users/cortexuvula/Development/taildrop-gui-browser-m1/src-tauri)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 3.90s
 EXIT=0

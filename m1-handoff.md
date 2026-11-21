@@ -27,6 +27,8 @@ invariants (§7.4 v1 column — acceptance contract).
 | 35755e9 | fix(browser): B1 — Windows browser_open never routes paths through cmd.exe |
 | 5eea0ed | test(browser): W3 — end-to-end PULL tests through the real LocalSink |
 | 6562689 | test(browser): e2e — remote→remote copy refused in the UI with the M2 note (B5) |
+| 361eacd | docs(browser): fix-round receipts + corrected handoff (B1-B6, W1-W5; B7 pending owner) |
+| (this commit) | fix(browser): drop russh rsa feature — RUSTSEC-2023-0071 (owner decision; Ed25519/ECDSA retained) |
 
 ## Gate receipts
 
@@ -151,12 +153,18 @@ npm run build                    # tsc + vite production bundle
     junctions) cannot be executed on this Mac. `.github/workflows/ci.yml`
     windows-latest is the compile gate; an on-device Windows smoke is
     required before release.
-14. **B7 PENDING OWNER DECISION — do not merge without it.** M1 adds
-    `rsa 0.10.0` via russh's `rsa` feature (needed for id_rsa key files);
-    RUSTSEC-2023-0071 (Marvin timing side channel) has no fixed upgrade.
-    Exploitability for local client signing is low, but the decision
-    (drop the feature vs. record acceptance in decisions.md) belongs to
-    Andre — deliberately NOT recorded here.
+14. **B7 RESOLVED (owner decision, decisions.md #6): the russh `rsa`
+    feature is DROPPED** — RUSTSEC-2023-0071 (Marvin timing side channel)
+    is gone from the dependency tree (`cargo audit` receipt:
+    cargo-audit.txt; rsa/pkcs1/crypto-primes removed from Cargo.lock, pins
+    russh =0.65.2 / russh-sftp =3.0.1 untouched). Consequences: RSA key
+    FILES (~/.ssh/id_rsa) can no longer sign in-process — auth detects them
+    and returns a typed Unsupported error naming the key and the remedy;
+    RSA identities held by ssh-agent still work (signing happens inside the
+    agent; russh's hash negotiation is not feature-gated); RSA HOST keys
+    were already refused by M0 policy (Ed25519/ECDSA qualified per M0 —
+    every fleet host presents Ed25519). Ed25519/ECDSA user-key paths are
+    unchanged.
 
 ## Fix round (continuation 4) — Codie review responses
 
@@ -186,8 +194,9 @@ are addressed in commits 136a14b…6562689 (table above). Per-blocker:
   read-error-not-masked-by-close, remote-source cancel) + three new fake
   hostility knobs (5eea0ed). Walker skip counts asserted in the B3/B6 pulls.
 - **W4/W5**: documented as gaps 11/12 above.
-- **B7**: untouched per instruction — Cargo features unchanged, decision
-  pending (gap 14).
+- **B7**: RESOLVED in continuation 5 (owner decision decisions.md #6) —
+  rsa feature dropped, typed Unsupported for RSA key files, audit receipt
+  captured; see gap 14.
 - Suggestions applied: mkdir_remote no-op block removed, place() double
   lstat collapsed, dead-code seams already carried M2/M3 milestone tags.
 - **W6** (flaky pre-existing master test): out of scope, untouched. It

@@ -61,7 +61,10 @@ pub struct ConnectParams {
     /// must match one of them (M0 cross-check) — fail closed on mismatch.
     pub tailscale_host_keys: Vec<String>,
     /// Private key files to try (unencrypted only). Empty = standard names
-    /// under ~/.ssh (id_ed25519, id_ecdsa, id_rsa).
+    /// under ~/.ssh (id_ed25519, id_ecdsa, id_rsa). RSA files are still
+    /// DETECTED so auth can name them in a typed unsupported error (B7:
+    /// the russh `rsa` feature is dropped per decisions.md #6), but they
+    /// can no longer sign in-process.
     pub key_files: Vec<PathBuf>,
 }
 
@@ -454,12 +457,29 @@ pub async fn connect(params: ConnectParams) -> Result<RusshTransport, BrowserErr
         }
         // 2. Unencrypted key files. An encrypted file fails to load locally
         //    (no passphrase prompt exists by design) — skip to the agent.
+        //    B7 (decisions.md #6): the russh `rsa` feature is dropped
+        //    (RUSTSEC-2023-0071, Marvin timing side channel, no fixed
+        //    upgrade), so RSA key FILES can no longer sign in-process.
+        //    Detect them and produce a clear typed error below instead of a
+        //    confusing signature failure. RSA identities held by the
+        //    ssh-agent still work (signing happens inside the agent, and
+        //    russh's hash negotiation is not feature-gated).
         let mut loaded_any = false;
+        let mut rsa_skipped: Vec<String> = Vec::new();
         for path in &key_files {
             let private = match keys::load_secret_key(path, None) {
                 Ok(k) => k,
                 Err(_) => continue, // encrypted or unreadable — agent's turn
             };
+            if matches!(private.algorithm(), keys::Algorithm::Rsa { .. }) {
+                rsa_skipped.push(
+                    path.file_name()
+                        .unwrap_or_default()
+                        .to_string_lossy()
+                        .to_string(),
+                );
+                continue;
+            }
             loaded_any = true;
             let hash = ssh.best_supported_rsa_hash().await.ok().flatten().flatten();
             let pk = PrivateKeyWithHashAlg::new(Arc::new(private), hash);
@@ -489,11 +509,25 @@ pub async fn connect(params: ConnectParams) -> Result<RusshTransport, BrowserErr
             Err(e) => return Err(typed_or_recorded(&failure, e, "auth: agent attempt failed")),
         }
         let _ = loaded_any;
+        // B7: name the dropped-RSA-support blocker explicitly when RSA key
+        // files were the only file credentials found.
+        if !rsa_skipped.is_empty() {
+            return Err(BrowserError::new(
+                ErrorKind::Unsupported,
+                format!(
+                    "auth: RSA key file(s) {} found for {user}@{host}, but this build no \
+                     longer supports in-process RSA signing (RUSTSEC-2023-0071, owner \
+                     decision). Use an Ed25519 or ECDSA key file, or add the RSA key to \
+                     your ssh-agent — agent-side signing still works.",
+                    rsa_skipped.join(", ")
+                ),
+            ));
+        }
         Err(BrowserError::new(
             ErrorKind::Auth,
             format!(
                 "auth: no working credential for {user}@{host} — tried tailnet identity, \
-                 key files (id_ed25519/id_ecdsa/id_rsa) and ssh-agent. Password auth is \
+                 key files (id_ed25519/id_ecdsa) and ssh-agent. Password auth is \
                  never attempted; an encrypted key file needs the ssh-agent."
             ),
         ))

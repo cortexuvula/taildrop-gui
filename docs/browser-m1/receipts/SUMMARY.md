@@ -37,7 +37,27 @@ rerun; Codie measured the same flake on master 89aeda3.
 |---|---|
 | Windows compile (`cargo check --target x86_64-pc-windows-msvc`) | NOT provable on this Mac (no MSVC SDK; ring's C build fails first — same as Codie's attempt). B2 fixed statically; CI windows-latest is the gate. |
 | Windows runtime (B1 ShellExecuteW open, B6 junction probe semantics) | Not executable here; on-device Windows smoke required before release. |
-| `cargo audit` (B7) | rsa/RUSTSEC-2023-0071 decision was PENDING OWNER at the time of this docs commit — russh features deliberately unchanged here. RESOLVED in the follow-up `fix(browser): drop russh rsa feature` commit (continuation 5, decisions.md #6); audit output captured in cargo-audit.txt. |
+| `cargo audit` (B7) | RESOLVED in continuation 5 (decisions.md #6: drop the russh `rsa` feature). `cargo audit --no-fetch --stale` after the drop: RUSTSEC-2023-0071 GONE, no `rsa` crate in the tree (cargo-audit.txt). Remaining advisories (quick-xml, rustls, zip, rand, glib, unic-*, zbus-*) are the pre-existing master set — out of M1 scope, unchanged. |
+
+## B7 / continuation 5 (current HEAD)
+
+The `fix(browser): drop russh rsa feature` commit changes only Cargo.toml
+(russh features `["ring"]`), Cargo.lock (pure removals: rsa, pkcs1,
+crypto-primes — no version bumps; pins russh =0.65.2 / russh-sftp =3.0.1
+intact) and session.rs (typed Unsupported error for RSA key files; agent
+RSA identities still attempted). All seven gates were re-run against that
+tree and the receipts in this directory refreshed:
+
+| Gate | Exit | Result |
+|---|---|---|
+| `CARGO_INCREMENTAL=0 cargo test` | 0 | **220 passed, 0 failed** (2nd attempt; 1st hit the known W6 master flake — noted in cargo-test.txt) |
+| `cargo clippy --all-targets -- -D warnings` | 0 | clean |
+| `cargo fmt --check` | 0 | clean |
+| `npx tsc --noEmit` | 0 | clean |
+| `npx vitest run` | 0 | 17 files / 180 tests |
+| `npx playwright test` | 0 | 54 passed |
+| `npm run build` | 0 | dist built |
+| `cargo audit --no-fetch --stale` | 1 (advisories present) | **RUSTSEC-2023-0071 GONE**; only the pre-existing master advisory set remains |
 
 ## Initial M1 completion (continuation 3, superseded by the table above)
 
