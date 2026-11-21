@@ -473,8 +473,7 @@ fn notify_finish(app: &AppHandle, state: &BrowserState, id: u64) {
     };
     let ok = snap.state == JobState::Done;
     let (title, body) = finish_notification(ok, &snap.label, snap.error.as_deref(), snap.skipped);
-    if let Err(e) = app.notification().builder().title(title).body(body).show()
-    {
+    if let Err(e) = app.notification().builder().title(title).body(body).show() {
         log::debug!("browser copy: finish notification failed: {e}");
     }
 }
@@ -1214,10 +1213,7 @@ fn home_guard_ids(homes: &[&str]) -> std::collections::HashSet<(u64, u64)> {
 /// A vanished/unreadable `p` yields None (the string guards and the trash
 /// step itself handle that case).
 #[cfg(unix)]
-fn home_equivalent_by_id(
-    p: &str,
-    ids: &std::collections::HashSet<(u64, u64)>,
-) -> Option<String> {
+fn home_equivalent_by_id(p: &str, ids: &std::collections::HashSet<(u64, u64)>) -> Option<String> {
     if ids.is_empty() {
         return None; // no known home identity — the string guard already failed closed
     }
@@ -1792,7 +1788,8 @@ mod tests {
         assert_eq!(json["flavor"], "tailscale-ssh");
         assert_eq!(json["fingerprint"], "SHA256:abc");
         // Round-trip from the wire shape the dialog sends back for forget.
-        let back: ServerFlavor = serde_json::from_value(serde_json::json!("openssh-windows")).unwrap();
+        let back: ServerFlavor =
+            serde_json::from_value(serde_json::json!("openssh-windows")).unwrap();
         assert_eq!(back, ServerFlavor::OpensshWindows);
     }
 
@@ -1802,7 +1799,10 @@ mod tests {
     fn w5_tmp(tag: &str) -> PathBuf {
         use rand::Rng as _;
         let n: u64 = rand::rng().random();
-        let dir = std::env::temp_dir().join(format!("taildrop-m2a-w5-{tag}-{}-{n:016x}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!(
+            "taildrop-m2a-w5-{tag}-{}-{n:016x}",
+            std::process::id()
+        ));
         std::fs::create_dir_all(&dir).unwrap();
         dir
     }

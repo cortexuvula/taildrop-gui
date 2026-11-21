@@ -2571,7 +2571,10 @@ mod tests {
             "source mtime travels through the relay"
         );
         // Source untouched; staging cleaned on BOTH servers.
-        assert_eq!(std::fs::read(srv_a.root.join("big.bin")).unwrap().len(), CHUNK * 2 + 77);
+        assert_eq!(
+            std::fs::read(srv_a.root.join("big.bin")).unwrap().len(),
+            CHUNK * 2 + 77
+        );
         assert!(stage_leftovers(&srv_b.root.join("dst")).is_empty());
         assert!(stage_leftovers(&srv_a.root).is_empty());
         {
@@ -2604,12 +2607,12 @@ mod tests {
             std::os::unix::fs::symlink("readme.md", srv_a.root.join("tree/link.txt")).unwrap();
             use std::os::unix::fs::PermissionsExt;
             std::fs::set_permissions(
-                &srv_a.root.join("tree/readme.md"),
+                srv_a.root.join("tree/readme.md"),
                 std::fs::Permissions::from_mode(0o640),
             )
             .unwrap();
             std::fs::set_permissions(
-                &srv_a.root.join("tree/sub"),
+                srv_a.root.join("tree/sub"),
                 std::fs::Permissions::from_mode(0o750),
             )
             .unwrap();
@@ -2824,7 +2827,10 @@ mod tests {
             .flatten()
             .map(|e| e.file_name().to_string_lossy().to_string())
             .collect();
-        assert!(staged.is_empty(), "destination must be untouched: {staged:?}");
+        assert!(
+            staged.is_empty(),
+            "destination must be untouched: {staged:?}"
+        );
         // The source session is still usable and closes cleanly.
         assert!(t_a.lstat("/a.txt").await.unwrap().is_some());
         assert_eq!(std::fs::read(srv_a.root.join("a.txt")).unwrap(), b"payload");

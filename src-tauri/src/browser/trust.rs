@@ -312,11 +312,8 @@ mod tests {
     /// check).
     #[test]
     fn fingerprint_matches_ssh_keygen_vector() {
-        let key = russh::keys::decode_secret_key(
-            crate::browser::fake::HOST_KEY_PEM,
-            None,
-        )
-        .expect("fixture key decodes");
+        let key = russh::keys::decode_secret_key(crate::browser::fake::HOST_KEY_PEM, None)
+            .expect("fixture key decodes");
         let line = key
             .public_key()
             .to_openssh()
@@ -371,7 +368,9 @@ mod tests {
         store.forget(ServerFlavor::Openssh, "beta").unwrap();
         let pins = store.all_pins().unwrap();
         assert_eq!(pins.len(), 3);
-        assert!(pins.iter().all(|(f, h, _)| !(*f == ServerFlavor::Openssh && h == "beta")));
+        assert!(pins
+            .iter()
+            .all(|(f, h, _)| !(*f == ServerFlavor::Openssh && h == "beta")));
         let _ = std::fs::remove_dir_all(&dir);
     }
 
