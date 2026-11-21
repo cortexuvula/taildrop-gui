@@ -672,6 +672,37 @@ pub mod loopback {
     /// its own; this only guards a pathological case (never observed).
     const STDERR_DRAIN_BOUND: Duration = Duration::from_secs(2);
 
+    /// Loopback only: pick a perl whose build HAS `syscall` (Config
+    /// `d_syscall=define`). Homebrew perl 5.44 (default on GitHub macos
+    /// runners) is built without it; the system perl has it. Override with
+    /// TAILDROP_LOOPBACK_PERL. Falls back to `perl` so a genuinely
+    /// incapable machine surfaces the interpreter's real error.
+    pub fn loopback_perl() -> String {
+        if let Ok(p) = std::env::var("TAILDROP_LOOPBACK_PERL") {
+            if !p.is_empty() {
+                return p;
+            }
+        }
+        for cand in ["/usr/bin/perl", "perl"] {
+            let capable = std::process::Command::new(cand)
+                .args([
+                    "-MConfig",
+                    "-e",
+                    "exit(($Config{d_syscall}//q{}) eq 'define' ? 0 : 1)",
+                ])
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status()
+                .map(|s| s.success())
+                .unwrap_or(false);
+            if capable {
+                return cand.to_string();
+            }
+        }
+        "perl".to_string()
+    }
+
     /// An `ExecChannel` backed by a local `sh -c <cmd>` child. Same framing,
     /// same lifecycle: stdin writes, stdout replies, capped stderr drain,
     /// EOF-by-drop, bounded wait.
@@ -700,6 +731,21 @@ pub mod loopback {
             path: Option<&str>,
             home: Option<&str>,
         ) -> Result<Box<dyn ExecChannel>, BrowserError> {
+            // Loopback-only interpreter resolution. GitHub macos runners put
+            // Homebrew perl 5.44 first in PATH, and that build has NO syscall
+            // ("The syscall function is unimplemented") — the vendored
+            // agent's renameat(2) syscall needs it. The system perl
+            // (/usr/bin/perl) has it. Production AGENT_CMD is untouched;
+            // this only picks the interpreter for the local test child.
+            // `path: Some(_)` simulates a foreign PATH (perl-missing probe)
+            // and must keep the literal command.
+            let cmd_owned;
+            let cmd = if path.is_none() && cmd.starts_with("perl ") {
+                cmd_owned = format!("{}{}", loopback_perl(), &cmd["perl".len()..]);
+                &cmd_owned[..]
+            } else {
+                cmd
+            };
             let mut c = Command::new("/bin/sh");
             c.arg("-c").arg(cmd);
             c.stdin(Stdio::piped())
@@ -1252,6 +1298,29 @@ mod loopback_tests {
 
     fn ino(path: &Path) -> u64 {
         std::fs::metadata(path).unwrap().ino()
+    }
+
+    /// The loopback interpreter resolution must land on a perl whose build
+    /// has `syscall` (CI macos runners default to Homebrew perl 5.44, which
+    /// lacks it; the system perl has it). Pins the CI fix itself.
+    #[test]
+    fn loopback_perl_resolution_supports_syscall() {
+        let p = super::loopback::loopback_perl();
+        let status = std::process::Command::new(&p)
+            .args([
+                "-MConfig",
+                "-e",
+                "exit(($Config{d_syscall}//q{}) eq 'define' ? 0 : 1)",
+            ])
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .expect("resolved perl runs");
+        assert!(
+            status.success(),
+            "resolved loopback perl {p} must support syscall"
+        );
     }
 
     /// The probe end-to-end over the loopback channel: real perl honors the

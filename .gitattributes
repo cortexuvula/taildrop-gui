@@ -1,0 +1,6 @@
+# Vendored exec-agent payloads are embedded byte-exactly (sha256-pinned in
+# browser/agent.rs) and streamed to remote perl/sh interpreters. They MUST
+# check out with LF on every platform — Windows runners default to CRLF via
+# core.autocrlf, which breaks both the pins and the wire bytes.
+src-tauri/agents/*.pl text eol=lf
+src-tauri/agents/*.sh text eol=lf
