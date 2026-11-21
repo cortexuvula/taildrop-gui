@@ -1167,6 +1167,66 @@ async fn remote_delete_one(
     t.remove_dir(path).await
 }
 
+/// W5 hardening (M1 gap 12): the string-based home-equivalence guard can be
+/// bypassed by aliases that never resolve to the same SPELLING — macOS
+/// firmlinks are exactly that case (`/System/Volumes/Data/Users/<u>` is the
+/// SAME directory as `/Users/<u>`, and realpath(3) keeps both spellings
+/// distinct, so the as-written and parent-resolved string guards both pass).
+/// A local dev/ino comparison catches every alias the kernel resolves to the
+/// same directory. This is ADDITIVE: the string guards in
+/// `guards::guard_delete_problem` still run first and are never weakened.
+#[cfg(unix)]
+fn unix_dev_ino(p: &Path) -> Option<(u64, u64)> {
+    use std::os::unix::fs::MetadataExt;
+    // symlink_metadata: a symlink TO home stays deletable (links are removed
+    // as links — trashing the link never touches home); symlinks in PARENT
+    // components are resolved by the kernel, which is exactly the alias case
+    // this guard exists for.
+    let m = std::fs::symlink_metadata(p).ok()?;
+    Some((m.dev(), m.ino()))
+}
+
+/// dev/ino set of the home folder AND all of its ancestors — guard_delete
+/// refuses home-or-any-ancestor, so the identity set mirrors that scope.
+#[cfg(unix)]
+fn home_guard_ids(homes: &[&str]) -> std::collections::HashSet<(u64, u64)> {
+    let mut ids = std::collections::HashSet::new();
+    for h in homes {
+        if h.is_empty() {
+            continue;
+        }
+        let mut cur = Path::new(h);
+        loop {
+            if let Some(id) = unix_dev_ino(cur) {
+                ids.insert(id);
+            }
+            match cur.parent() {
+                Some(parent) => cur = parent,
+                None => break,
+            }
+        }
+    }
+    ids
+}
+
+/// The dev/ino arm of the home-equivalence guard: refuse when `p` IS — by
+/// identity, not by spelling — the home folder or one of its ancestors.
+/// A vanished/unreadable `p` yields None (the string guards and the trash
+/// step itself handle that case).
+#[cfg(unix)]
+fn home_equivalent_by_id(
+    p: &str,
+    ids: &std::collections::HashSet<(u64, u64)>,
+) -> Option<String> {
+    if ids.is_empty() {
+        return None; // no known home identity — the string guard already failed closed
+    }
+    match unix_dev_ino(Path::new(p)) {
+        Some(id) if ids.contains(&id) => Some(format!("Refusing to delete {p}")),
+        _ => None,
+    }
+}
+
 /// Local delete: Trash ONLY. If trashing fails, stop — never fall back to
 /// permanent deletion (invariant §4.11). Guards run on the path as written
 /// and on the parent-resolved path.
@@ -1177,9 +1237,16 @@ fn local_delete(paths: &[String]) -> Result<DeleteOutcome, BrowserError> {
         .map(|p| p.to_string_lossy().to_string())
         .unwrap_or_else(|_| home.clone());
     let homes = [home.as_str(), real_home.as_str()];
+    // W5 (M1 gap 12): identity comparison IN ADDITION to the string guards —
+    // firmlink/alias spellings that never canonicalize onto the home string
+    // still refuse here.
+    let home_ids = home_guard_ids(&homes);
     let mut resolved = Vec::with_capacity(paths.len());
     for p in paths {
         if let Some(why) = crate::browser::guards::guard_delete_problem(p, &homes, false) {
+            return Err(BrowserError::new(ErrorKind::Denied, why));
+        }
+        if let Some(why) = home_equivalent_by_id(p, &home_ids) {
             return Err(BrowserError::new(ErrorKind::Denied, why));
         }
         // Resolve symlinks in the PARENT folders, not the item itself: the
@@ -1191,6 +1258,9 @@ fn local_delete(paths: &[String]) -> Result<DeleteOutcome, BrowserError> {
             Err(_) => p.clone(),
         };
         if let Some(why) = crate::browser::guards::guard_delete_problem(&real, &homes, false) {
+            return Err(BrowserError::new(ErrorKind::Denied, why));
+        }
+        if let Some(why) = home_equivalent_by_id(&real, &home_ids) {
             return Err(BrowserError::new(ErrorKind::Denied, why));
         }
         resolved.push(real);
@@ -1724,6 +1794,142 @@ mod tests {
         // Round-trip from the wire shape the dialog sends back for forget.
         let back: ServerFlavor = serde_json::from_value(serde_json::json!("openssh-windows")).unwrap();
         assert_eq!(back, ServerFlavor::OpensshWindows);
+    }
+
+    // ---- W5 hardening (M1 gap 12): dev/ino home-equivalence ----
+
+    #[cfg(unix)]
+    fn w5_tmp(tag: &str) -> PathBuf {
+        use rand::Rng as _;
+        let n: u64 = rand::rng().random();
+        let dir = std::env::temp_dir().join(format!("taildrop-m2a-w5-{tag}-{}-{n:016x}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    /// W5: a REAL symlink alias — home is `<tmp>/real/u` while `<tmp>/link`
+    /// points at `<tmp>/real`, so `<tmp>/link/u` is the home folder under a
+    /// spelling the string guard never sees. lstat resolves the PARENT
+    /// symlink, so the dev/ino arm refuses; home itself and its ancestors
+    /// are all in the identity set.
+    #[cfg(unix)]
+    #[test]
+    fn dev_ino_guard_catches_symlinked_parent_alias() {
+        let tmp = w5_tmp("alias");
+        let real = tmp.join("real");
+        let home = real.join("u");
+        std::fs::create_dir_all(&home).unwrap();
+        std::os::unix::fs::symlink(&real, tmp.join("link")).unwrap();
+
+        let homes = [home.to_str().unwrap()];
+        let ids = home_guard_ids(&homes);
+        assert!(ids.contains(&unix_dev_ino(&home).unwrap()));
+        assert!(
+            ids.contains(&unix_dev_ino(&real).unwrap()),
+            "home's ANCESTORS are in the identity set (guard_delete scope)"
+        );
+
+        let alias = tmp.join("link").join("u");
+        assert_eq!(
+            unix_dev_ino(&alias),
+            unix_dev_ino(&home),
+            "the alias IS the home folder by inode"
+        );
+        // The string guard alone MISSES the alias spelling (documents W5)...
+        assert_eq!(
+            crate::browser::guards::guard_delete_problem(alias.to_str().unwrap(), &homes, false),
+            None
+        );
+        // ...the dev/ino arm refuses it.
+        assert!(
+            home_equivalent_by_id(alias.to_str().unwrap(), &ids).is_some(),
+            "home-equivalent alias via symlinked parent must be refused"
+        );
+        // The ancestor itself (real dir) is refused by identity too.
+        assert!(home_equivalent_by_id(real.to_str().unwrap(), &ids).is_some());
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// W5 boundaries: items INSIDE home stay deletable, an unrelated folder
+    /// stays deletable, and a symlink TO home stays deletable (links are
+    /// removed as links — trashing the link never touches home, so the
+    /// guard must NOT over-refuse).
+    #[cfg(unix)]
+    #[test]
+    fn dev_ino_guard_allows_inside_items_and_link_to_home() {
+        let tmp = w5_tmp("allow");
+        let home = tmp.join("home");
+        std::fs::create_dir_all(home.join("docs")).unwrap();
+        std::fs::write(home.join("docs/x.txt"), b"x").unwrap();
+        std::fs::create_dir_all(tmp.join("unrelated")).unwrap();
+        std::os::unix::fs::symlink(&home, tmp.join("homelink")).unwrap();
+
+        let ids = home_guard_ids(&[home.to_str().unwrap()]);
+        assert_eq!(
+            home_equivalent_by_id(home.join("docs").to_str().unwrap(), &ids),
+            None,
+            "a descendant of home stays deletable"
+        );
+        assert_eq!(
+            home_equivalent_by_id(home.join("docs/x.txt").to_str().unwrap(), &ids),
+            None
+        );
+        assert_eq!(
+            home_equivalent_by_id(tmp.join("unrelated").to_str().unwrap(), &ids),
+            None
+        );
+        assert_eq!(
+            home_equivalent_by_id(tmp.join("homelink").to_str().unwrap(), &ids),
+            None,
+            "a symlink TO home is deleted as a link, never over-refused"
+        );
+        // Vanished path: no identity to compare — None (string guards and
+        // the trash step handle it).
+        assert_eq!(
+            home_equivalent_by_id(tmp.join("ghost").to_str().unwrap(), &ids),
+            None
+        );
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// W5, the ACTUAL gap-12 case: on macOS `/System/Volumes/Data/Users/<u>`
+    /// is the same directory as `/Users/<u>` (firmlink) and realpath keeps
+    /// both spellings distinct — the string guards pass, so the dev/ino arm
+    /// is what refuses. Runs against the real firmlink on any macOS host
+    /// where the alias spelling resolves (skips when it does not exist).
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn dev_ino_guard_catches_macos_firmlink_alias() {
+        let Some(home) = dirs::home_dir() else {
+            return;
+        };
+        // NOTE: not Path::join — `home` is absolute and join() would REPLACE
+        // the base. The firmlink alias is the home spelling under the data
+        // volume prefix.
+        let alias = PathBuf::from(format!("/System/Volumes/Data{}", home.display()));
+        let (Some(home_id), Some(alias_id)) = (unix_dev_ino(&home), unix_dev_ino(&alias)) else {
+            return; // firmlink alias not visible on this host — nothing to prove
+        };
+        assert_eq!(
+            home_id, alias_id,
+            "firmlink alias is the same inode by definition"
+        );
+        let ids = home_guard_ids(&[home.to_str().unwrap()]);
+        assert!(
+            home_equivalent_by_id(alias.to_str().unwrap(), &ids).is_some(),
+            "the firmlink spelling of home must be refused by identity"
+        );
+        // Document the gap the hardening closes: the string guard alone
+        // passes the alias spelling.
+        assert_eq!(
+            crate::browser::guards::guard_delete_problem(
+                alias.to_str().unwrap(),
+                &[home.to_str().unwrap()],
+                false
+            ),
+            None,
+            "W5: the string guard genuinely misses the firmlink alias"
+        );
     }
 
     #[test]
