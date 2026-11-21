@@ -125,6 +125,16 @@ pub struct FakeConfig {
     /// OpenSSH's BadMessage on a junction (M0 §5). Dirs otherwise answer
     /// NoSuchFile ("clean not-a-link") and real symlinks answer Ok.
     pub simulate_junctions: bool,
+    /// Hostility (W3): the FIRST lstat of the file with this name reports a
+    /// size `delta` bytes larger than reality; later lstats tell the truth —
+    /// simulates a file changing between plan and stream (size-changed check).
+    pub lie_size_once: Option<(String, u64)>,
+    /// Hostility (W3): reads of the file with this name immediately return
+    /// EOF — simulates a file shrinking mid-copy ("got shorter" path).
+    pub shrink_reads_for: Option<String>,
+    /// Hostility (W3): every CLOSE fails — proves a primary read/stream error
+    /// is never masked by the close error (spike limit #1).
+    pub fail_close: bool,
 }
 
 impl FakeConfig {
@@ -142,6 +152,9 @@ impl FakeConfig {
             host_key_pem: HOST_KEY_PEM,
             non_utf8_names: false,
             simulate_junctions: false,
+            lie_size_once: None,
+            shrink_reads_for: None,
+            fail_close: false,
         }
     }
     /// macOS/Windows OpenSSH-like defaults (M0: refused replacing renames).
@@ -158,6 +171,9 @@ impl FakeConfig {
             host_key_pem: HOST_KEY_PEM,
             non_utf8_names: false,
             simulate_junctions: false,
+            lie_size_once: None,
+            shrink_reads_for: None,
+            fail_close: false,
         }
     }
 }
@@ -415,11 +431,14 @@ struct SftpHandler {
     handles: HashMap<String, HEntry>,
     next_handle: u64,
     written: u64,
+    /// One-shot size lie (W3): taken on the first matching lstat.
+    size_lie: Option<(String, u64)>,
 }
 
 impl SftpHandler {
     fn new(cfg: Arc<FakeConfig>) -> Self {
         Self {
+            size_lie: cfg.lie_size_once.clone(),
             cfg,
             handles: HashMap::new(),
             next_handle: 1,
@@ -572,6 +591,11 @@ impl russh_sftp::server::Handler for SftpHandler {
 
     async fn close(&mut self, id: u32, handle: String) -> Result<Status, Self::Error> {
         self.handles.remove(&handle);
+        if self.cfg.fail_close {
+            // W3 hostility: close fails — the caller must still surface the
+            // PRIMARY error, never this one (spike limit #1).
+            return Err(StatusCode::Failure);
+        }
         Ok(ok(id))
     }
 
@@ -587,6 +611,23 @@ impl russh_sftp::server::Handler for SftpHandler {
             Some(HEntry::File(p)) => p.clone(),
             _ => return Err(StatusCode::Failure),
         };
+        // W3 hostility: this file "shrank" — every read hits EOF at once.
+        if self
+            .cfg
+            .shrink_reads_for
+            .as_ref()
+            .map(|n| {
+                path.file_name()
+                    .map(|f| f.to_string_lossy() == n.as_str())
+                    .unwrap_or(false)
+            })
+            .unwrap_or(false)
+        {
+            return Ok(Data {
+                id,
+                data: Vec::new(),
+            });
+        }
         let f = std::fs::File::open(&path).map_err(map_io)?;
         let size = f.metadata().map_err(map_io)?.len();
         if offset >= size {
@@ -626,11 +667,19 @@ impl russh_sftp::server::Handler for SftpHandler {
     }
 
     async fn lstat(&mut self, id: u32, path: String) -> Result<Attrs, Self::Error> {
-        let meta = std::fs::symlink_metadata(self.resolve(&path)).map_err(map_io)?;
-        Ok(Attrs {
-            id,
-            attrs: attrs_of(&meta),
-        })
+        let resolved = self.resolve(&path);
+        let meta = std::fs::symlink_metadata(&resolved).map_err(map_io)?;
+        let mut attrs = attrs_of(&meta);
+        // W3 hostility: first lstat of the target name lies about the size.
+        if let Some((_name, delta)) = self.size_lie.take_if(|(n, _)| {
+            resolved
+                .file_name()
+                .map(|f| f.to_string_lossy() == n.as_str())
+                .unwrap_or(false)
+        }) {
+            attrs.size = attrs.size.map(|sz| sz + delta);
+        }
+        Ok(Attrs { id, attrs })
     }
 
     async fn stat(&mut self, id: u32, path: String) -> Result<Attrs, Self::Error> {
@@ -1706,6 +1755,272 @@ mod tests {
         assert!(transfer::is_cancelled(&e));
         assert!(stage_leftovers(&srv.root.join("dst")).is_empty());
         assert!(!srv.root.join("dst/a.txt").exists());
+        Box::new(t).close().await.unwrap();
+    }
+    /// Transport wrapper that cancels the token after N bytes have been READ
+    /// from remote files — deterministic remote-source cancellation at a
+    /// chunk boundary (no sleeps, no races). Read-side twin of
+    /// CancelAfterBytes.
+    struct CancelAfterReads<'a> {
+        inner: &'a RusshTransport,
+        cancel: CancellationToken,
+        threshold: u64,
+        read: Arc<AtomicU64>,
+    }
+
+    struct CountingReader {
+        inner: Box<dyn RemoteReader>,
+        cancel: CancellationToken,
+        threshold: u64,
+        read: Arc<AtomicU64>,
+    }
+
+    #[async_trait]
+    impl RemoteReader for CountingReader {
+        async fn read(&mut self, buf: &mut [u8]) -> Result<usize, BrowserError> {
+            let n = self.inner.read(buf).await?;
+            let total = self.read.fetch_add(n as u64, Ordering::SeqCst) + n as u64;
+            if total >= self.threshold {
+                self.cancel.cancel();
+            }
+            Ok(n)
+        }
+        async fn close(self: Box<Self>) -> Result<(), BrowserError> {
+            self.inner.close().await
+        }
+    }
+
+    #[async_trait]
+    impl SftpTransport for CancelAfterReads<'_> {
+        async fn realpath(&self, path: &str) -> Result<String, BrowserError> {
+            self.inner.realpath(path).await
+        }
+        async fn read_dir(&self, path: &str) -> Result<Vec<RemoteNode>, BrowserError> {
+            self.inner.read_dir(path).await
+        }
+        async fn stat(&self, path: &str) -> Result<Option<RemoteNode>, BrowserError> {
+            self.inner.stat(path).await
+        }
+        async fn lstat(&self, path: &str) -> Result<Option<RemoteNode>, BrowserError> {
+            self.inner.lstat(path).await
+        }
+        async fn mkdir(&self, path: &str, perm: u32) -> Result<(), BrowserError> {
+            self.inner.mkdir(path, perm).await
+        }
+        async fn remove_file(&self, path: &str) -> Result<(), BrowserError> {
+            self.inner.remove_file(path).await
+        }
+        async fn remove_dir(&self, path: &str) -> Result<(), BrowserError> {
+            self.inner.remove_dir(path).await
+        }
+        async fn rename(&self, from: &str, to: &str) -> Result<(), BrowserError> {
+            self.inner.rename(from, to).await
+        }
+        async fn posix_rename(&self, from: &str, to: &str) -> Result<(), BrowserError> {
+            self.inner.posix_rename(from, to).await
+        }
+        async fn hardlink(&self, from: &str, to: &str) -> Result<(), BrowserError> {
+            self.inner.hardlink(from, to).await
+        }
+        async fn symlink(&self, target: &str, path: &str) -> Result<(), BrowserError> {
+            self.inner.symlink(target, path).await
+        }
+        async fn read_link(&self, path: &str) -> Result<String, BrowserError> {
+            self.inner.read_link(path).await
+        }
+        async fn open_read(&self, path: &str) -> Result<Box<dyn RemoteReader>, BrowserError> {
+            let inner = self.inner.open_read(path).await?;
+            Ok(Box::new(CountingReader {
+                inner,
+                cancel: self.cancel.clone(),
+                threshold: self.threshold,
+                read: self.read.clone(),
+            }))
+        }
+        async fn create_exclusive(
+            &self,
+            path: &str,
+            perm: u32,
+        ) -> Result<Box<dyn RemoteWriter>, BrowserError> {
+            self.inner.create_exclusive(path, perm).await
+        }
+        async fn set_attrs(
+            &self,
+            path: &str,
+            mode: Option<u32>,
+            mtime: Option<i64>,
+        ) -> Result<(), BrowserError> {
+            self.inner.set_attrs(path, mode, mtime).await
+        }
+        fn has_hardlink(&self) -> bool {
+            self.inner.has_hardlink()
+        }
+        fn has_posix_rename(&self) -> bool {
+            self.inner.has_posix_rename()
+        }
+        fn extensions(&self) -> &BTreeMap<String, String> {
+            self.inner.extensions()
+        }
+        async fn close(self: Box<Self>) -> Result<(), BrowserError> {
+            Ok(()) // inner is borrowed; the test closes it
+        }
+    }
+
+    fn pull_req(src_dir: &str, dst_dir: &str, names: &[&str]) -> CopyRequest {
+        CopyRequest {
+            src_target: "fakehost".into(),
+            src_user: Some("fakeuser".into()),
+            src_dir: src_dir.into(),
+            dst_target: "local".into(),
+            dst_user: None,
+            dst_dir: dst_dir.into(),
+            names: names.iter().map(|n| n.to_string()).collect(),
+            replace: false,
+        }
+    }
+
+    // ---- Group W3: end-to-end PULL (fake server → real LocalSink) ----
+
+    /// W3: a remote symlink is pulled AS A LINK (never followed) and regular
+    /// files land with byte fidelity; local staging cleaned on done.
+    #[tokio::test]
+    #[cfg(unix)]
+    async fn pull_copies_remote_symlink_as_link() {
+        let srv = FakeServer::start(FakeConfig::tailscale(temp_root("pull-sym-srv"))).await;
+        std::fs::write(srv.root.join("target.txt"), b"target-data").unwrap();
+        std::os::unix::fs::symlink("target.txt", srv.root.join("link.txt")).unwrap();
+        let dst = temp_root("pull-sym-dst");
+        let t = srv.connect(&temp_root("trustPS")).await;
+        let (emit, _p) = collector();
+        let outcome = transfer::run_copy(
+            &pull_req("/", dst.to_str().unwrap(), &["target.txt", "link.txt"]),
+            &Side::Remote {
+                transport: &t,
+                windows: false,
+            },
+            &Side::Local,
+            CancellationToken::new(),
+            emit,
+        )
+        .await
+        .expect("pull succeeds");
+        assert_eq!(outcome.skipped, 0);
+        assert_eq!(
+            std::fs::read(dst.join("target.txt")).unwrap(),
+            b"target-data"
+        );
+        let lm = std::fs::symlink_metadata(dst.join("link.txt")).unwrap();
+        assert!(lm.is_symlink(), "link stays a link, never followed");
+        assert_eq!(
+            std::fs::read_link(dst.join("link.txt"))
+                .unwrap()
+                .to_str()
+                .unwrap(),
+            "target.txt"
+        );
+        assert!(stage_leftovers(&dst).is_empty());
+        Box::new(t).close().await.unwrap();
+    }
+
+    /// W3: a file that changes size between plan and stream fails the copy
+    /// with the "changed" error (§6.4 ceiling) — and the local stage is
+    /// cleaned on the failed path.
+    #[tokio::test]
+    async fn pull_size_changed_fails_and_cleans() {
+        let mut cfg = FakeConfig::tailscale(temp_root("pull-sz-srv"));
+        // Walker's first lstat over-reports by 100 bytes; the pre-open
+        // re-stat tells the truth → mismatch.
+        cfg.lie_size_once = Some(("grows.txt".into(), 100));
+        let srv = FakeServer::start(cfg).await;
+        std::fs::write(srv.root.join("grows.txt"), vec![1u8; 50]).unwrap();
+        let dst = temp_root("pull-sz-dst");
+        let t = srv.connect(&temp_root("trustSZ")).await;
+        let (emit, _p) = collector();
+        let e = transfer::run_copy(
+            &pull_req("/", dst.to_str().unwrap(), &["grows.txt"]),
+            &Side::Remote {
+                transport: &t,
+                windows: false,
+            },
+            &Side::Local,
+            CancellationToken::new(),
+            emit,
+        )
+        .await
+        .expect_err("size-changed must fail the copy");
+        assert!(
+            e.message.contains("changed while it was being copied"),
+            "unexpected error: {e:?}"
+        );
+        assert!(!dst.join("grows.txt").exists());
+        assert!(stage_leftovers(&dst).is_empty());
+        Box::new(t).close().await.unwrap();
+    }
+
+    /// W3 + spike limit #1: the PRIMARY read error ("got shorter") surfaces
+    /// even though the reader's CLOSE also fails — close never masks it.
+    #[tokio::test]
+    async fn pull_read_error_not_masked_by_close_error() {
+        let mut cfg = FakeConfig::tailscale(temp_root("pull-rd-srv"));
+        cfg.shrink_reads_for = Some("shrinks.bin".into());
+        cfg.fail_close = true;
+        let srv = FakeServer::start(cfg).await;
+        std::fs::write(srv.root.join("shrinks.bin"), vec![2u8; 5000]).unwrap();
+        let dst = temp_root("pull-rd-dst");
+        let t = srv.connect(&temp_root("trustRD")).await;
+        let (emit, _p) = collector();
+        let e = transfer::run_copy(
+            &pull_req("/", dst.to_str().unwrap(), &["shrinks.bin"]),
+            &Side::Remote {
+                transport: &t,
+                windows: false,
+            },
+            &Side::Local,
+            CancellationToken::new(),
+            emit,
+        )
+        .await
+        .expect_err("shrunk file must fail the copy");
+        assert!(
+            e.message.contains("got shorter"),
+            "primary read error must surface, got {e:?}"
+        );
+        assert!(!dst.join("shrinks.bin").exists());
+        assert!(stage_leftovers(&dst).is_empty());
+        Box::new(t).close().await.unwrap();
+    }
+
+    /// W3: cancelling a REMOTE-SOURCE copy at a chunk boundary leaves no
+    /// local stage and no partial file (read-side twin of the push cancel).
+    #[tokio::test]
+    async fn cancel_remote_source_leaves_no_stage() {
+        let srv = FakeServer::start(FakeConfig::tailscale(temp_root("pull-cx-srv"))).await;
+        std::fs::write(srv.root.join("big.bin"), vec![3u8; CHUNK * 4]).unwrap();
+        let dst = temp_root("pull-cx-dst");
+        let t = srv.connect(&temp_root("trustCX")).await;
+        let cancel = CancellationToken::new();
+        let wrapper = CancelAfterReads {
+            inner: &t,
+            cancel: cancel.clone(),
+            threshold: CHUNK as u64, // cancel once the first chunk has been read
+            read: Arc::new(AtomicU64::new(0)),
+        };
+        let (emit, _p) = collector();
+        let e = transfer::run_copy(
+            &pull_req("/", dst.to_str().unwrap(), &["big.bin"]),
+            &Side::Remote {
+                transport: &wrapper,
+                windows: false,
+            },
+            &Side::Local,
+            cancel,
+            emit,
+        )
+        .await
+        .expect_err("cancelled pull errors");
+        assert!(transfer::is_cancelled(&e), "expected cancelled, got {e:?}");
+        assert!(!dst.join("big.bin").exists());
+        assert!(stage_leftovers(&dst).is_empty());
         Box::new(t).close().await.unwrap();
     }
 }
