@@ -1,0 +1,3 @@
+# cargo clippy --target x86_64-pc-windows-gnu --lib --tests -- -D warnings — 2026-11-21 10:02:07 — HEAD de472a4
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.40s
+EXIT=0

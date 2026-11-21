@@ -1,0 +1,11 @@
+# npx vitest run — 2026-11-21 10:01:44 — HEAD de472a4
+
+ RUN  v4.1.10 /Users/cortexuvula/Development/taildrop-gui
+
+
+ Test Files  18 passed (18)
+      Tests  190 passed (190)
+   Start at  10:01:45
+   Duration  8.01s (transform 6.09s, setup 0ms, import 8.54s, tests 9.58s, environment 14.06s)
+
+EXIT=0

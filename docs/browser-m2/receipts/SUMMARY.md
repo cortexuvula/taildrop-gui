@@ -5,14 +5,14 @@ Raw logs in this directory; each log's first line names the command, timestamp, 
 
 | Gate | Receipt | Result |
 |---|---|---|
-| `cargo test --lib` (host) | cargo-test-lib.log | **249 passed**, 0 failed (baseline 229 → +20) · EXIT=0 |
-| `cargo fmt -- --check` | cargo-fmt-check.log | clean · EXIT=0 |
-| `cargo clippy --all-targets -- -D warnings` (host) | cargo-clippy-host.log | clean · EXIT=0 |
-| `cargo clippy --target x86_64-pc-windows-gnu --lib --tests -- -D warnings` | cargo-clippy-windows-gnu.log | clean · EXIT=0 (cached at de472a4; full compile run at 28dc9de — identical Rust sources) |
-| `cargo check --target x86_64-pc-windows-gnu` | cargo-check-windows-gnu.log | clean · EXIT=0 (same caching note) |
-| `npx tsc --noEmit` | tsc-noemit.log | clean · EXIT=0 |
-| `npx vitest run` | vitest.log | **190 passed** (baseline 180 → +10) · EXIT=0 |
-| `npx playwright test` | playwright.log | **62 passed** (baseline 55 → +7) · EXIT=0 |
+| `cargo test --lib` (host) | cargo-test-lib.txt | **249 passed**, 0 failed (baseline 229 → +20) · EXIT=0 |
+| `cargo fmt -- --check` | cargo-fmt-check.txt | clean · EXIT=0 |
+| `cargo clippy --all-targets -- -D warnings` (host) | cargo-clippy-host.txt | clean · EXIT=0 |
+| `cargo clippy --target x86_64-pc-windows-gnu --lib --tests -- -D warnings` | cargo-clippy-windows-gnu.txt | clean · EXIT=0 (cached at de472a4; full compile run at 28dc9de — identical Rust sources) |
+| `cargo check --target x86_64-pc-windows-gnu` | cargo-check-windows-gnu.txt | clean · EXIT=0 (same caching note) |
+| `npx tsc --noEmit` | tsc-noemit.txt | clean · EXIT=0 |
+| `npx vitest run` | vitest.txt | **190 passed** (baseline 180 → +10) · EXIT=0 |
+| `npx playwright test` | playwright.txt | **62 passed** (baseline 55 → +7) · EXIT=0 |
 
 Environment: macOS (Apple Silicon host), CARGO_INCREMENTAL=0, shared `src-tauri/target` (pre-existing from M1; kept, not created by this lane — nothing to clean up).
 
