@@ -403,6 +403,13 @@ impl JobRegistry {
         v.sort_by_key(|s| s.id);
         v
     }
+
+    /// One job's snapshot (M2a: the finish-notification builder reads the
+    /// settled job without cloning the whole registry).
+    pub fn snapshot(&self, id: u64) -> Option<CopyJobSnapshot> {
+        let map = self.inner.lock().unwrap_or_else(|p| p.into_inner());
+        map.get(&id).map(|s| s.snap.clone())
+    }
 }
 
 impl Default for JobRegistry {
@@ -424,6 +431,51 @@ pub fn job_label(req: &CopyRequest) -> String {
         format!("{} @ {}", req.dst_dir, req.dst_target)
     };
     format!("{what} → {dst}")
+}
+
+/// Desktop-notification text for a SETTLED copy job (M2a, report §7.5:
+/// finish notifications; plugin App.qml:280-284 behavior, matched to the
+/// app's existing "TailDrop — …" notification idiom). Pure so the shapes
+/// are unit-tested; the wiring lives in `notify_finish`.
+pub fn finish_notification(
+    ok: bool,
+    label: &str,
+    error: Option<&str>,
+    skipped: u32,
+) -> (String, String) {
+    if ok {
+        let mut body = format!("{label} copied");
+        if skipped > 0 {
+            body.push_str(&format!(" ({skipped} skipped)"));
+        }
+        ("TailDrop — Copy Finished".to_string(), body)
+    } else {
+        (
+            "TailDrop — Copy Failed".to_string(),
+            match error {
+                Some(e) if !e.is_empty() => format!("{label}: {e}"),
+                _ => format!("{label}: unknown error"),
+            },
+        )
+    }
+}
+
+/// Best-effort finish notification, sent from the RUST pump so it fires even
+/// while the webview is suspended (jobs live in Rust for exactly that
+/// reason). Never sent for cancels — the user initiated those and the queue
+/// row is the feedback. Uses the app's existing tauri-plugin-notification
+/// registration; no new dependency.
+fn notify_finish(app: &AppHandle, state: &BrowserState, id: u64) {
+    use tauri_plugin_notification::NotificationExt;
+    let Some(snap) = state.jobs.snapshot(id) else {
+        return;
+    };
+    let ok = snap.state == JobState::Done;
+    let (title, body) = finish_notification(ok, &snap.label, snap.error.as_deref(), snap.skipped);
+    if let Err(e) = app.notification().builder().title(title).body(body).show()
+    {
+        log::debug!("browser copy: finish notification failed: {e}");
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -538,6 +590,8 @@ async fn run_job(app: &AppHandle, state: &Arc<BrowserState>, id: u64) {
         Ok(skipped) => {
             state.jobs.finish_done(id, skipped);
             let _ = app.emit(COPY_EVENT, CopyEvent::done_ok(id, skipped));
+            // M2a: desktop notification when the job settles done.
+            notify_finish(app, state, id);
         }
         Err(e) => {
             let cancelled = transfer::is_cancelled(&e) || cancel.is_cancelled();
@@ -548,6 +602,11 @@ async fn run_job(app: &AppHandle, state: &Arc<BrowserState>, id: u64) {
                 CopyEvent::done_err(id, &e)
             };
             let _ = app.emit(COPY_EVENT, event);
+            if !cancelled {
+                // M2a: desktop notification when the job settles failed
+                // (cancels are user-initiated — the queue row is feedback).
+                notify_finish(app, state, id);
+            }
         }
     }
 }
@@ -1545,6 +1604,66 @@ mod tests {
         assert_eq!(s.state, JobState::Failed);
         assert_eq!(s.kind, Some(ErrorKind::Exists));
         assert_eq!(s.names.as_ref().unwrap(), &vec!["f".to_string()]);
+    }
+
+    /// M2a: the single-job snapshot accessor the finish-notification builder
+    /// reads (None for unknown ids — the pump never panics on a pruned job).
+    #[test]
+    fn snapshot_by_id() {
+        let r = JobRegistry::new();
+        let (id, _) = r.create(req("local", "h", &["f"]));
+        assert_eq!(r.snapshot(id).unwrap().state, JobState::Queued);
+        assert!(r.snapshot(id + 999).is_none());
+    }
+
+    /// M2a: finish-notification text shapes (report §7.5 — the plugin's
+    /// notify-send on done/failed, in the app's "TailDrop — …" idiom).
+    #[test]
+    fn finish_notification_shapes() {
+        let (t, b) = finish_notification(true, "notes.txt → /b @ h", None, 0);
+        assert_eq!(t, "TailDrop — Copy Finished");
+        assert_eq!(b, "notes.txt → /b @ h copied");
+        // Skipped items are surfaced (never silently dropped).
+        let (_, b) = finish_notification(true, "2 items → /b @ h", None, 3);
+        assert_eq!(b, "2 items → /b @ h copied (3 skipped)");
+        // Failed: label + the typed error message.
+        let (t, b) = finish_notification(
+            false,
+            "notes.txt → /b @ h",
+            Some("notes.txt already exists in /b"),
+            0,
+        );
+        assert_eq!(t, "TailDrop — Copy Failed");
+        assert_eq!(b, "notes.txt → /b @ h: notes.txt already exists in /b");
+        // Failed without a message still names the job.
+        let (_, b) = finish_notification(false, "x → /b", None, 0);
+        assert_eq!(b, "x → /b: unknown error");
+        let (_, b) = finish_notification(false, "x → /b", Some(""), 0);
+        assert_eq!(b, "x → /b: unknown error");
+    }
+
+    /// M2a wiring tripwire: run_job must fire the finish notification on
+    /// BOTH settle paths (done and failed-not-cancelled) and never on the
+    /// cancelled path. Reverting the wiring drops these call sites. The
+    /// needle is composed from fragments so this test's own source (which
+    /// include_str! also captures) never matches it.
+    #[test]
+    fn run_job_notifies_on_settle_tripwire() {
+        let src = include_str!("commands.rs");
+        let needle = format!("notify_finish({}, {}, {});", "app", "state", "id");
+        assert_eq!(
+            src.matches(&needle).count(),
+            2,
+            "done + failed settle paths must notify exactly once each"
+        );
+        let cancelled_arm = src
+            .split("if !cancelled {")
+            .nth(1)
+            .expect("failed path guards the notification on !cancelled");
+        assert!(
+            cancelled_arm.contains(&needle),
+            "the failed-path notification must stay inside the !cancelled guard"
+        );
     }
 
     #[test]
