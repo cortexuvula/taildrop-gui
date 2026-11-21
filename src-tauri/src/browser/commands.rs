@@ -1160,6 +1160,7 @@ fn local_delete(paths: &[String]) -> Result<DeleteOutcome, BrowserError> {
 /// path opened.
 #[tauri::command]
 pub async fn browser_open(
+    app: AppHandle,
     state: State<'_, Arc<BrowserState>>,
     target: String,
     path: String,
@@ -1172,7 +1173,7 @@ pub async fn browser_open(
                 format!("{path} no longer exists"),
             ));
         }
-        open_with_default_app(&path)?;
+        open_with_default_app(&app, &path)?;
         return Ok(path);
     }
     let name = listing_basename(&path)?;
@@ -1210,7 +1211,7 @@ pub async fn browser_open(
     .await;
     let _ = Box::new(transport).close().await;
     let local_path = local?;
-    open_with_default_app(&local_path)?;
+    open_with_default_app(&app, &local_path)?;
     Ok(local_path)
 }
 
@@ -1279,27 +1280,37 @@ async fn download_to(
     Ok(())
 }
 
-fn open_with_default_app(path: &str) -> Result<(), BrowserError> {
-    // Same platform split as the app's existing show_in_folder command.
-    #[cfg(target_os = "macos")]
-    let (prog, args) = ("open", vec![path.to_string()]);
-    #[cfg(target_os = "linux")]
-    let (prog, args) = ("xdg-open", vec![path.to_string()]);
+/// Open a local path with the platform default app WITHOUT ever routing it
+/// through a shell interpreter (B1). cmd.exe would parse `&`, `|`, `<`, `>`,
+/// `^` and `%VAR%` in an unquoted argument — and those characters are legal
+/// in remote-served filenames, so `cmd /C start "" <path>` let a hostile
+/// peer's filename execute commands. macOS/Linux spawn the exec family
+/// directly (the path is one argv element, never shell text); Windows uses
+/// tauri-plugin-opener, whose `open` crate backend calls ShellExecuteExW
+/// with raw wide strings (its cmd launcher exists only behind the disabled
+/// `insecure` feature).
+fn open_with_default_app(app: &AppHandle, path: &str) -> Result<(), BrowserError> {
     #[cfg(target_os = "windows")]
-    let (prog, args) = (
-        "cmd",
-        vec![
-            "/C".to_string(),
-            "start".to_string(),
-            "".to_string(),
-            path.to_string(),
-        ],
-    );
-    std::process::Command::new(prog)
-        .args(&args)
-        .spawn()
-        .map_err(|e| BrowserError::other(format!("can't open {path}: {e}")))?;
-    Ok(())
+    {
+        use tauri_plugin_opener::OpenerExt;
+        app.opener()
+            .open_path(path, None::<&str>)
+            .map_err(|e| BrowserError::other(format!("can't open {path}: {e}")))
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = app;
+        // Same platform split as the app's existing show_in_folder command.
+        #[cfg(target_os = "macos")]
+        let (prog, args) = ("open", vec![path.to_string()]);
+        #[cfg(target_os = "linux")]
+        let (prog, args) = ("xdg-open", vec![path.to_string()]);
+        std::process::Command::new(prog)
+            .args(&args)
+            .spawn()
+            .map_err(|e| BrowserError::other(format!("can't open {path}: {e}")))?;
+        Ok(())
+    }
 }
 
 /// Per-host account pin (Change user). Persisted; probe cache dropped so a
@@ -1583,5 +1594,43 @@ mod tests {
         let s = dir.unwrap().to_string_lossy().to_string();
         assert!(s.ends_with("a_b_c"));
         let _ = std::fs::remove_dir_all(Path::new("/tmp/does-not-matter-x/browser-open"));
+    }
+
+    /// B1 regression tripwire: the browser module must NEVER route a path
+    /// through cmd.exe (or any shell interpreter). Remote filenames are
+    /// attacker-controlled and `&`, `|`, `<`, `>`, `^`, `%` are legal in
+    /// Windows filenames — `cmd /C start` would execute them. Windows opens
+    /// go through tauri-plugin-opener (ShellExecuteExW with raw wide
+    /// strings; the `open` crate's cmd launcher sits behind its disabled
+    /// `insecure` feature — verified in open-5.4.5/src/windows.rs).
+    #[test]
+    fn browser_open_never_uses_a_shell_interpreter() {
+        let src = include_str!("commands.rs");
+        assert!(
+            !src.contains("Command::new(\"cmd\")"),
+            "commands.rs must not spawn cmd.exe (B1)"
+        );
+        assert!(
+            !src.contains("\"/C\""),
+            "no cmd.exe /C invocations anywhere (B1)"
+        );
+        assert!(
+            src.contains("tauri_plugin_opener::OpenerExt"),
+            "Windows opens must go through the opener plugin (B1)"
+        );
+    }
+
+    /// B1 companion: `&` is legal in a remote filename and must survive
+    /// basename validation and cache-path composition LITERALLY — safety
+    /// comes from the shell-free open, never from mangling the name.
+    #[test]
+    fn ampersand_names_pass_through_literally() {
+        let name = listing_basename("/some/dir/a&calc.exe").expect("& is a legal name char");
+        assert_eq!(name, "a&calc.exe");
+        let unique = format!("{}-{name}", 12345u128);
+        assert!(unique.ends_with("a&calc.exe"));
+        // Control chars are still refused (the injection-adjacent class that
+        // IS invalid in names everywhere).
+        assert!(listing_basename("/some/dir/a\nb").is_err());
     }
 }

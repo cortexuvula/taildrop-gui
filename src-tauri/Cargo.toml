@@ -37,6 +37,7 @@ async-trait = "0.1"
 rand = "0.9"
 # Local delete is Trash-only, never permanent (safety invariant 11).
 trash = "5"
+tauri-plugin-opener = "2"
 
 [target.'cfg(unix)'.dependencies]
 # Handle-bound local sink: openat/renameat2/renameatx_np, O_NOFOLLOW, dev/ino.
