@@ -29,7 +29,8 @@ use crate::browser::transfer::{self, Side};
 use crate::browser::transport::SftpTransport as _;
 use crate::browser::{
     valid_host, valid_user, BrowserConfig, BrowserError, BrowserPeer, CopyEvent, CopyJobSnapshot,
-    CopyRequest, DeleteOutcome, ErrorKind, JobState, Listing, ProbeInfo, LOCAL_TARGET,
+    CopyRequest, DeleteOutcome, ErrorKind, JobState, KnownHostPin, Listing, ProbeInfo,
+    ServerFlavor, LOCAL_TARGET,
 };
 
 /// Event name for copy progress/done (frontend: useBrowserTransfers).
@@ -1432,6 +1433,46 @@ pub async fn browser_set_last(
     state.ctx.config.set_last(&host).map_err(|e| e.message)
 }
 
+/// List every pinned host key across the three flavor stores (M2a pin
+/// management, M1 gap 4). A corrupt store fails closed with the typed
+/// Hostkey error — the dialog shows the failure, never a partial guess.
+#[tauri::command]
+pub fn browser_known_hosts(
+    state: State<'_, Arc<BrowserState>>,
+) -> Result<Vec<KnownHostPin>, BrowserError> {
+    let pins = state.ctx.trust.all_pins()?;
+    Ok(pins
+        .into_iter()
+        .map(|(flavor, host, key)| KnownHostPin {
+            host,
+            flavor,
+            fingerprint: crate::browser::trust::fingerprint(&key).unwrap_or_default(),
+        })
+        .collect())
+}
+
+/// Forget one pinned host key (legitimate-rotation recovery: the next
+/// connect is accept-new again for that host+flavor). Host validated like
+/// every other command; the flavor selects the store the pin lives in.
+/// The probe cache for the host is dropped so a stale home/OS can't leak
+/// into later guards (same discipline as browser_set_user).
+#[tauri::command]
+pub async fn browser_forget_host_key(
+    state: State<'_, Arc<BrowserState>>,
+    host: String,
+    flavor: ServerFlavor,
+) -> Result<(), BrowserError> {
+    if !valid_host(&host) {
+        return Err(BrowserError::new(
+            ErrorKind::Other,
+            format!("{host:?} is not a usable host name"),
+        ));
+    }
+    state.ctx.trust.forget(flavor, &host)?;
+    state.probes.invalidate_host(&host);
+    Ok(())
+}
+
 // ---------------------------------------------------------------------------
 // helpers
 // ---------------------------------------------------------------------------
@@ -1664,6 +1705,25 @@ mod tests {
             cancelled_arm.contains(&needle),
             "the failed-path notification must stay inside the !cancelled guard"
         );
+    }
+
+    /// M2a: KnownHostPin crosses the IPC boundary in the documented shape —
+    /// camelCase fields, kebab-case flavor (the frontend sanitizer and the
+    /// forget command's argument both depend on exactly this).
+    #[test]
+    fn known_host_pin_wire_shape() {
+        let pin = KnownHostPin {
+            host: "studio".into(),
+            flavor: ServerFlavor::TailscaleSsh,
+            fingerprint: "SHA256:abc".into(),
+        };
+        let json = serde_json::to_value(&pin).unwrap();
+        assert_eq!(json["host"], "studio");
+        assert_eq!(json["flavor"], "tailscale-ssh");
+        assert_eq!(json["fingerprint"], "SHA256:abc");
+        // Round-trip from the wire shape the dialog sends back for forget.
+        let back: ServerFlavor = serde_json::from_value(serde_json::json!("openssh-windows")).unwrap();
+        assert_eq!(back, ServerFlavor::OpensshWindows);
     }
 
     #[test]

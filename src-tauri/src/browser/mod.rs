@@ -427,6 +427,18 @@ pub struct DeleteOutcome {
     pub done: usize,
 }
 
+/// One pinned host key for the Known-hosts management dialog (M2a, M1
+/// gap 4). `fingerprint` is the ssh-keygen-style SHA256 of the stored key
+/// ("" when the stored pin can't be parsed — the pin still enforces
+/// byte-exact at connect time regardless of display).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct KnownHostPin {
+    pub host: String,
+    pub flavor: ServerFlavor,
+    pub fingerprint: String,
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct HostConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]

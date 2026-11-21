@@ -75,9 +75,8 @@ impl TrustStore {
         Ok(is_new)
     }
 
-    /// Remove a single pin (user-authorized rotation recovery).
-    /// Drop a pin (M2 trust-management surface; not an M1 command).
-    #[allow(dead_code)]
+    /// Remove a single pin (user-authorized rotation recovery; M2a: wired
+    /// to the Known-hosts dialog via `browser_forget_host_key`).
     pub fn forget(&self, flavor: ServerFlavor, host: &str) -> Result<(), BrowserError> {
         let _guard = TRUST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
         let file = self.pin_file(flavor);
@@ -85,6 +84,36 @@ impl TrustStore {
         pins.remove(host);
         save_pins(&self.dir, &file, &pins)
     }
+
+    /// Every pin across the three per-flavor stores (M2a pin-management UI,
+    /// M1 gap 4): (flavor, host, stored OpenSSH key line), flavor order
+    /// fixed, hosts sorted within a flavor (BTreeMap iteration). A corrupt
+    /// store fails closed with the same Hostkey error the connect path
+    /// produces — the management surface never guesses around damage.
+    pub fn all_pins(&self) -> Result<Vec<(ServerFlavor, String, String)>, BrowserError> {
+        let _guard = TRUST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let mut out = Vec::new();
+        for flavor in [
+            ServerFlavor::TailscaleSsh,
+            ServerFlavor::Openssh,
+            ServerFlavor::OpensshWindows,
+        ] {
+            for (host, key) in load_pins(&self.pin_file(flavor))? {
+                out.push((flavor, host, key));
+            }
+        }
+        Ok(out)
+    }
+}
+
+/// SHA256 fingerprint of a stored OpenSSH public-key line, in the familiar
+/// `ssh-keygen -l` shape ("SHA256:<base64>"). `None` when the stored pin
+/// can't be parsed — the management UI shows a fallback, while the pin
+/// itself still enforces byte-exact at connect time (never weakened here).
+pub fn fingerprint(openssh_line: &str) -> Option<String> {
+    use russh::keys::{HashAlg, PublicKey};
+    let key = PublicKey::from_openssh(openssh_line.trim()).ok()?;
+    Some(key.fingerprint(HashAlg::Sha256).to_string())
 }
 
 fn load_pins(file: &Path) -> Result<BTreeMap<String, String>, BrowserError> {
@@ -272,6 +301,89 @@ mod tests {
         let e = store
             .check_and_record(ServerFlavor::Openssh, "h", "ssh-ed25519 A")
             .unwrap_err();
+        assert_eq!(e.kind, ErrorKind::Hostkey);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// M2a (pin-management UI): the fingerprint helper returns the exact
+    /// `ssh-keygen -l` shape. EXTERNALLY-VERIFIED vector: ssh-keygen on the
+    /// public half of the fixture's HOST_KEY_PEM prints precisely this
+    /// SHA256 value (independent implementation, not a self-consistency
+    /// check).
+    #[test]
+    fn fingerprint_matches_ssh_keygen_vector() {
+        let key = russh::keys::decode_secret_key(
+            crate::browser::fake::HOST_KEY_PEM,
+            None,
+        )
+        .expect("fixture key decodes");
+        let line = key
+            .public_key()
+            .to_openssh()
+            .expect("pubkey openssh encoding");
+        assert_eq!(
+            fingerprint(line.trim()).as_deref(),
+            Some("SHA256:WnFigd6vxW1unbyFJHKepROv0zUUHGzEQZiaKA2ez/4"),
+            "must equal ssh-keygen -l output for the same key"
+        );
+        // Unparseable pins degrade to None (UI fallback), never a panic and
+        // never a guessed fingerprint.
+        assert_eq!(fingerprint("not a key"), None);
+        assert_eq!(fingerprint(""), None);
+        assert_eq!(fingerprint("ssh-ed25519 !!!not-base64!!!"), None);
+    }
+
+    /// M2a (pin-management UI): all_pins enumerates every flavor store in a
+    /// stable order and forget() removes exactly one row.
+    #[test]
+    fn all_pins_lists_every_flavor_store_sorted() {
+        let dir = tempfile_like("trust-allpins".to_string());
+        let store = TrustStore::new(&dir);
+        store
+            .check_and_record(ServerFlavor::Openssh, "zeta", "ssh-ed25519 Z")
+            .unwrap();
+        store
+            .check_and_record(ServerFlavor::TailscaleSsh, "alpha", "ssh-ed25519 A")
+            .unwrap();
+        store
+            .check_and_record(ServerFlavor::Openssh, "beta", "ssh-ed25519 B")
+            .unwrap();
+        store
+            .check_and_record(ServerFlavor::OpensshWindows, "win", "ssh-ed25519 W")
+            .unwrap();
+        let pins = store.all_pins().unwrap();
+        let shape: Vec<(ServerFlavor, &str, &str)> = pins
+            .iter()
+            .map(|(f, h, k)| (*f, h.as_str(), k.as_str()))
+            .collect();
+        assert_eq!(
+            shape,
+            vec![
+                (ServerFlavor::TailscaleSsh, "alpha", "ssh-ed25519 A"),
+                (ServerFlavor::Openssh, "beta", "ssh-ed25519 B"),
+                (ServerFlavor::Openssh, "zeta", "ssh-ed25519 Z"),
+                (ServerFlavor::OpensshWindows, "win", "ssh-ed25519 W"),
+            ],
+            "flavor order fixed, hosts sorted within a flavor"
+        );
+        // Forget removes exactly the one (flavor, host) row — the same host
+        // pinned under another flavor is untouched.
+        store.forget(ServerFlavor::Openssh, "beta").unwrap();
+        let pins = store.all_pins().unwrap();
+        assert_eq!(pins.len(), 3);
+        assert!(pins.iter().all(|(f, h, _)| !(*f == ServerFlavor::Openssh && h == "beta")));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// M2a: a corrupt store fails the LISTING closed too (Hostkey error, the
+    /// connect-path behavior) — the dialog never shows a partial guess.
+    #[test]
+    fn all_pins_corrupt_store_fails_closed() {
+        let dir = tempfile_like("trust-allpins-corrupt".to_string());
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("pins.openssh.json"), b"{not json").unwrap();
+        let store = TrustStore::new(&dir);
+        let e = store.all_pins().unwrap_err();
         assert_eq!(e.kind, ErrorKind::Hostkey);
         let _ = std::fs::remove_dir_all(&dir);
     }
