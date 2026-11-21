@@ -189,16 +189,10 @@ pub fn preflight(req: &CopyRequest, dst_windows: bool) -> Result<(), BrowserErro
             ),
         ));
     }
-    // B5: remote→remote is M2 (report §7.5) — refuse explicitly instead of
-    // running an untested path. Pull to This computer, then push.
-    if req.src_target != crate::browser::LOCAL_TARGET
-        && req.dst_target != crate::browser::LOCAL_TARGET
-    {
-        return Err(BrowserError::unsupported(
-            "Copying directly between two remote machines arrives with M2 — \
-             pull the files to This computer first, then push them",
-        ));
-    }
+    // M2a: remote→remote streams THROUGH the app (two independent sessions,
+    // no local disk) — the M1 B5 refusal is lifted. Same-host two-account
+    // stays refused above (M1 invariant), Windows destinations below (M3
+    // gate), and the copy-into-itself rules apply per target.
     // Remote sides need a pinned account before copying (pane loadedUser).
     for (target, user) in [
         (&req.src_target, &req.src_user),
@@ -489,20 +483,40 @@ mod tests {
         let mut r = base.clone();
         r.dst_user = None;
         assert_eq!(preflight(&r, false).unwrap_err().kind, ErrorKind::Account);
-        // Same host, two accounts (more specific than the B5 scope refusal).
+        // Same host, two accounts (refused even though M2a lifted the
+        // remote→remote scope refusal — one connection can't be two accounts).
         let mut r = base.clone();
         r.src_target = "host".into();
         r.src_user = Some("u1".into());
         r.dst_user = Some("u2".into());
         assert_eq!(preflight(&r, false).unwrap_err().kind, ErrorKind::Account);
-        // B5: remote→remote between DIFFERENT hosts is M2 — Unsupported.
+        // M2a: remote→remote between DIFFERENT hosts is now allowed at
+        // preflight (the M1 B5 refusal is lifted; the copy streams through
+        // the app on two independent sessions).
         let mut r = base.clone();
         r.src_target = "other-host".into();
         r.src_user = Some("u".into());
+        assert!(
+            preflight(&r, false).is_ok(),
+            "remote→remote must pass preflight in M2a"
+        );
+        // A Windows DESTINATION is still refused for remote→remote too
+        // (M3 gate — the refusal is destination-flavor based, direction
+        // independent).
         assert_eq!(
-            preflight(&r, false).unwrap_err().kind,
+            preflight(&r, true).unwrap_err().kind,
             ErrorKind::Unsupported
         );
+        // Same host, SAME account, different folders: allowed (the plugin's
+        // same-host rule; one connection serves both sides).
+        let mut r = base.clone();
+        r.src_target = "host".into();
+        r.src_user = Some("u".into());
+        r.dst_target = "host".into();
+        r.dst_user = Some("u".into());
+        r.src_dir = "/a".into();
+        r.dst_dir = "/b".into();
+        assert!(preflight(&r, false).is_ok());
         // Same host, same account, into itself.
         let mut r = base.clone();
         r.src_target = "host".into();

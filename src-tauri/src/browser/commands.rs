@@ -569,20 +569,37 @@ async fn execute_copy(
     let dst_side = if dst_same_as_src {
         None
     } else {
-        Some(open_side(state, &req.dst_target, req.dst_user.as_deref()).await?)
+        match open_side(state, &req.dst_target, req.dst_user.as_deref()).await {
+            Ok(side) => Some(side),
+            Err(e) => {
+                // One-side open failure (M2a: e.g. the destination's auth is
+                // refused while the source connected fine): close the source
+                // session before propagating — no leaked connections, and
+                // nothing was staged anywhere yet, so no partial destination
+                // can exist.
+                close_side(src_side).await;
+                return Err(e);
+            }
+        }
     };
 
     let result = run_with_sides(app, state, id, req, cancel, &src_side, dst_side.as_ref()).await;
 
     // Close transports on every path (cooperative cleanup ordering: staging
     // was already removed by run_copy before we get here).
-    if let OwnedSide::Remote(remote) = src_side {
-        let _ = Box::new(remote.transport).close().await;
-    }
-    if let Some(OwnedSide::Remote(remote)) = dst_side {
-        let _ = Box::new(remote.transport).close().await;
+    close_side(src_side).await;
+    if let Some(dst) = dst_side {
+        close_side(dst).await;
     }
     result
+}
+
+/// Best-effort session close for an owned side (remote only; local is a
+/// unit). Boxed the same way the M1 close sites did (close takes Self).
+async fn close_side(side: OwnedSide) {
+    if let OwnedSide::Remote(remote) = side {
+        let _ = Box::new(remote.transport).close().await;
+    }
 }
 
 fn side_ref(s: &OwnedSide) -> Side<'_> {

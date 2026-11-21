@@ -152,6 +152,11 @@ pub struct FakeConfig {
     /// Hostility (W3): every CLOSE fails — proves a primary read/stream error
     /// is never masked by the close error (spike limit #1).
     pub fail_close: bool,
+    /// Hostility (M2a): reject EVERY auth method (none AND publickey, files
+    /// and agent) — a deterministic one-side auth failure regardless of the
+    /// ambient developer credentials (real ~/.ssh keys, ssh-agent identities)
+    /// the production connect flow would otherwise try.
+    pub reject_all_auth: bool,
 }
 
 impl FakeConfig {
@@ -175,6 +180,7 @@ impl FakeConfig {
             lie_size_once: None,
             shrink_reads_for: None,
             fail_close: false,
+            reject_all_auth: false,
         }
     }
     /// macOS/Windows OpenSSH-like defaults (M0: refused replacing renames).
@@ -197,6 +203,7 @@ impl FakeConfig {
             lie_size_once: None,
             shrink_reads_for: None,
             fail_close: false,
+            reject_all_auth: false,
         }
     }
 }
@@ -372,7 +379,7 @@ impl russh::server::Handler for FakeSession {
     type Error = russh::Error;
 
     async fn auth_none(&mut self, _user: &str) -> Result<Auth, Self::Error> {
-        Ok(if self.cfg.accept_none_auth {
+        Ok(if self.cfg.accept_none_auth && !self.cfg.reject_all_auth {
             Auth::Accept
         } else {
             Auth::Reject {
@@ -387,6 +394,14 @@ impl russh::server::Handler for FakeSession {
         _user: &str,
         _key: VerifiedPublicKey<'_>,
     ) -> Result<Auth, Self::Error> {
+        if self.cfg.reject_all_auth {
+            // M2a: deterministic one-side auth failure — refuse every
+            // credential (ambient developer keys must not pass the test).
+            return Ok(Auth::Reject {
+                proceed_with_methods: None,
+                partial_success: false,
+            });
+        }
         // Any key accepted: the CLIENT side (key loading, method order,
         // never-password) is what's under test, not real authorization.
         Ok(Auth::Accept)
@@ -1175,29 +1190,21 @@ mod tests {
     // closed) — imports used solely by those tests are gated with them.
     // SftpTransport stays ungated: the cross-platform transport tests call
     // its methods on the concrete RusshTransport (trait must be in scope).
-    #[cfg(unix)]
+    // M2a: the remote→remote group also runs on ALL platforms (no local
+    // side involved), so the shared engine helpers are ungated too.
     use crate::browser::transfer::{self, Side, CHUNK};
     use crate::browser::transport::SftpTransport;
-    #[cfg(unix)]
     use crate::browser::transport::{RemoteNode, RemoteReader, RemoteWriter};
-    #[cfg(unix)]
     use crate::browser::{BrowserError, CopyRequest, STAGE_PREFIX};
-    #[cfg(unix)]
     use async_trait::async_trait;
-    #[cfg(unix)]
     use std::collections::BTreeMap;
-    #[cfg(unix)]
     use std::sync::atomic::{AtomicU64, Ordering};
-    #[cfg(unix)]
     use tokio_util::sync::CancellationToken;
 
     // ---- helpers ----
 
-    // Unix-only: used exclusively by the Unix-gated run_copy tests below.
-    #[cfg(unix)]
     type Emit = Arc<dyn Fn(u8, String, String) + Send + Sync>;
 
-    #[cfg(unix)]
     fn collector() -> (Emit, Arc<Mutex<Vec<u8>>>) {
         let v: Arc<Mutex<Vec<u8>>> = Arc::new(Mutex::new(Vec::new()));
         let v2 = v.clone();
@@ -1226,7 +1233,6 @@ mod tests {
     /// Staging dirs (anywhere one level under `dir`) that survived — the
     /// cleanup invariant says this must ALWAYS be empty after run_copy
     /// returns, on every exit path (done / failed / cancelled).
-    #[cfg(unix)] // Unix-only: run_copy local side (see imports note)
     fn stage_leftovers(dir: &Path) -> Vec<String> {
         std::fs::read_dir(dir)
             .map(|rd| {
@@ -1247,7 +1253,8 @@ mod tests {
 
     /// Transport wrapper that cancels the token after N written bytes —
     /// makes mid-copy cancellation deterministic (no sleeps, no races).
-    #[cfg(unix)] // Unix-only: run_copy local side (see imports note)
+    /// M2a: also drives the remote→remote cancel test on ALL platforms
+    /// (wraps the DESTINATION transport; no local side involved).
     struct CancelAfterBytes<'a> {
         inner: &'a RusshTransport,
         cancel: CancellationToken,
@@ -1255,7 +1262,6 @@ mod tests {
         written: Arc<AtomicU64>,
     }
 
-    #[cfg(unix)]
     struct CountingWriter {
         inner: Box<dyn RemoteWriter>,
         cancel: CancellationToken,
@@ -1263,7 +1269,6 @@ mod tests {
         written: Arc<AtomicU64>,
     }
 
-    #[cfg(unix)]
     #[async_trait]
     impl RemoteWriter for CountingWriter {
         async fn write_all(&mut self, data: &[u8]) -> Result<(), BrowserError> {
@@ -1282,7 +1287,6 @@ mod tests {
         }
     }
 
-    #[cfg(unix)]
     #[async_trait]
     impl SftpTransport for CancelAfterBytes<'_> {
         async fn realpath(&self, path: &str) -> Result<String, BrowserError> {
@@ -2477,5 +2481,410 @@ mod tests {
         assert!(!dst.join("big.bin").exists());
         assert!(stage_leftovers(&dst).is_empty());
         Box::new(t).close().await.unwrap();
+    }
+
+    // ---- Group M2a: remote→remote (TWO fake servers, no local side) ----
+    //
+    // The copy streams THROUGH the app: a source session on server A feeds a
+    // destination session on server B (report §7.5 M2). No `Side::Local` is
+    // involved, so the whole group runs on EVERY platform — the Windows
+    // local-engine gate (W4) does not apply.
+
+    fn r2r_req(src_dir: &str, dst_dir: &str, names: &[&str], replace: bool) -> CopyRequest {
+        CopyRequest {
+            src_target: "host-a".into(),
+            src_user: Some("fakeuser".into()),
+            src_dir: src_dir.into(),
+            dst_target: "host-b".into(),
+            dst_user: Some("fakeuser".into()),
+            dst_dir: dst_dir.into(),
+            names: names.iter().map(|s| s.to_string()).collect(),
+            replace,
+        }
+    }
+
+    /// Portable whole-second mtime setter (std FileTimes, atime+mtime).
+    fn set_mtime_secs(path: &Path, secs: u64) {
+        let f = std::fs::OpenOptions::new()
+            .write(true)
+            .open(path)
+            .expect("open for mtime");
+        let t = std::time::UNIX_EPOCH + std::time::Duration::from_secs(secs);
+        f.set_times(std::fs::FileTimes::new().set_accessed(t).set_modified(t))
+            .expect("set mtime");
+    }
+
+    fn mtime_secs(path: &Path) -> u64 {
+        std::fs::metadata(path)
+            .unwrap()
+            .modified()
+            .unwrap()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs()
+    }
+
+    /// M2a: remote→remote FILE copy between two independent sessions —
+    /// multi-chunk bytes land on server B with the source mtime, server A is
+    /// untouched, no staging survives on either side, progress stays ≤99.
+    #[tokio::test]
+    async fn remote_to_remote_file_copy_two_sessions() {
+        let srv_a = FakeServer::start(FakeConfig::tailscale(temp_root("r2r-f-a"))).await;
+        let srv_b = FakeServer::start(FakeConfig::tailscale(temp_root("r2r-f-b"))).await;
+        let payload = vec![5u8; CHUNK * 2 + 77];
+        std::fs::write(srv_a.root.join("big.bin"), &payload).unwrap();
+        set_mtime_secs(&srv_a.root.join("big.bin"), 1_700_000_123);
+        std::fs::create_dir_all(srv_b.root.join("dst")).unwrap();
+
+        let t_a = srv_a.connect(&temp_root("trustR2RF1")).await;
+        let t_b = srv_b.connect(&temp_root("trustR2RF2")).await;
+        let (emit, pcts) = collector();
+        let outcome = transfer::run_copy(
+            &r2r_req("/", "/dst", &["big.bin"], false),
+            &Side::Remote {
+                transport: &t_a,
+                windows: false,
+            },
+            &Side::Remote {
+                transport: &t_b,
+                windows: false,
+            },
+            CancellationToken::new(),
+            emit,
+        )
+        .await
+        .expect("remote→remote copy succeeds");
+        assert_eq!(outcome.skipped, 0);
+        assert_eq!(
+            outcome.bytes,
+            payload.len() as u64,
+            "every acknowledged byte counted"
+        );
+        assert_eq!(
+            std::fs::read(srv_b.root.join("dst/big.bin")).unwrap(),
+            payload,
+            "multi-chunk bytes land with fidelity"
+        );
+        assert_eq!(
+            mtime_secs(&srv_b.root.join("dst/big.bin")),
+            1_700_000_123,
+            "source mtime travels through the relay"
+        );
+        // Source untouched; staging cleaned on BOTH servers.
+        assert_eq!(std::fs::read(srv_a.root.join("big.bin")).unwrap().len(), CHUNK * 2 + 77);
+        assert!(stage_leftovers(&srv_b.root.join("dst")).is_empty());
+        assert!(stage_leftovers(&srv_a.root).is_empty());
+        {
+            let p = pcts.lock().unwrap();
+            assert!(
+                p.iter().all(|v| *v <= 99),
+                "progress caps at 99 until done: {p:?}"
+            );
+        }
+        Box::new(t_a).close().await.unwrap();
+        Box::new(t_b).close().await.unwrap();
+    }
+
+    /// M2a: remote→remote FOLDER copy with fidelity — nested structure,
+    /// multi-chunk bytes, per-file mtimes everywhere; on Unix additionally
+    /// symlinks travel AS LINKS and mode bits are preserved (the fake
+    /// applies SETSTAT modes on Unix; Windows ignores them by design).
+    #[tokio::test]
+    async fn remote_to_remote_folder_copy_fidelity() {
+        let srv_a = FakeServer::start(FakeConfig::tailscale(temp_root("r2r-d-a"))).await;
+        let srv_b = FakeServer::start(FakeConfig::tailscale(temp_root("r2r-d-b"))).await;
+        std::fs::create_dir_all(srv_a.root.join("tree/sub")).unwrap();
+        std::fs::write(srv_a.root.join("tree/readme.md"), b"# hi").unwrap();
+        set_mtime_secs(&srv_a.root.join("tree/readme.md"), 1_700_000_001);
+        let inner = vec![7u8; CHUNK + 5];
+        std::fs::write(srv_a.root.join("tree/sub/inner.bin"), &inner).unwrap();
+        set_mtime_secs(&srv_a.root.join("tree/sub/inner.bin"), 1_700_000_002);
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink("readme.md", srv_a.root.join("tree/link.txt")).unwrap();
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(
+                &srv_a.root.join("tree/readme.md"),
+                std::fs::Permissions::from_mode(0o640),
+            )
+            .unwrap();
+            std::fs::set_permissions(
+                &srv_a.root.join("tree/sub"),
+                std::fs::Permissions::from_mode(0o750),
+            )
+            .unwrap();
+        }
+        std::fs::create_dir_all(srv_b.root.join("dst")).unwrap();
+
+        let t_a = srv_a.connect(&temp_root("trustR2RD1")).await;
+        let t_b = srv_b.connect(&temp_root("trustR2RD2")).await;
+        let (emit, _p) = collector();
+        let outcome = transfer::run_copy(
+            &r2r_req("/", "/dst", &["tree"], false),
+            &Side::Remote {
+                transport: &t_a,
+                windows: false,
+            },
+            &Side::Remote {
+                transport: &t_b,
+                windows: false,
+            },
+            CancellationToken::new(),
+            emit,
+        )
+        .await
+        .expect("remote→remote folder copy succeeds");
+        assert_eq!(outcome.skipped, 0);
+        let dst = srv_b.root.join("dst");
+        assert_eq!(std::fs::read(dst.join("tree/readme.md")).unwrap(), b"# hi");
+        assert_eq!(
+            std::fs::read(dst.join("tree/sub/inner.bin")).unwrap(),
+            inner,
+            "nested multi-chunk file streams with byte fidelity"
+        );
+        assert_eq!(mtime_secs(&dst.join("tree/readme.md")), 1_700_000_001);
+        assert_eq!(mtime_secs(&dst.join("tree/sub/inner.bin")), 1_700_000_002);
+        #[cfg(unix)]
+        {
+            // Symlink travelled AS A LINK, never followed.
+            let lm = std::fs::symlink_metadata(dst.join("tree/link.txt")).unwrap();
+            assert!(lm.is_symlink(), "link stays a link");
+            assert_eq!(
+                std::fs::read_link(dst.join("tree/link.txt"))
+                    .unwrap()
+                    .to_str()
+                    .unwrap(),
+                "readme.md"
+            );
+            // Mode bits preserved through staging + placement.
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                std::fs::metadata(dst.join("tree/readme.md"))
+                    .unwrap()
+                    .permissions()
+                    .mode()
+                    & 0o7777,
+                0o640
+            );
+            assert_eq!(
+                std::fs::metadata(dst.join("tree/sub"))
+                    .unwrap()
+                    .permissions()
+                    .mode()
+                    & 0o7777,
+                0o750
+            );
+        }
+        assert!(stage_leftovers(&dst).is_empty());
+        assert!(stage_leftovers(&srv_a.root).is_empty());
+        Box::new(t_a).close().await.unwrap();
+        Box::new(t_b).close().await.unwrap();
+    }
+
+    /// M2a: remote→remote conflict semantics — an existing destination name
+    /// fails the copy with kind=exists + names (the row's Replace offer),
+    /// the destination is untouched and the stage is removed; the SAME copy
+    /// with replace consent then replaces it and cleans up.
+    #[tokio::test]
+    async fn remote_to_remote_conflict_refuses_then_replace_succeeds() {
+        let srv_a = FakeServer::start(FakeConfig::tailscale(temp_root("r2r-c-a"))).await;
+        let srv_b = FakeServer::start(FakeConfig::tailscale(temp_root("r2r-c-b"))).await;
+        std::fs::write(srv_a.root.join("hello.txt"), b"hello world").unwrap();
+        std::fs::create_dir_all(srv_b.root.join("dst")).unwrap();
+        std::fs::write(srv_b.root.join("dst/hello.txt"), b"OLD").unwrap();
+
+        let t_a = srv_a.connect(&temp_root("trustR2RC1")).await;
+        let t_b = srv_b.connect(&temp_root("trustR2RC2")).await;
+        let (emit1, _p1) = collector();
+        let e = transfer::run_copy(
+            &r2r_req("/", "/dst", &["hello.txt"], false),
+            &Side::Remote {
+                transport: &t_a,
+                windows: false,
+            },
+            &Side::Remote {
+                transport: &t_b,
+                windows: false,
+            },
+            CancellationToken::new(),
+            emit1,
+        )
+        .await
+        .expect_err("conflict without consent must refuse");
+        assert_eq!(e.kind, ErrorKind::Exists);
+        assert_eq!(
+            e.names.as_deref(),
+            Some(&["hello.txt".to_string()][..]),
+            "the exists error carries the colliding names for the Replace offer"
+        );
+        assert_eq!(
+            std::fs::read(srv_b.root.join("dst/hello.txt")).unwrap(),
+            b"OLD",
+            "refused conflict leaves the destination untouched"
+        );
+        assert!(stage_leftovers(&srv_b.root.join("dst")).is_empty());
+
+        // Replace consent: the identical copy with replace=true overwrites.
+        let (emit2, _p2) = collector();
+        transfer::run_copy(
+            &r2r_req("/", "/dst", &["hello.txt"], true),
+            &Side::Remote {
+                transport: &t_a,
+                windows: false,
+            },
+            &Side::Remote {
+                transport: &t_b,
+                windows: false,
+            },
+            CancellationToken::new(),
+            emit2,
+        )
+        .await
+        .expect("consented replace succeeds");
+        assert_eq!(
+            std::fs::read(srv_b.root.join("dst/hello.txt")).unwrap(),
+            b"hello world"
+        );
+        assert!(stage_leftovers(&srv_b.root.join("dst")).is_empty());
+        Box::new(t_a).close().await.unwrap();
+        Box::new(t_b).close().await.unwrap();
+    }
+
+    /// M2a: remote→remote cancel at a chunk boundary — the DESTINATION
+    /// wrapper cancels the token after the first staged chunk; the copy
+    /// stops, the stage tree is removed on B, no partial file is placed,
+    /// and the source is untouched.
+    #[tokio::test]
+    async fn remote_to_remote_cancel_leaves_no_stage_or_destination() {
+        let srv_a = FakeServer::start(FakeConfig::tailscale(temp_root("r2r-x-a"))).await;
+        let srv_b = FakeServer::start(FakeConfig::tailscale(temp_root("r2r-x-b"))).await;
+        let payload = vec![3u8; CHUNK * 8];
+        std::fs::write(srv_a.root.join("big.bin"), &payload).unwrap();
+        std::fs::create_dir_all(srv_b.root.join("dst")).unwrap();
+        let t_a = srv_a.connect(&temp_root("trustR2RX1")).await;
+        let t_b = srv_b.connect(&temp_root("trustR2RX2")).await;
+        let cancel = CancellationToken::new();
+        let dst_wrapper = CancelAfterBytes {
+            inner: &t_b,
+            cancel: cancel.clone(),
+            threshold: CHUNK as u64, // cancel once the first chunk is staged
+            written: Arc::new(AtomicU64::new(0)),
+        };
+        let (emit, _p) = collector();
+        let e = transfer::run_copy(
+            &r2r_req("/", "/dst", &["big.bin"], false),
+            &Side::Remote {
+                transport: &t_a,
+                windows: false,
+            },
+            &Side::Remote {
+                transport: &dst_wrapper,
+                windows: false,
+            },
+            cancel,
+            emit,
+        )
+        .await
+        .expect_err("cancelled copy errors");
+        assert!(transfer::is_cancelled(&e), "expected cancelled, got {e:?}");
+        assert!(stage_leftovers(&srv_b.root.join("dst")).is_empty());
+        assert!(
+            !srv_b.root.join("dst/big.bin").exists(),
+            "no partial destination file"
+        );
+        assert_eq!(std::fs::read(srv_a.root.join("big.bin")).unwrap(), payload);
+        Box::new(t_a).close().await.unwrap();
+        Box::new(t_b).close().await.unwrap();
+    }
+
+    /// M2a: one-side AUTH FAILURE — the source session opens fine but the
+    /// destination rejects every credential (`reject_all_auth`, immune to
+    /// ambient developer keys/agent identities). No session ever exists on
+    /// B, so nothing is staged and no partial destination can appear; the
+    /// source session stays healthy and closes cleanly (the commands layer
+    /// closes it on the failed dst open — tripwire below).
+    #[tokio::test]
+    async fn remote_to_remote_dst_auth_failure_leaves_nothing() {
+        let srv_a = FakeServer::start(FakeConfig::tailscale(temp_root("r2r-au-a"))).await;
+        let mut cfg_b = FakeConfig::tailscale(temp_root("r2r-au-b"));
+        cfg_b.reject_all_auth = true;
+        let srv_b = FakeServer::start(cfg_b).await;
+        std::fs::write(srv_a.root.join("a.txt"), b"payload").unwrap();
+        std::fs::create_dir_all(srv_b.root.join("dst")).unwrap();
+
+        let t_a = srv_a.connect(&temp_root("trustR2RAU1")).await;
+        let err = srv_b
+            .try_connect(&temp_root("trustR2RAU2"), "fakeuser", &[], Vec::new())
+            .await
+            .expect_err("destination auth must fail");
+        assert_eq!(err.kind, ErrorKind::Auth, "typed auth refusal: {err:?}");
+        // Destination untouched: no stage, no partial file, nothing at all.
+        let staged: Vec<String> = std::fs::read_dir(srv_b.root.join("dst"))
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().to_string())
+            .collect();
+        assert!(staged.is_empty(), "destination must be untouched: {staged:?}");
+        // The source session is still usable and closes cleanly.
+        assert!(t_a.lstat("/a.txt").await.unwrap().is_some());
+        assert_eq!(std::fs::read(srv_a.root.join("a.txt")).unwrap(), b"payload");
+        Box::new(t_a).close().await.unwrap();
+    }
+
+    /// Tripwire for the M2a execute_copy fix: when the DESTINATION side
+    /// fails to open (auth etc.), the already-open SOURCE session must be
+    /// closed before the error propagates — no leaked connections. Reverting
+    /// the fix drops one (or both) of the `close_side(src_side)` calls.
+    #[test]
+    fn dst_open_failure_closes_source_tripwire() {
+        let src = include_str!("commands.rs");
+        let closes = src.matches("close_side(src_side).await").count();
+        assert_eq!(
+            closes, 2,
+            "src session must close on dst-open failure AND on the normal path"
+        );
+    }
+
+    /// M2a: destination-side write failure MID-COPY (hostile dst server) —
+    /// the primary error surfaces, the stage tree is removed on B, and no
+    /// partial destination file is placed. The "stage removed, no partial
+    /// destination" cleanup invariant for a dst side that fails AFTER
+    /// staging began (twin of the auth-failure test above, which fails
+    /// BEFORE staging can begin).
+    #[tokio::test]
+    async fn remote_to_remote_dst_write_failure_cleans_stage() {
+        let srv_a = FakeServer::start(FakeConfig::tailscale(temp_root("r2r-w-a"))).await;
+        let mut cfg_b = FakeConfig::tailscale(temp_root("r2r-w-b"));
+        cfg_b.fail_writes_after = Some((CHUNK / 2) as u64);
+        let srv_b = FakeServer::start(cfg_b).await;
+        std::fs::write(srv_a.root.join("big.bin"), vec![9u8; CHUNK * 4]).unwrap();
+        std::fs::create_dir_all(srv_b.root.join("dst")).unwrap();
+        let t_a = srv_a.connect(&temp_root("trustR2RW1")).await;
+        let t_b = srv_b.connect(&temp_root("trustR2RW2")).await;
+        let (emit, _p) = collector();
+        let e = transfer::run_copy(
+            &r2r_req("/", "/dst", &["big.bin"], false),
+            &Side::Remote {
+                transport: &t_a,
+                windows: false,
+            },
+            &Side::Remote {
+                transport: &t_b,
+                windows: false,
+            },
+            CancellationToken::new(),
+            emit,
+        )
+        .await
+        .expect_err("failing destination writes error the copy");
+        assert_eq!(
+            e.kind,
+            ErrorKind::Denied,
+            "primary write error, never a cleanup error: {e:?}"
+        );
+        assert!(stage_leftovers(&srv_b.root.join("dst")).is_empty());
+        assert!(!srv_b.root.join("dst/big.bin").exists());
+        Box::new(t_a).close().await.unwrap();
+        Box::new(t_b).close().await.unwrap();
     }
 }
