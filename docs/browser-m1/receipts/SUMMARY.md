@@ -1,5 +1,56 @@
 # M1 gate receipts
 
+## Windows compile fix (continuation 7) — CURRENT
+
+CI windows-latest `cargo test` failed to COMPILE at master 07969c1 (run
+44859283804, job 136709470314): 27 errors — Unix-only APIs without platform
+gates in `fake.rs` (test fixture), `session.rs` (ssh-agent `connect_env`,
+PRODUCTION), and `trust.rs` (test helper). Fixed forward on master with ZERO
+Unix behavior change and no test deleted or weakened. Full ported-vs-gated
+inventory and Windows semantic differences: m1-handoff.md § "Windows compile
+fix (continuation 7)". Highlights:
+
+- Production: Windows ssh-agent auth now uses russh's
+  `AgentClient::connect_named_pipe(\\.\pipe\openssh-ssh-agent)` (the
+  Windows-OpenSSH agent service pipe) — real agent auth on Windows, not a
+  skip. Absent service → honest fall-through to the EXISTING typed
+  no-credential error (text unchanged; no test asserted on it).
+- Fixture: positional IO, mtime (FileTimes), mode synthesis with S_IF* type
+  bits, symlink op, and the READLINK "exists, not a link" detection ported;
+  permission application stays Unix-only (documented difference).
+- Gated: only tests that drive `run_copy` through `Side::Local` — the local
+  engine is Unix-only BY M1 DESIGN (local_side.rs is whole-module
+  `#[cfg(unix)]`, callers fail closed), so those tests cannot exercise real
+  behavior on Windows. Each gate carries a one-line reason.
+- Added: 4 platform-neutral tests in transfer/remote_side.rs (plan-level
+  B6-R probe semantics, POSIX never-probes, RemoteSink exclusive
+  staging/placement/cleanup, build_plan→stream_plan roundtrip) so Windows CI
+  KEEPS coverage of copy engine, probe semantics, and staging.
+
+| Gate | Command (cwd) | Exit | Result | Raw log |
+|---|---|---|---|---|
+| Rust tests (host) | `CARGO_INCREMENTAL=0 cargo test` (src-tauri) | 0 | **228 passed, 0 failed** (224 existing — all green, unchanged — plus 4 new) | cargo-test.txt |
+| Rust lint (host) | `CARGO_INCREMENTAL=0 cargo clippy --all-targets -- -D warnings` (src-tauri) | 0 | 0 warnings | cargo-clippy.txt |
+| Rust format | `cargo fmt -- --check` (src-tauri) | 0 | clean | cargo-fmt.txt |
+| Windows type-check (local, GNU) | `CARGO_INCREMENTAL=0 cargo check --target x86_64-pc-windows-gnu --lib --tests` (src-tauri) | 0 | **PASS** — lib AND lib-test type-check for Windows incl. every new cfg(windows)/cfg(not(unix)) branch (rustup windows-gnu target + brew mingw-w64 14.0.0; ring builds via mingw) | win-gnu-crosscheck.txt |
+| Windows type-check (local, MSVC) | `CARGO_INCREMENTAL=0 cargo check --target x86_64-pc-windows-msvc --lib --tests` (src-tauri) | 101 | **NOT provable on this Mac** — ring's C build fails first (no MSVC SDK: `assert.h` not found); our crate never reached. Same wall as prior rounds; recorded honestly, NOT a pass. | win-crosscheck-attempt.txt |
+| Windows compile+test (CI, msvc) | GitHub Actions windows-latest "Rust tests" | pending | Authoritative msvc gate — runs after Frikkie pushes (no push from this round per brief) | — |
+
+Known W6 flake note: one intermediate host run hit
+`tailscale::tests::acknowledge_returns_recorded_path_without_draining` once
+(pre-existing master flake, tailscale.rs untouched here); passed on immediate
+rerun and in the receipted full run (details in cargo-test.txt).
+
+TS/frontend files were NOT touched → tsc/vitest/playwright/npm-build skipped
+per brief (gate 3 condition).
+
+Remaining Windows-build warnings (13, GNU check) are pre-existing dead_code
+in UNTOUCHED files (listing.rs `local_home`; place.rs `place_action` family;
+tailscale.rs `url_encode`/`parse_content_length`/`validate_received_length` +
+test-only tempfile helpers) — items consumed only by cfg(unix) code paths.
+Warnings, not errors; the CI windows job runs `cargo test` without
+`-D warnings` (clippy is ubuntu-only per ci.yml).
+
 ## Fix round (continuation 4)
 
 All gates run fresh against HEAD `6562689` (branch `feature/browser-m1`,
@@ -59,7 +110,7 @@ tree and the receipts in this directory refreshed:
 | `npm run build` | 0 | dist built |
 | `cargo audit --no-fetch --stale` | 1 (advisories present) | **RUSTSEC-2023-0071 GONE**; only the pre-existing master advisory set remains |
 
-## B6-R (continuation 6) — CURRENT
+## B6-R (continuation 6)
 
 The `fix(browser): B6-R` commit corrects the Windows junction probe to the
 REAL Win32-OpenSSH READLINK semantics (R3 blocker: the first probe treated

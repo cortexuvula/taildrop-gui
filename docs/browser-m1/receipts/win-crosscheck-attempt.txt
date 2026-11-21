@@ -1,0 +1,17 @@
+# Receipt: Windows MSVC cross-check ATTEMPT — FAILED at dependency ring (honest record, not a pass)
+# date: 2026-11-21T04:05:21Z  host: macOS Darwin 25.6.0 arm64, rustc rustc 1.99.0 (b940084d7 2026-09-28)
+# cmd: CARGO_INCREMENTAL=0 cargo check --target x86_64-pc-windows-msvc --lib --tests
+# result: exit 101 — 'failed to run custom build command for ring v0.17.14'
+#   ring's C build (cc-rs) targets x86_64-pc-windows-msvc with clang but this Mac
+#   has no MSVC SDK headers: fatal error: 'assert.h' file not found.
+#   taildrop-gui itself was NEVER reached. Same wall as prior rounds (SUMMARY.md).
+#   => Windows gate falls back to: (a) x86_64-pc-windows-gnu cross-check below,
+#      (b) GitHub Actions windows-latest 'Rust tests' step.
+
+   Compiling ring v0.17.14
+warning: ring@0.17.14: /Users/cortexuvula/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/ring-0.17.14/include/ring-core/check.h:27:11: fatal error: 'assert.h' file not found
+error: failed to run custom build command for `ring v0.17.14`
+  cargo:warning=/Users/cortexuvula/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/ring-0.17.14/include/ring-core/check.h:27:11: fatal error: 'assert.h' file not found
+warning: build failed, waiting for other jobs to finish...
+
+# cargo exit code (rerun): 101

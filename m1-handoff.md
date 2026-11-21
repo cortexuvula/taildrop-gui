@@ -240,6 +240,91 @@ nested ancestor-pointing junction — no loop),
 `windows_pull_tolerates_dir_vanished_before_probe`,
 `posix_pull_never_probes_dir_readlink`.
 
+## Windows compile fix (continuation 7) — ported vs gated, semantic differences
+
+CI `cargo test` on windows-latest failed to COMPILE at 07969c1 (run
+44859283804, job 136709470314): 27 errors, all Unix-only APIs in the M1
+browser modules used without platform gates. Fixed forward on master with
+ZERO Unix behavior change — the host suite keeps all 224 existing tests
+green and gains 4 platform-neutral ones (228 total).
+
+Production — `session.rs` ssh-agent auth is now platform-split:
+
+- Unix: unchanged, `AgentClient::connect_env()` (SSH_AUTH_SOCK).
+- Windows: russh DOES expose a Windows agent API — `AgentClient::
+  connect_named_pipe(r"\\.\pipe\openssh-ssh-agent")`, the Windows-OpenSSH
+  ssh-agent service pipe (russh 0.65.2, keys/agent/client.rs, cfg(windows),
+  no feature gate). We USE it, so Windows gets real agent auth instead of a
+  skip. The service is manual-start: when it is not running the pipe is
+  absent, `agent_connect()` returns None, and auth falls through to the
+  EXISTING typed "no working credential … tried tailnet identity, key files
+  … and ssh-agent" error — unchanged text, still honest (an absent agent is
+  never reported as an agent success). Key-file and tailnet-identity auth
+  paths are untouched on every platform.
+- Any other platform: `agent_connect()` returns None (documented skip).
+
+Test fixture — `fake.rs` server side (compiled by `cargo test` everywhere):
+
+- PORTED (behavior preserved): positional IO — Unix keeps
+  `FileExt::read_at`/`write_all_at`; Windows uses seek+read/write on the
+  fixture's fresh per-call handles (no shared offset exists, so the
+  semantics are identical). `attrs_of` mode — Unix keeps the real st_mode;
+  Windows synthesizes the OpenSSH-style mode (S_IFDIR/S_IFREG/S_IFLNK type
+  bits + readonly→0o444 else 0o644, dirs 0o755), the same synthesis
+  Win32-OpenSSH performs from ACLs — WITHOUT the type bits the client's
+  `FileAttributes::file_type()` would mark every node unknown. Server-side
+  SYMLINK op — Windows uses `symlink_file`/`symlink_dir`; where Developer
+  Mode / SeCreateSymbolicLinkPrivilege is absent, creation fails and the
+  copy engine's documented "destination can't hold links" skip+count path
+  handles it (no test depends on link CREATION on a Windows host). READLINK
+  handler — the "exists, not a link" branch now keys on existence
+  (`symlink_metadata().is_ok()`) instead of `ErrorKind::InvalidInput`,
+  because Windows reports ERROR_NOT_A_REPARSE_POINT (4390) as
+  `Uncategorized`; per-flavor answers (FAILURE vs BAD_MESSAGE vs junction
+  simulation) are unchanged.
+- Windows SEMANTIC DIFFERENCES (documented; no test asserts on them, and
+  the copy engine treats both as best-effort like a server that ignores
+  SETSTAT): (1) the fixture ignores SETSTAT/open PERMISSION bits on Windows
+  — there is no mode-bit equivalent, and setting the readonly flag would
+  break staging cleanup because Windows refuses to delete read-only files;
+  (2) DIRECTORY mtime application is best-effort via std `FileTimes` on a
+  read-only dir handle (FILE mtimes are applied reliably).
+- cfg(unix)-GATED (each site carries a one-line reason): every `run_copy`
+  test touching `Side::Local` — the local engine is Unix-only BY M1 DESIGN
+  (all of local_side.rs is `#[cfg(unix)]`; run_copy fails closed elsewhere
+  via `local_unsupported()`), so those tests cannot exercise real behavior
+  on Windows — plus the Unix-symlink fixture builder `fidelity_source` and
+  the helpers used only by gated tests. NO test was deleted and NO
+  assertion was weakened; the two previously-gated symlink tests
+  (`windows_pull_skips_junctions_never_follows`,
+  `pull_copies_remote_symlink_as_link`) were already `#[cfg(unix)]`.
+
+Windows coverage KEPT for platform-neutral paths — 4 new tests in
+`transfer/remote_side.rs` (they run on ALL platforms, Windows included;
+every filesystem effect lands inside the fake server's temp root):
+
+- `windows_plan_probe_descends_plain_dirs_skips_reparse_and_vanished` —
+  the B6-R probe table at PLAN level: plain dirs (FAILURE) descend,
+  junctions (BAD_MESSAGE) and vanished dirs (NO_SUCH_FILE) skip+count.
+- `posix_plan_never_probes_dir_readlink` — POSIX never-probes invariant
+  via the `dir_readlinks` counter.
+- `remote_sink_stages_exclusively_places_and_cleans` — STAGING: exclusive
+  stage mkdir, planted-lookalike refusal (Exists), hardlink/rename tier
+  placement, mtime through placement, full cleanup.
+- `engine_streams_plan_into_remote_sink_roundtrip` — COPY ENGINE:
+  build_plan → stream_plan (chunking + exact-size enforcement) → place,
+  multi-chunk byte fidelity.
+
+`trust.rs`: `set_mtime_for_test` is now portable std `FileTimes`
+(atime+mtime, same semantics as the old libc `utimensat` version), so the
+W2 stale-tmp-sweep test runs on every platform.
+
+Local Windows verification limit (unchanged from prior rounds): `cargo
+check --target x86_64-pc-windows-msvc` cannot run on this Mac — ring's C
+build fails first (no MSVC SDK; receipts/win-crosscheck-attempt.txt). The
+Windows COMPILE+TEST gate is GitHub Actions windows-latest; see
+receipts/SUMMARY.md for the windows-gnu cross-check status.
+
 ## What M2/M3 inherit
 
 - `browser/fake.rs`: configurable hostile-server harness (banners,

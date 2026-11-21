@@ -1,5 +1,5 @@
-# cargo fmt --check — B6-R (Windows read_link probe fix) — worktree at 2dd151c + this change
-$ cargo fmt --check
-(no output — clean)
+# Receipt: cargo fmt --check
+# date: 2026-11-21T04:04:46Z
+# cmd: cargo fmt -- --check
 
-EXIT=0
+# exit: 0 (no output above = clean)
