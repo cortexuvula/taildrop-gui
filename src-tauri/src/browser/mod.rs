@@ -573,3 +573,91 @@ pub fn valid_host(host: &str) -> bool {
 }
 
 use std::path::{Path, PathBuf};
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn config_tmp(tag: &str) -> PathBuf {
+        use rand::Rng as _;
+        let n: u64 = rand::rng().random();
+        let dir = std::env::temp_dir().join(format!(
+            "taildrop-m2a-cfg-{tag}-{}-{n:016x}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir.join("browser.json")
+    }
+
+    /// M2a verification (brief item 8): the per-host account AND the
+    /// last-remote selection persist across app restarts — modeled as a
+    /// FRESH ConfigStore instance reading the same file (the store holds no
+    /// in-memory cache, so a new instance == a restart).
+    #[test]
+    fn config_persists_across_instances() {
+        let path = config_tmp("persist");
+        {
+            let store = ConfigStore::new(path.clone());
+            store.set_user("studio", Some("corte".into())).unwrap();
+            store.set_user("room-6", Some("admin".into())).unwrap();
+            store.set_last("studio").unwrap();
+        }
+        // "Restart": a brand-new store instance must see everything.
+        let reopened = ConfigStore::new(path.clone());
+        let cfg = reopened.load();
+        assert_eq!(cfg.last, "studio", "last-remote survives the restart");
+        assert_eq!(
+            reopened.user_for("studio").as_deref(),
+            Some("corte"),
+            "per-host account survives the restart"
+        );
+        assert_eq!(reopened.user_for("room-6").as_deref(), Some("admin"));
+        assert_eq!(cfg.hosts.len(), 2);
+        // A later last wins (reopen flow re-points at the newest machine).
+        reopened.set_last("room-6").unwrap();
+        assert_eq!(ConfigStore::new(path.clone()).load().last, "room-6");
+        // Clearing an account persists too.
+        reopened.set_user("studio", None).unwrap();
+        assert_eq!(ConfigStore::new(path.clone()).user_for("studio"), None);
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    /// A corrupt config degrades to defaults rather than failing (load_config
+    /// behavior) — a broken browser.json must never brick browsing.
+    #[test]
+    fn corrupt_config_falls_back_to_defaults() {
+        let path = config_tmp("corrupt");
+        std::fs::write(&path, b"{not json").unwrap();
+        let store = ConfigStore::new(path.clone());
+        let cfg = store.load();
+        assert_eq!(cfg.last, "");
+        assert!(cfg.hosts.is_empty());
+        // Writing over the corrupt file recovers it.
+        store.set_last("studio").unwrap();
+        assert_eq!(ConfigStore::new(path.clone()).load().last, "studio");
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    /// A hostile/corrupt config value can never become an ssh account
+    /// string: user_for filters through USER_RE even though the raw JSON
+    /// holds the value.
+    #[test]
+    fn user_for_filters_invalid_accounts() {
+        let path = config_tmp("filter");
+        std::fs::write(
+            &path,
+            br#"{"hosts":{"good":{"user":"corte"},"bad":{"user":"../evil name"}},"last":""}"#,
+        )
+        .unwrap();
+        let store = ConfigStore::new(path.clone());
+        assert_eq!(store.user_for("good").as_deref(), Some("corte"));
+        assert_eq!(
+            store.user_for("bad"),
+            None,
+            "an invalid saved account is dropped, never used"
+        );
+        // set_user refuses the same shapes on the way in.
+        assert!(store.set_user("x", Some("bad name".into())).is_err());
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+}
