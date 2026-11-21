@@ -121,6 +121,13 @@ pub struct FakeConfig {
     /// the client-visible wire bytes are identical to production. The name
     /// does not resolve (no such file), exactly like a lossy guess.
     pub non_utf8_names: bool,
+    /// Hostility (C1): every READDIR gains a synthetic entry named
+    /// "bad\nname" — a control-character name. Win32 filesystems can never
+    /// hold one (0x01-0x1F forbidden in filenames), so the real-file
+    /// control-char test is Unix-only; this knob injects the name directly
+    /// into the wire response (same pattern as `non_utf8_names`), keeping
+    /// the listing skip-and-count rule testable on EVERY platform.
+    pub control_char_names: bool,
     /// Hostility (B6/B6-R): with a Windows banner, READLINK on any directory
     /// whose name contains "junction" answers BAD_MESSAGE — exactly what
     /// Win32-OpenSSH returns for IO_REPARSE_TAG_MOUNT_POINT (EINVAL →
@@ -161,6 +168,7 @@ impl FakeConfig {
             fail_writes_after: None,
             host_key_pem: HOST_KEY_PEM,
             non_utf8_names: false,
+            control_char_names: false,
             simulate_junctions: false,
             dir_readlinks: Arc::new(AtomicU64::new(0)),
             vanish_readlink_for: None,
@@ -182,6 +190,7 @@ impl FakeConfig {
             fail_writes_after: None,
             host_key_pem: HOST_KEY_PEM,
             non_utf8_names: false,
+            control_char_names: false,
             simulate_junctions: false,
             dir_readlinks: Arc::new(AtomicU64::new(0)),
             vanish_readlink_for: None,
@@ -832,6 +841,25 @@ impl russh_sftp::server::Handler for SftpHandler {
                 "caf\u{FFFD}".to_string(),
                 FileAttributes {
                     size: Some(17),
+                    uid: None,
+                    user: None,
+                    gid: None,
+                    group: None,
+                    permissions: Some(0o100644),
+                    atime: Some(1_700_000_000),
+                    mtime: Some(1_700_000_000),
+                },
+            ));
+        }
+        // C1 fixture: a control-character name — Win32 hosts cannot create
+        // one on disk (0x01-0x1F forbidden), so it is injected synthetically
+        // to keep the listing skip-and-count rule covered on all platforms.
+        // Regular file, 1 byte; resolves to nothing.
+        if self.cfg.control_char_names {
+            files.push(File::new(
+                "bad\nname".to_string(),
+                FileAttributes {
+                    size: Some(1),
                     uid: None,
                     user: None,
                     gid: None,
@@ -1587,6 +1615,11 @@ mod tests {
         Box::new(t).close().await.unwrap();
     }
 
+    // Unix-only: the fixture SETUP writes a real "bad\nname" file — Win32
+    // forbids 0x01-0x1F in filenames (Os code 123 InvalidFilename), so the
+    // setup itself panics on Windows hosts. The knob-based twin below keeps
+    // the rule covered there.
+    #[cfg(unix)]
     #[tokio::test]
     async fn listing_skips_control_char_name_exactly_once() {
         let srv = FakeServer::start(FakeConfig::tailscale(temp_root("ls1"))).await;
@@ -1597,6 +1630,30 @@ mod tests {
         assert_eq!(l.skipped, 1, "control-char name counted exactly once");
         let names: Vec<&str> = l.entries.iter().map(|e| e.name.as_str()).collect();
         assert_eq!(names, vec!["good.txt"]);
+        assert_eq!(l.path, "/");
+        Box::new(t).close().await.unwrap();
+    }
+
+    /// C1: the same skip-and-count rule as the Unix-only real-file test
+    /// above, but the control-char name is injected synthetically into
+    /// READDIR (FakeConfig knob) instead of being created on disk — Win32
+    /// filesystems cannot hold 0x01-0x1F in filenames, so this twin is what
+    /// keeps the rule tested on Windows hosts. Runs on ALL platforms.
+    #[tokio::test]
+    async fn listing_skips_synthetic_control_char_name_exactly_once() {
+        let mut cfg = FakeConfig::tailscale(temp_root("lscc"));
+        cfg.control_char_names = true;
+        let srv = FakeServer::start(cfg).await;
+        std::fs::write(srv.root.join("good.txt"), b"g").unwrap();
+        let t = srv.connect(&temp_root("trustLCC")).await;
+        let l = listing::list_remote(&t, "/", "", "fakeuser").await.unwrap();
+        assert_eq!(l.skipped, 1, "control-char name counted exactly once");
+        let names: Vec<&str> = l.entries.iter().map(|e| e.name.as_str()).collect();
+        assert_eq!(names, vec!["good.txt"]);
+        assert!(
+            !names.iter().any(|n| n.chars().any(|c| c.is_control())),
+            "control-char name never returned or guessed at"
+        );
         assert_eq!(l.path, "/");
         Box::new(t).close().await.unwrap();
     }
