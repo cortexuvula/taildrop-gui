@@ -1,0 +1,5 @@
+# gate: cargo clippy --target x86_64-pc-windows-gnu --lib --tests -- -D warnings
+# commit: 3b8787baa507c76246d61b4d16e78948025ca7d3
+    Checking taildrop-gui v0.16.0 (/Users/cortexuvula/Development/taildrop-gui/src-tauri)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 4.61s
+exit: 0

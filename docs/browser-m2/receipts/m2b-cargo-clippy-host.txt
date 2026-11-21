@@ -1,0 +1,5 @@
+# gate: cargo clippy --all-targets -- -D warnings (host aarch64-apple-darwin)
+# commit: 3b8787baa507c76246d61b4d16e78948025ca7d3
+    Checking taildrop-gui v0.16.0 (/Users/cortexuvula/Development/taildrop-gui/src-tauri)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 6.62s
+exit: 0
