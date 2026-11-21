@@ -18,7 +18,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use async_trait::async_trait;
-use russh::keys::agent::client::AgentClient;
+use russh::keys::agent::client::{AgentClient, AgentStream};
 use russh::keys::agent::AgentIdentity;
 use russh::keys::{self, PrivateKeyWithHashAlg, PublicKeyOrCertificate};
 use russh::{client, Disconnect};
@@ -289,15 +289,52 @@ impl client::Handler for ClientHandler {
 // `AgentAuthError`), so agent identities are passed to
 // `authenticate_publickey_with` without a custom adapter.
 
+/// Boxed agent client — russh's `dynamic()` erases the platform-specific
+/// stream type so the auth flow below is shared across platforms.
+type DynAgent = AgentClient<Box<dyn AgentStream + Send + Unpin>>;
+
+/// Connect to the local ssh-agent. `None` when no agent is reachable —
+/// auth then falls through to the typed no-credential error; an absent
+/// agent is never reported as an agent success.
+///
+/// Unix: the `SSH_AUTH_SOCK` socket (russh `connect_env`).
+#[cfg(unix)]
+async fn agent_connect() -> Option<DynAgent> {
+    match AgentClient::connect_env().await {
+        Ok(a) => Some(a.dynamic()),
+        Err(_) => None, // no SSH_AUTH_SOCK / no agent
+    }
+}
+
+/// Windows: the Windows-OpenSSH ssh-agent service listens on this named
+/// pipe (russh exposes `connect_named_pipe` for exactly this). The service
+/// is manual-start; when it is not running the pipe is absent and agent
+/// auth is honestly skipped — key-file and tailnet-identity auth are
+/// unaffected.
+#[cfg(windows)]
+async fn agent_connect() -> Option<DynAgent> {
+    match AgentClient::connect_named_pipe(r"\\.\pipe\openssh-ssh-agent").await {
+        Ok(a) => Some(a.dynamic()),
+        Err(_) => None, // ssh-agent service not running / pipe absent
+    }
+}
+
+/// Any other platform: no ssh-agent transport is known — skip agent auth
+/// rather than pretending it succeeded.
+#[cfg(not(any(unix, windows)))]
+async fn agent_connect() -> Option<DynAgent> {
+    None
+}
+
 /// Try every ssh-agent identity (certificates skipped in M1). Ok(None) when
 /// no agent / no identities; Ok(Some(method)) on success.
 async fn agent_auth(
     ssh: &mut client::Handle<ClientHandler>,
     user: &str,
 ) -> Result<Option<String>, russh::Error> {
-    let mut agent = match AgentClient::connect_env().await {
-        Ok(a) => a.dynamic(),
-        Err(_) => return Ok(None), // no SSH_AUTH_SOCK / no agent
+    let mut agent = match agent_connect().await {
+        Some(a) => a,
+        None => return Ok(None), // no agent reachable on this platform
     };
     // OpenSSH agents want session-bind before exposing destination-
     // constrained identities; best effort (plain agents work without it).
