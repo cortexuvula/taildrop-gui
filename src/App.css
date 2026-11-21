@@ -2471,6 +2471,16 @@ body {
   border: 1px solid var(--border);
   border-radius: var(--radius);
   box-shadow: 0 8px 24px rgba(0, 0, 0, 0.45);
+  /* Bounded + scrollable: an uncapped menu grew past the pane and
+     .file-pane { overflow: hidden } clipped everything below the pane edge,
+     so later peers were unreachable (shipped-build report). The menu now
+     scrolls on its own; even when the pane clips part of the box, every row
+     is reachable by scrolling. */
+  max-height: min(320px, 50vh);
+  overflow-y: auto;
+  /* Wheel/trackpad scrolling stays inside the menu instead of chaining to
+     the pane listing behind it. */
+  overscroll-behavior: contain;
 }
 
 .machine-item {

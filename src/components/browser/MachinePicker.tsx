@@ -29,7 +29,15 @@ export function MachinePicker({
   const [open, setOpen] = useState(false);
   const [cursor, setCursor] = useState(0);
   const rootRef = useRef<HTMLDivElement>(null);
+  const menuRef = useRef<HTMLUListElement>(null);
   const listId = useId();
+
+  // The menu is height-capped and scrollable: keep the keyboard cursor row
+  // visible as j/k/arrows move past the visible window.
+  useEffect(() => {
+    if (!open) return;
+    menuRef.current?.children[cursor]?.scrollIntoView({ block: "nearest" });
+  }, [cursor, open]);
 
   const current = machines.find((m) => m.host === target);
   const savedUser = target === LOCAL_TARGET ? null : userFor(target);
@@ -116,7 +124,7 @@ export function MachinePicker({
         </span>
       </button>
       {open && (
-        <ul className="machine-menu" id={listId} role="listbox" aria-label="Choose machine">
+        <ul className="machine-menu" id={listId} role="listbox" aria-label="Choose machine" ref={menuRef}>
           {machines.map((m, i) => {
             const user = m.host === LOCAL_TARGET ? null : userFor(m.host);
             return (

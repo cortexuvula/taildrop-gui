@@ -244,6 +244,19 @@ const browserPeers = [
   },
 ];
 
+// ?manyPeers=N — append N synthetic browsable linux peers so the machine
+// menu outgrows its cap (scroll regression test). These peers have no mock
+// FS, so picking one just yields the usual listing error pane.
+const manyPeers = Number(params.get("manyPeers") ?? 0);
+for (let i = 0; i < manyPeers; i++) {
+  const name = `peer-${String(i).padStart(2, "0")}`;
+  browserPeers.push({
+    host: name, name, dns: `${name}.tail.ps.net.`,
+    ip: `100.64.0.${i + 1}`, os: "linux", online: true, user: "",
+    tailscaleSsh: true, browsable: true, isSelf: false,
+  });
+}
+
 interface MockJob {
   id: number;
   state: "queued" | "running" | "done" | "failed" | "cancelled";

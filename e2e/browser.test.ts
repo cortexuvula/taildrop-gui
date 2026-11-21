@@ -314,6 +314,52 @@ test.describe('browser peer behaviors', () => {
     await expect(menu.getByText('studio-mac')).toBeVisible();
   });
 
+  test('machine menu is capped + scrolls by wheel; keyboard cursor stays in view; last peer selectable', async ({ page }) => {
+    // Regression: the uncapped menu grew past the pane and .file-pane's
+    // overflow:hidden clipped it, so peers past the pane edge were
+    // unreachable on a large tailnet (shipped-build report).
+    await page.setViewportSize({ width: 1180, height: 740 });
+    await openFilesView(page, 'manyPeers=30');
+    await pane(page, 'left').locator('.machine-picker-button').click();
+    const menu = pane(page, 'left').locator('.machine-menu');
+    await expect(menu).toBeVisible();
+
+    const metrics = await menu.evaluate((el) => ({
+      scrollHeight: el.scrollHeight,
+      clientHeight: el.clientHeight,
+      overflowY: getComputedStyle(el).overflowY,
+    }));
+    expect(metrics.scrollHeight).toBeGreaterThan(metrics.clientHeight);
+    expect(['auto', 'scroll']).toContain(metrics.overflowY);
+
+    // Wheel over the menu scrolls the MENU (not the listing behind it).
+    const before = await menu.evaluate((el) => el.scrollTop);
+    await menu.hover();
+    await page.mouse.wheel(0, 400);
+    await expect
+      .poll(() => menu.evaluate((el) => el.scrollTop))
+      .toBeGreaterThan(before);
+
+    // Every row is reachable: scroll to the bottom and select the last peer.
+    await menu.evaluate((el) => {
+      el.scrollTop = el.scrollHeight;
+    });
+    const last = menu.getByText('peer-29', { exact: true });
+    await expect(last).toBeVisible();
+    await last.click();
+    await expect(pane(page, 'left').locator('.machine-label')).toHaveText('peer-29');
+
+    // Keyboard: moving the cursor scrolls it back into view.
+    await pane(page, 'left').locator('.machine-picker-button').click();
+    const menu2 = pane(page, 'left').locator('.machine-menu');
+    await expect(menu2).toBeVisible();
+    await menu2.evaluate((el) => {
+      el.scrollTop = 0;
+    });
+    for (let i = 0; i < 20; i++) await page.keyboard.press('ArrowDown');
+    await expect(menu2.locator('.machine-item.cursor')).toBeInViewport();
+  });
+
   test('auth failure shows the error pane with Change user + Retry', async ({ page }) => {
     await page.setViewportSize({ width: 1180, height: 740 });
     await openFilesView(page, 'browserFailAuth=1');
