@@ -1,4 +1,4 @@
-# npm run build — HEAD 2c33425742289655536fcc552cee4cd72d2ea80a
+# npm run build — fix round — HEAD 6562689576372926490ab084af3664d7e70b6b26
 $ npm run build
 
 > taildrop-gui@0.15.1 build
@@ -11,6 +11,6 @@ rendering chunks...
 computing gzip size...
 dist/index.html                   0.46 kB │ gzip:  0.29 kB
 dist/assets/index-BTssCk3b.css   35.25 kB │ gzip:  6.41 kB
-dist/assets/index-sba-6Qzs.js   300.05 kB │ gzip: 91.86 kB
-✓ built in 401ms
+dist/assets/index-B26kfhWL.js   300.28 kB │ gzip: 91.96 kB
+✓ built in 388ms
 EXIT=0

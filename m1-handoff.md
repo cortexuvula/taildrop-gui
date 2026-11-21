@@ -20,6 +20,13 @@ invariants (§7.4 v1 column — acceptance contract).
 | fdc11b8 | feat(browser): two-pane Files view — panes, queue, dialogs with scope-lock, keyboard router |
 | e6db4d9 | test(browser): vitest suites for paths, guards, hooks, dialog scope-lock |
 | 2c33425 | test(browser): playwright e2e — layout/keyboard/focus-trap/queue at both window sizes |
+| 6c0e6d3 | docs(browser): M1 gate receipts + handoff |
+| 136a14b | fix(browser): review batch 1 — B2 windows E0412, B4 sshHostKeys format, W1 file-mode mask, W2 pin tmp recovery |
+| adbbc6c | fix(browser): B3 — lossy-decoded (U+FFFD) remote names are guesses, never actionable |
+| 447dc29 | fix(browser): B5 remote→remote refusal + B6 Windows junction probe |
+| 35755e9 | fix(browser): B1 — Windows browser_open never routes paths through cmd.exe |
+| 5eea0ed | test(browser): W3 — end-to-end PULL tests through the real LocalSink |
+| 6562689 | test(browser): e2e — remote→remote copy refused in the UI with the M2 note (B5) |
 
 ## Gate receipts
 
@@ -36,7 +43,7 @@ pre-existing untouched), npm run build OK. All exits 0 at HEAD 2c33425.
 | `winnames.rs` | `windows_name_problem` port — MANDATORY client-side (M0: Windows OpenSSH accepted `CON` as a normal file) |
 | `guards.rs` | Pure decision cores: guard_key, guard_delete (root/home-ancestor), rel-path, number-field, copy preconditions (one-parent, into-itself, Windows case-insensitive clash), exists_message, new_name |
 | `transport.rs` | `SftpTransport`/`RemoteReader`/`RemoteWriter` seam (Send+Sync). Shell-out fallback stays documented-not-implemented (M0 verdict) |
-| `trust.rs` | Per-flavor pin stores (`pins.tailscale-ssh.json` / `pins.openssh.json` / `pins.openssh-windows.json`), accept-new → refuse-on-change, atomic 0600 writes in 0700 dir, `.tmp` recovery, corrupt-store fail-closed |
+| `trust.rs` | Per-flavor pin stores (`pins.tailscale-ssh.json` / `pins.openssh.json` / `pins.openssh-windows.json`), accept-new → refuse-on-change, atomic 0600 writes in 0700 dir, crash-leftover `.tmp` sweep (>1 h mtime, live writers untouched) + pid-nonce tmp names (W2, fix round), corrupt-store fail-closed |
 | `session.rs` | Banner sniff → flavor; raw VERSION extension capture on a dedicated channel (high-level session drops unknown names); auth = none (Tailscale) / key-file / ssh-agent — never password/kbi; auth-banner refusal recorded; tailscale `sshHostKeys` cross-check (fail closed); `RusshTransport` |
 | `probe.rs` | Exec-free home via `realpath(".")`; 600 s cache keyed host+account; fresh-probe path for delete guards |
 | `listing.rs` | Local scandir + remote readdir; control-char/non-UTF-8/duplicate names skipped+counted exactly once; bounded dir-symlink resolution; `path_within` (used by browser_open cache scope check) |
@@ -100,17 +107,92 @@ npm run build                    # tsc + vite production bundle
    work per decisions.md — not attempted.
 6. **Help overlay (`?` key) not ported** from the plugin (minor; keyboard
    surface documented in TwoPaneView comments).
-7. Non-UTF-8 remote names are unrepresentable over SFTP (M0 fact) — counted
-   as skipped server-side; local non-UTF-8 names skipped+counted by the walk.
+7. Non-UTF-8 remote names arrive LOSSILY decoded (russh-sftp
+   `String::from_utf8_lossy`) as U+FFFD replacements — the true bytes are
+   unrecoverable. CORRECTED in the fix round (B3, was previously described
+   wrongly as "skipped server-side"): `safe_remote_name` now rejects any
+   U+FFFD name at every remote boundary (listing, walker, merge_dirs,
+   remove_tree, remote delete) — skipped + counted exactly once, never
+   actionable. Local names keep their real bytes (OsStr) and are handled by
+   the existing walk rules. A server LITERALLY serving U+FFFD is
+   indistinguishable from the lossy case and treated the same (fail-closed).
 8. Playwright runs chromium only (existing config); WebKit/WKWebView
    container-query support assumed (Safari 16+) — worth a manual smoke on
    the packaged macOS app before release.
-9. `browser_open` on the local side shells to the platform opener; remote
-   opens download to the app cache dir 0600 (no exec bits, fresh copy per
-   open, `path_within` scope-checked). Tested via mock e2e, not on a real
-   peer (no-fleet rule).
+9. `browser_open` never routes a path through a shell interpreter (B1 fix
+   round): macOS `open` / Linux `xdg-open` via direct exec-family spawn
+   (argv element, not shell text); Windows via tauri-plugin-opener
+   (ShellExecuteExW, raw wide strings — the `open` crate's cmd launcher sits
+   behind its disabled `insecure` feature, verified in vendored source).
+   Remote opens download to the app cache dir 0600 (no exec bits, fresh copy
+   per open, `path_within` scope-checked). Tested via mock e2e + source
+   tripwire test; Windows RUNTIME behavior not executed on this Mac.
 10. Fake-server test keys are embedded PEMs in `fake.rs` — generated for
     this fixture, authenticate nothing beyond loopback tests.
+11. **W4 (added in the fix round): the local side fails closed on Windows
+    builds.** `local_side.rs` is `cfg(unix)` (handle-bound dir-fd engine);
+    every copy to/from "This computer" is refused on a Windows desktop with
+    an explicit Unsupported error (transfer/mod.rs, commands.rs rename/delete
+    included). Defensible M1 cut — failing closed is correct — but it means
+    the Windows desktop app ships browse+pull-from-remote-only in BOTH
+    directions' absence: a Windows user cannot copy at all until a Windows
+    local sink exists (M2/M3).
+12. **W5 (fix round): the delete guard is string-based — firmlink aliases
+    pass it.** On macOS, `/System/Volumes/Data/Users/<u>` is the same
+    directory as `/Users/<u>` and realpath keeps both spellings distinct, so
+    a confirmed PERMANENT remote delete of a home-equivalent path via its
+    firmlink alias passes the as-written and parent-resolved guards
+    (plugin-parity ceiling, §7.4 row-10 gap). Local deletes are Trash-only,
+    so exposure is remote-permanent-delete-only. Mitigation for M2: compare
+    dev/ino locally in addition to strings.
+13. **Windows compile + runtime are CI-gated, not locally provable.** B2
+    (E0412) is fixed statically; B1's ShellExecuteW path and the B6 junction
+    probe semantics (Windows OpenSSH READLINK error codes for PLAIN dirs vs
+    junctions) cannot be executed on this Mac. `.github/workflows/ci.yml`
+    windows-latest is the compile gate; an on-device Windows smoke is
+    required before release.
+14. **B7 PENDING OWNER DECISION — do not merge without it.** M1 adds
+    `rsa 0.10.0` via russh's `rsa` feature (needed for id_rsa key files);
+    RUSTSEC-2023-0071 (Marvin timing side channel) has no fixed upgrade.
+    Exploitability for local client signing is low, but the decision
+    (drop the feature vs. record acceptance in decisions.md) belongs to
+    Andre — deliberately NOT recorded here.
+
+## Fix round (continuation 4) — Codie review responses
+
+All six blockers + W1–W5 of codie-m1-review.md (run 2, binding 6c0e6d3)
+are addressed in commits 136a14b…6562689 (table above). Per-blocker:
+
+- **B1** (Windows open = cmd injection): opener plugin / ShellExecuteExW;
+  source tripwire + `&`-name tests (35755e9).
+- **B2** (Windows E0412): offending `const _: Option<ConnectParams>` line
+  deleted (136a14b); CI windows-latest is the compile gate (gap 13).
+- **B3** (lossy U+FFFD names actionable): `safe_remote_name` at every
+  remote boundary; fake-server injection knob; listing + pull + unit tests;
+  module comment and this handoff corrected (adbbc6c).
+- **B4** (sshHostKeys cross-check): (algorithm, blob) pair comparison;
+  fixture switched to real full-line format; match + 3 mismatch-class tests
+  incl. bare-blob and wrong-algorithm regressions (136a14b).
+- **B5** (remote→remote unrefused): preflight Unsupported (after the more
+  specific same-host-two-account Account error) + UI mirror + unit test +
+  e2e (447dc29, 6562689).
+- **B6** (Windows junctions followed): read_link probe before descending on
+  Windows sources — only clean NotFound descends; Ok/other-error skipped +
+  counted; fake junction knob + pull test (447dc29).
+- **W1**: file modes masked 0o777 at all three application points (136a14b).
+- **W2**: stale-tmp sweep + pid-nonce names + regression test; this
+  handoff's claim corrected (136a14b).
+- **W3**: four end-to-end pull tests (symlink-as-link, size-changed,
+  read-error-not-masked-by-close, remote-source cancel) + three new fake
+  hostility knobs (5eea0ed). Walker skip counts asserted in the B3/B6 pulls.
+- **W4/W5**: documented as gaps 11/12 above.
+- **B7**: untouched per instruction — Cargo features unchanged, decision
+  pending (gap 14).
+- Suggestions applied: mkdir_remote no-op block removed, place() double
+  lstat collapsed, dead-code seams already carried M2/M3 milestone tags.
+- **W6** (flaky pre-existing master test): out of scope, untouched. It
+  failed once across this round's ~10 full cargo-test runs and passed on
+  immediate rerun — consistent with Codie's master-flake finding.
 
 ## What M2/M3 inherit
 
