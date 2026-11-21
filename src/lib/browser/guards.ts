@@ -280,6 +280,22 @@ export function isWindowsPeer(peer: Pick<BrowserPeer, "os"> | null): boolean {
   return (peer?.os ?? "").toLowerCase() === "windows";
 }
 
+/**
+ * B5: remote→remote copies are M2 (report §7.5) — the Rust preflight
+ * refuses them (Unsupported) and the UI mirrors the refusal so the queue
+ * never even gets the job. Returns the user-facing reason, or null when the
+ * direction is allowed in M1.
+ */
+export function remoteToRemoteProblem(
+  srcTarget: string,
+  dstTarget: string,
+): string | null {
+  if (srcTarget !== "local" && dstTarget !== "local") {
+    return "Copying directly between two remote machines arrives with M2 — pull the files to This computer first, then push them";
+  }
+  return null;
+}
+
 /** Can the UI offer write actions (New folder / Rename / Delete / copy-INTO)
  *  for this pane target? Local always; Windows peers never in M1. */
 export function canWriteTo(

@@ -189,6 +189,16 @@ pub fn preflight(req: &CopyRequest, dst_windows: bool) -> Result<(), BrowserErro
             ),
         ));
     }
+    // B5: remote→remote is M2 (report §7.5) — refuse explicitly instead of
+    // running an untested path. Pull to This computer, then push.
+    if req.src_target != crate::browser::LOCAL_TARGET
+        && req.dst_target != crate::browser::LOCAL_TARGET
+    {
+        return Err(BrowserError::unsupported(
+            "Copying directly between two remote machines arrives with M2 — \
+             pull the files to This computer first, then push them",
+        ));
+    }
     // Remote sides need a pinned account before copying (pane loadedUser).
     for (target, user) in [
         (&req.src_target, &req.src_user),
@@ -479,12 +489,20 @@ mod tests {
         let mut r = base.clone();
         r.dst_user = None;
         assert_eq!(preflight(&r, false).unwrap_err().kind, ErrorKind::Account);
-        // Same host, two accounts.
+        // Same host, two accounts (more specific than the B5 scope refusal).
         let mut r = base.clone();
         r.src_target = "host".into();
         r.src_user = Some("u1".into());
         r.dst_user = Some("u2".into());
         assert_eq!(preflight(&r, false).unwrap_err().kind, ErrorKind::Account);
+        // B5: remote→remote between DIFFERENT hosts is M2 — Unsupported.
+        let mut r = base.clone();
+        r.src_target = "other-host".into();
+        r.src_user = Some("u".into());
+        assert_eq!(
+            preflight(&r, false).unwrap_err().kind,
+            ErrorKind::Unsupported
+        );
         // Same host, same account, into itself.
         let mut r = base.clone();
         r.src_target = "host".into();

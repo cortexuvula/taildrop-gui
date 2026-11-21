@@ -17,6 +17,7 @@ import {
   isWindowsPeer,
   canWriteTo,
   isBrowserEntry,
+  remoteToRemoteProblem,
 } from "../guards";
 
 const goodEntry = {
@@ -196,6 +197,19 @@ describe("newNameProblem (mirror of Rust guards)", () => {
     expect(newNameProblem("a\u{0}b")).not.toBeNull();
     expect(newNameProblem("a\u{7f}b")).not.toBeNull();
     expect(controlCharProblem("plain")).toBeNull();
+  });
+});
+
+describe("remoteToRemoteProblem (B5: remote→remote is M2)", () => {
+  it("refuses remote→remote with the M2 explanation", () => {
+    const why = remoteToRemoteProblem("peer-a", "peer-b");
+    expect(why).toMatch(/M2/);
+    expect(why).toMatch(/pull/i);
+  });
+  it("allows both local-involved directions", () => {
+    expect(remoteToRemoteProblem("local", "peer-a")).toBeNull();
+    expect(remoteToRemoteProblem("peer-a", "local")).toBeNull();
+    expect(remoteToRemoteProblem("local", "local")).toBeNull();
   });
 });
 

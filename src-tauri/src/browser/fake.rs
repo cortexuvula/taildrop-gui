@@ -120,6 +120,11 @@ pub struct FakeConfig {
     /// the client-visible wire bytes are identical to production. The name
     /// does not resolve (no such file), exactly like a lossy guess.
     pub non_utf8_names: bool,
+    /// Hostility (B6): READLINK on any directory whose name contains
+    /// "junction" fails with Failure — the fake's stand-in for Windows
+    /// OpenSSH's BadMessage on a junction (M0 §5). Dirs otherwise answer
+    /// NoSuchFile ("clean not-a-link") and real symlinks answer Ok.
+    pub simulate_junctions: bool,
 }
 
 impl FakeConfig {
@@ -136,6 +141,7 @@ impl FakeConfig {
             fail_writes_after: None,
             host_key_pem: HOST_KEY_PEM,
             non_utf8_names: false,
+            simulate_junctions: false,
         }
     }
     /// macOS/Windows OpenSSH-like defaults (M0: refused replacing renames).
@@ -151,6 +157,7 @@ impl FakeConfig {
             fail_writes_after: None,
             host_key_pem: HOST_KEY_PEM,
             non_utf8_names: false,
+            simulate_junctions: false,
         }
     }
 }
@@ -778,7 +785,27 @@ impl russh_sftp::server::Handler for SftpHandler {
     }
 
     async fn readlink(&mut self, id: u32, path: String) -> Result<Name, Self::Error> {
-        let target = std::fs::read_link(self.resolve(&path)).map_err(map_io)?;
+        let resolved = self.resolve(&path);
+        // B6 fixture: a "junction" dir answers Failure (the fake's BadMessage
+        // stand-in) even though it is a plain dir on disk.
+        if self.cfg.simulate_junctions
+            && resolved
+                .file_name()
+                .map(|n| n.to_string_lossy().contains("junction"))
+                .unwrap_or(false)
+            && resolved.is_dir()
+        {
+            return Err(StatusCode::Failure);
+        }
+        let target = match std::fs::read_link(&resolved) {
+            Ok(t) => t,
+            // A plain dir/file is a CLEAN "not a link" — NoSuchFile, matching
+            // what the Windows-junction probe treats as safe to descend.
+            Err(e) if e.kind() == io::ErrorKind::InvalidInput => {
+                return Err(StatusCode::NoSuchFile)
+            }
+            Err(e) => return Err(map_io(e)),
+        };
         Ok(Name {
             id,
             files: vec![File::new(
@@ -1560,6 +1587,65 @@ mod tests {
         // Cleanup on the cancelled path: no staging, no half-placed file.
         assert!(stage_leftovers(&srv.root.join("dst")).is_empty());
         assert!(!srv.root.join("dst/big.bin").exists());
+        Box::new(t).close().await.unwrap();
+    }
+
+    /// B6/A7: Windows-source pull — a junction (READLINK → BadMessage-like
+    /// Failure) and a directory symlink are skipped + counted, NEVER
+    /// followed; a real dir (clean "not a link" NoSuchFile answer) is
+    /// descended and copied. Without this probe a junction would copy data
+    /// from outside the selected tree or loop to the depth cap.
+    #[tokio::test]
+    #[cfg(unix)]
+    async fn windows_pull_skips_junctions_never_follows() {
+        let mut cfg = FakeConfig::openssh(temp_root("junc-srv"));
+        cfg.banner = "SSH-2.0-OpenSSH_for_Windows_8.1".to_string();
+        cfg.simulate_junctions = true;
+        let srv = FakeServer::start(cfg).await;
+        // A real dir with content, a "junction" dir, and a dir symlink.
+        std::fs::create_dir_all(srv.root.join("real")).unwrap();
+        std::fs::write(srv.root.join("real/inside.txt"), b"inside").unwrap();
+        std::fs::create_dir(srv.root.join("junction-escape")).unwrap();
+        std::fs::write(srv.root.join("junction-escape/outside.txt"), b"outside").unwrap();
+        std::os::unix::fs::symlink(srv.root.join("real"), srv.root.join("dirlink")).unwrap();
+
+        let dst = temp_root("junc-dst");
+        let (key, _g) = write_temp_key("junc");
+        let t = srv
+            .connect_as(&temp_root("trustJUNC"), "fakeuser", &[key])
+            .await;
+        let (emit, _p) = collector();
+        let outcome = transfer::run_copy(
+            &CopyRequest {
+                src_target: "fakehost".into(),
+                src_user: Some("fakeuser".into()),
+                src_dir: "/".into(),
+                dst_target: "local".into(),
+                dst_user: None,
+                dst_dir: dst.to_str().unwrap().to_string(),
+                names: vec!["real".into(), "junction-escape".into(), "dirlink".into()],
+                replace: false,
+            },
+            &Side::Remote {
+                transport: &t,
+                windows: true,
+            },
+            &Side::Local,
+            CancellationToken::new(),
+            emit,
+        )
+        .await
+        .expect("windows pull succeeds");
+        assert_eq!(outcome.skipped, 2, "junction + dirlink skipped and counted");
+        assert_eq!(
+            std::fs::read(dst.join("real/inside.txt")).unwrap(),
+            b"inside"
+        );
+        assert!(
+            !dst.join("junction-escape").exists(),
+            "junction never followed"
+        );
+        assert!(!dst.join("dirlink").exists(), "dir symlink never followed");
         Box::new(t).close().await.unwrap();
     }
 

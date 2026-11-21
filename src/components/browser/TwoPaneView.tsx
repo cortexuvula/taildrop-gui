@@ -16,7 +16,11 @@ import { useBrowserHosts } from "../../hooks/useBrowserHosts";
 import { useBrowserPane, type BrowserPane } from "../../hooks/useBrowserPane";
 import { useBrowserTransfers } from "../../hooks/useBrowserTransfers";
 import * as api from "../../lib/browser/api";
-import { canWriteTo, toBrowserError } from "../../lib/browser/guards";
+import {
+  canWriteTo,
+  remoteToRemoteProblem,
+  toBrowserError,
+} from "../../lib/browser/guards";
 import { join as joinPath } from "../../lib/browser/paths";
 import { FilePane } from "./FilePane";
 import { TransferQueue } from "./TransferQueue";
@@ -343,7 +347,14 @@ export function TwoPaneView({ seedPeer }: TwoPaneViewProps) {
         notice("Nothing selected", true);
         return;
       }
+      const srcTarget = src.loadedTarget || src.target;
       const dstTarget = dst.loadedTarget || dst.target;
+      // B5: remote→remote is M2 — mirror the Rust preflight refusal.
+      const r2r = remoteToRemoteProblem(srcTarget, dstTarget);
+      if (r2r) {
+        notice(r2r, true);
+        return;
+      }
       const dstPeer = machines.find((m) => m.host === dstTarget);
       if (!canWriteTo(dstTarget, dstPeer)) {
         notice(
@@ -360,7 +371,7 @@ export function TwoPaneView({ seedPeer }: TwoPaneViewProps) {
         return;
       }
       const req: CopyRequest = {
-        srcTarget: src.loadedTarget || src.target,
+        srcTarget,
         srcUser: src.loadedUser,
         srcDir: src.loadedPath || src.path,
         dstTarget,

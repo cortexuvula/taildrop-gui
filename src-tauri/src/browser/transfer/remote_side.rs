@@ -116,6 +116,22 @@ fn walk_node<'a>(
             return Ok(());
         }
         if st.is_dir {
+            // B6/A7 (Windows sources): junctions list as ORDINARY dirs and
+            // READLINK fails with BadMessage (M0 §5) — descending would copy
+            // data from outside the selected tree, or loop to the depth cap
+            // on an ancestor junction. Probe every dir: only a CLEAN
+            // "not a link" answer (NotFound) permits descent; anything else
+            // (Ok → dir symlink, other errors incl. BadMessage → reparse
+            // point or unknown) is skipped + counted, never followed.
+            if windows {
+                match t.read_link(&path).await {
+                    Err(e) if e.kind == crate::browser::ErrorKind::Notfound => {}
+                    _ => {
+                        b.push_skipped();
+                        return Ok(());
+                    }
+                }
+            }
             b.push(PlanItem {
                 rel: rel.clone(),
                 kind: PlanKind::Dir,
