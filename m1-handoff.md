@@ -148,6 +148,16 @@ npm run build                    # tsc + vite production bundle
     (plugin-parity ceiling, §7.4 row-10 gap). Local deletes are Trash-only,
     so exposure is remote-permanent-delete-only. Mitigation for M2: compare
     dev/ino locally in addition to strings.
+    **M2b residual note (Codie M2a S-1, documented per owner instruction —
+    no guard change):** the W5 dev/ino mitigation (`home_guard_ids`,
+    commands.rs) collects identities for the STRING ancestors of the two
+    known home spellings only. An alias of an ANCESTOR-of-home under a
+    third spelling — e.g. `/System/Volumes/Data`, which transitively
+    contains home via the firmlink — is in neither the string guards nor
+    the identity set, so `local_delete` of such an alias passes both arms.
+    Exposure is local-trash-only (reversible; macOS refuses to trash the
+    data-volume root in practice). Cheap future hardening if ever wanted:
+    canonicalize each ancestor before collecting its id.
 13. **Windows compile + runtime are CI-gated, not locally provable.** B2
     (E0412) is fixed statically; B1's ShellExecuteW path cannot be executed
     on this Mac. The B6-R probe semantics below are SOURCE-VERIFIED against
