@@ -30,7 +30,9 @@ use crate::browser::guards;
 use crate::browser::listing::safe_remote_name;
 use crate::browser::transfer::place::{remote_tier, PlaceAction, RemoteTier};
 use crate::browser::transfer::plan::{CopyPlan, PlanBuilder, PlanItem, PlanKind, MAX_REMOTE_SIZE};
-use crate::browser::transfer::{join_remote, stage_dir_name, CopySink, ProgressReporter, CHUNK};
+use crate::browser::transfer::{
+    join_remote, stage_dir_name, CopySink, FileMeta, ProgressReporter, CHUNK,
+};
 use crate::browser::transport::SftpTransport;
 use crate::browser::{BrowserError, ErrorKind, MAX_DEPTH};
 
@@ -319,7 +321,15 @@ async fn sink_file(
     prog: &mut ProgressReporter,
     cancel: &CancellationToken,
 ) -> Result<(), BrowserError> {
-    sink.file_begin(rel).await?;
+    sink.file_begin(
+        rel,
+        &FileMeta {
+            size: item.size,
+            mode: item.mode,
+            mtime: item.mtime,
+        },
+    )
+    .await?;
     let mut buf = vec![0u8; CHUNK];
     let mut done = 0u64;
     while done < item.size {
@@ -720,7 +730,10 @@ impl CopySink for RemoteSink<'_> {
         self.pop().await
     }
 
-    async fn file_begin(&mut self, rel: &str) -> Result<(), BrowserError> {
+    async fn file_begin(&mut self, rel: &str, _meta: &FileMeta) -> Result<(), BrowserError> {
+        // `_meta` is the exec-agent's up-front size channel; the SFTP sink
+        // enforces the planned size in `stream_plan` and applies attrs at
+        // file_end (best effort — servers may ignore SETSTAT).
         self.align(rel).await?;
         let path = self.staged(rel);
         // Exclusive create (CREATE|EXCLUDE): a case-variant or exact clash
@@ -996,11 +1009,29 @@ mod tests {
         let mut sink = RemoteSink::open(&t, "/dst", &tag)
             .await
             .expect("stage opens");
-        sink.file_begin("a.txt").await.unwrap();
+        sink.file_begin(
+            "a.txt",
+            &FileMeta {
+                size: 7,
+                mode: 0o644,
+                mtime: 1_700_000_000,
+            },
+        )
+        .await
+        .unwrap();
         sink.file_chunk(b"payload").await.unwrap();
         sink.file_end(0o644, 1_700_000_000).await.unwrap();
         sink.dir_begin("d", 0o755, 1_700_000_001).await.unwrap();
-        sink.file_begin("d/b.txt").await.unwrap();
+        sink.file_begin(
+            "d/b.txt",
+            &FileMeta {
+                size: 5,
+                mode: 0o644,
+                mtime: 1_700_000_002,
+            },
+        )
+        .await
+        .unwrap();
         sink.file_chunk(b"inner").await.unwrap();
         sink.file_end(0o644, 1_700_000_002).await.unwrap();
         sink.dir_end().await.unwrap();

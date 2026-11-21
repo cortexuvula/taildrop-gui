@@ -48,6 +48,20 @@ use crate::browser::{human_rate, BrowserError, CopyRequest, ErrorKind};
 /// Chunk size for streaming reads/writes (M0-proven 256 KiB).
 pub const CHUNK: usize = 256 * 1024;
 
+/// Source metadata for one streamed file. `file_begin` carries this because
+/// the M2b exec-agent's `F` record needs the exact size UP FRONT (the record
+/// header frames the raw bytes that follow). The SFTP/local sinks ignore it —
+/// they apply source attrs at `file_end` through their own handles.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FileMeta {
+    /// Exact expected size in bytes (short streams fail the copy).
+    pub size: u64,
+    /// Mode bits as the walker saw them; masking (files 0o777 — W1: no
+    /// setuid/setgid/sticky travel) is applied by the sink that uses it.
+    pub mode: u32,
+    pub mtime: i64,
+}
+
 /// One side of a copy, resolved by the commands layer.
 pub enum Side<'a> {
     Local,
@@ -72,8 +86,11 @@ pub trait CopySink: Send {
     async fn dir_begin(&mut self, rel: &str, mode: u32, mtime: i64) -> Result<(), BrowserError>;
     /// Close the innermost directory, applying source mode/mtime.
     async fn dir_end(&mut self) -> Result<(), BrowserError>;
-    /// Exclusively create a file (0600 while streaming).
-    async fn file_begin(&mut self, rel: &str) -> Result<(), BrowserError>;
+    /// Exclusively create a file (0600 while streaming). `meta` carries the
+    /// source size/mode/mtime — the exec-agent sink needs the size up front
+    /// for its `F` record header; the SFTP/local sinks apply attrs at
+    /// `file_end` and ignore it.
+    async fn file_begin(&mut self, rel: &str, meta: &FileMeta) -> Result<(), BrowserError>;
     async fn file_chunk(&mut self, data: &[u8]) -> Result<(), BrowserError>;
     /// Close the file, applying source mode/mtime.
     async fn file_end(&mut self, mode: u32, mtime: i64) -> Result<(), BrowserError>;

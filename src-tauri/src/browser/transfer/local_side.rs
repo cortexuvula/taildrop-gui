@@ -35,7 +35,7 @@ use crate::browser::guards;
 use crate::browser::transfer::place::{
     place_action, rename_errno_outcome, ItemKind, PlaceAction, RenameOutcome,
 };
-use crate::browser::transfer::{stage_dir_name, CopySink, ProgressReporter, CHUNK};
+use crate::browser::transfer::{stage_dir_name, CopySink, FileMeta, ProgressReporter, CHUNK};
 use crate::browser::{BrowserError, ErrorKind, MAX_DEPTH};
 
 // ---------------------------------------------------------------------------
@@ -362,7 +362,12 @@ fn walk_at<'a>(
                 ));
             }
             let size = fst.st_size.max(0) as u64;
-            sink.file_begin(rel).await?;
+            let meta = FileMeta {
+                size,
+                mode: fst.st_mode as u32 & 0o7777,
+                mtime: fst.st_mtime as i64,
+            };
+            sink.file_begin(rel, &meta).await?;
             let r = stream_fd(fd.as_raw_fd(), size, rel, sink, prog, cancel).await;
             // Close (drop fd) on every path, then surface the error.
             drop(fd);
@@ -901,7 +906,9 @@ impl CopySink for LocalSink {
         self.pop()
     }
 
-    async fn file_begin(&mut self, rel: &str) -> Result<(), BrowserError> {
+    async fn file_begin(&mut self, rel: &str, _meta: &FileMeta) -> Result<(), BrowserError> {
+        // `_meta` is the exec-agent's up-front size/mode/mtime channel; the
+        // local sink applies source attrs at file_end through the held fd.
         let (pfd, name) = self.align(rel)?;
         let fd = unsafe {
             libc::openat(
@@ -1141,7 +1148,16 @@ mod tests {
         let tag = "aaaaaaaaaaaaaaaa";
         let mut sink = LocalSink::open(dst.to_str().unwrap(), tag).expect("open stage");
         // Stage some content through the normal sink path.
-        sink.file_begin("a.txt").await.unwrap();
+        sink.file_begin(
+            "a.txt",
+            &FileMeta {
+                size: 7,
+                mode: 0o644,
+                mtime: 0,
+            },
+        )
+        .await
+        .unwrap();
         sink.file_chunk(b"payload").await.unwrap();
         sink.file_end(0o644, 0).await.unwrap();
 
@@ -1172,7 +1188,16 @@ mod tests {
             }),
         )
         .expect("open_with fake renamer");
-        sink.file_begin("a.txt").await.unwrap();
+        sink.file_begin(
+            "a.txt",
+            &FileMeta {
+                size: 5,
+                mode: 0o644,
+                mtime: 0,
+            },
+        )
+        .await
+        .unwrap();
         sink.file_chunk(b"hello").await.unwrap();
         sink.file_end(0o644, 0).await.unwrap();
         sink
