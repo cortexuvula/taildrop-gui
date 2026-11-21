@@ -49,3 +49,13 @@ the PERSISTED value; default-false startup; re-push on every change).
   `browser_copy` never called (verified RED-first without the mirror).
 - **S-1 (done):** third-spelling ancestor-alias residual documented next to
   gap 12 in m1-handoff.md. No guard change.
+
+## Vendored exec agent (MIT, omarchy-tailnet-files)
+
+`src-tauri/agents/agent.pl` (plugin AGENT_PL, body byte-identical below the
+attribution header — the only deviation) and `src-tauri/agents/posix_delete.sh`
+(plugin POSIX_DELETE_SCRIPT, byte-identical) are vendored under MIT with full
+provenance, sha256 pins and the license text in `src-tauri/agents/THIRD_PARTY.md`.
+Upstream: https://github.com/dmajerus6/omarchy-tailnet-files @ c95f1b7.
+Rust integration (browser/agent.rs: recv-verb AgentSink, exec-channel seam,
+capability probe, delete re-check) lands in the M2b agent commits that follow.
