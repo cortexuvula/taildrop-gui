@@ -265,6 +265,9 @@ pub fn join(dir: &str, name: &str) -> String {
 
 /// The home folder used by delete guards: for a remote target it must come
 /// fresh from the probe (never cached), for local from the OS.
+// Consumed only by the Unix delete-guard path (non-Unix fails closed via
+// local_unsupported before reaching it).
+#[cfg_attr(not(unix), allow(dead_code))]
 pub fn local_home() -> String {
     dirs::home_dir()
         .map(|p| p.to_string_lossy().to_string())

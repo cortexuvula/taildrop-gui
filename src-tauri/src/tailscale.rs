@@ -1051,6 +1051,9 @@ pub(crate) fn run_command_with_cap(
 }
 
 /// RFC 3986 percent-encoding (encode all non-unreserved characters).
+// Consumed only by the Unix (Linux/macOS localapi) platform modules and
+// their tests; the Windows module shells out to tailscale.exe instead.
+#[cfg_attr(not(unix), allow(dead_code))]
 fn url_encode(s: &str) -> String {
     let mut encoded = String::with_capacity(s.len() * 3);
     for byte in s.bytes() {
@@ -1079,6 +1082,8 @@ fn url_encode(s: &str) -> String {
 /// trust-connection-close framing when the header is absent would silently
 /// re-admit truncated downloads (TD-02) whenever we are not talking to the
 /// daemon we think we are.
+// Consumed only by the Unix socket-download paths and their tests.
+#[cfg_attr(not(unix), allow(dead_code))]
 fn parse_content_length(headers: &str) -> Result<u64, String> {
     for line in headers.lines().skip(1) {
         let mut split = line.splitn(2, ':');
@@ -1102,6 +1107,8 @@ fn parse_content_length(headers: &str) -> Result<u64, String> {
 /// TD-02 truncated-download case and MUST be treated as an error *before*
 /// the caller deletes the file from the daemon inbox. An over-long body
 /// (trailing garbage) fails the same equality.
+// Consumed only by the Unix socket-download paths and their tests.
+#[cfg_attr(not(unix), allow(dead_code))]
 fn validate_received_length(advertised: u64, written: u64) -> Result<(), String> {
     if written == advertised {
         Ok(())
@@ -2505,13 +2512,12 @@ mod platform {
                     },
                     false,
                 )
-                .map_err(|e| {
+                .inspect_err(|e| {
                     crate::receipts::ReceiptStore::record_failed(
                         safe_name,
-                        &e,
-                        crate::receipts::ReceiptStore::classify_recovery(&e),
+                        e,
+                        crate::receipts::ReceiptStore::classify_recovery(e),
                     );
-                    e
                 })
             }),
         )
@@ -3738,18 +3744,22 @@ mod tests {
     }
 
     /// Minimal temp-file helper for the framing tests.
+    // Used only by the #[cfg(unix)] framing tests.
+    #[cfg_attr(not(unix), allow(dead_code))]
     struct TempFileForTest {
         path: std::path::PathBuf,
         file: std::fs::File,
     }
 
     impl TempFileForTest {
+        #[cfg_attr(not(unix), allow(dead_code))] // Unix-only framing tests
         fn cleanup(self) {
             drop(self.file);
             let _ = std::fs::remove_file(&self.path);
         }
     }
 
+    #[cfg_attr(not(unix), allow(dead_code))] // Unix-only framing tests
     fn tempfile_for_tests(label: &str) -> TempFileForTest {
         let path =
             std::env::temp_dir().join(format!("taildrop_test_{}_{}", label, timestamp_tag()));

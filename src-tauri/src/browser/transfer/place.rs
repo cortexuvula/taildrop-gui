@@ -28,6 +28,8 @@
 
 /// Item kinds as placement sees them: the plugin only distinguishes
 /// directories from everything else (files and links replace alike).
+// Consumed only by the Unix local engine (local_side / place_action callers).
+#[cfg_attr(not(unix), allow(dead_code))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ItemKind {
     Dir,
@@ -35,6 +37,8 @@ pub enum ItemKind {
 }
 
 /// What the atomic no-replace rename attempt returned.
+// Consumed only by the Unix local engine (renameat2/renameatx_np seam).
+#[cfg_attr(not(unix), allow(dead_code))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RenameOutcome {
     Placed,
@@ -46,6 +50,9 @@ pub enum RenameOutcome {
     OtherError,
 }
 
+// Placed/FailNonAtomic/FailOther are constructed only by place_action and
+// the Unix local engine; remote_side uses the remaining variants.
+#[cfg_attr(not(unix), allow(dead_code))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PlaceAction {
     /// Item is in place; nothing more to do.
@@ -66,6 +73,9 @@ pub enum PlaceAction {
 
 /// The decision matrix. `merge_allowed` is false at nesting depth ≥ 512
 /// (plugin: `depth < 512` on the merge branch, else conflict).
+// Consumed only by the Unix local engine (its decision-table tests are
+// #[cfg(unix)] too).
+#[cfg_attr(not(unix), allow(dead_code))]
 pub fn place_action(
     outcome: RenameOutcome,
     replace: bool,
