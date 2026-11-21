@@ -1,0 +1,25 @@
+# M2c stability loop: 20 consecutive full cargo test --lib runs (CARGO_INCREMENTAL=0)
+# commit: 7e20d70ab249080984d2736fc64273f8e08fb4f9
+# date: 2026-11-21T22:32:23Z
+# context: F-1 (M2b stderr-drain race) regression watch — every run must show 291 passed / 0 failed
+run 1: test result: ok. 291 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.43s
+run 2: test result: ok. 291 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.41s
+run 3: test result: ok. 291 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.36s
+run 4: test result: ok. 291 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.54s
+run 5: test result: ok. 291 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.63s
+run 6: test result: ok. 291 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.60s
+run 7: test result: ok. 291 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.49s
+run 8: test result: ok. 291 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.48s
+run 9: test result: ok. 291 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.62s
+run 10: test result: ok. 291 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.44s
+run 11: test result: ok. 291 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.46s
+run 12: test result: ok. 291 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.50s
+run 13: test result: ok. 291 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.60s
+run 14: test result: ok. 291 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.53s
+run 15: test result: ok. 291 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.38s
+run 16: test result: ok. 291 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.53s
+run 17: test result: ok. 291 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.59s
+run 18: test result: ok. 291 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.62s
+run 19: test result: ok. 291 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.58s
+run 20: test result: ok. 291 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.56s
+# done: 2026-11-21T22:33:01Z

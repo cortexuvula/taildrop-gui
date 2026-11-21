@@ -1,0 +1,10 @@
+# gate: npx playwright test
+# commit: 7e20d70ab249080984d2736fc64273f8e08fb4f9
+# date: 2026-11-21T22:31:45Z
+  ✓  42 [chromium] › e2e/recovery-app.test.ts:303:1 › in-flight recover survives Done/Escape/backdrop close+reopen — exactly one request until settlement (3.4s)
+  ✓  58 [chromium] › e2e/settings.test.ts:287:1 › Escape closes, focus returns to the trigger, and the dialog reopens cleanly (1.2s)
+  ✓  61 [chromium] › e2e/settings.test.ts:374:1 › enlarged-text emulation (~150% zoom) keeps controls reachable (1.2s)
+  ✓  59 [chromium] › e2e/settings.test.ts:311:1 › at the 700x500 minimum, header and footer stay reachable and the body scrolls the device list (1.5s)
+
+  62 passed (10.4s)
+# exit: 0

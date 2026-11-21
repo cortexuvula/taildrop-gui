@@ -1,0 +1,15 @@
+# M2c S-3 RED evidence (pre-fix): loopback delete with a PATH without xargs returned Notfound, not the Unsupported fallback arm
+# command: cargo test --lib loopback_delete_xargs_missing (test asserted Unsupported; FAILED pre-fix as shown below)
+# captured: 2026-11-21T21:57Z at HEAD e115253 (test uncommitted at capture)
+assertion `left == right` failed: command-not-found must map to the SFTP-fallback arm: BrowserError { message: "/bin/sh: xargs: No such file or directory", kind: Notfound, names: None, sftp_status: None }
+  left: Notfound
+ right: Unsupported
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    browser::agent::loopback_tests::loopback_delete_xargs_missing_is_unsupported_fallback
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 284 filtered out; finished in 0.02s
+
+error: test failed, to rerun pass `--lib`

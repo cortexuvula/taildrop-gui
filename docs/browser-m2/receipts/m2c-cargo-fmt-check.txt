@@ -1,0 +1,4 @@
+# gate: cargo fmt -- --check
+# commit: 7e20d70ab249080984d2736fc64273f8e08fb4f9
+# date: 2026-11-21T22:29:49Z
+# exit: 0

@@ -1,0 +1,9 @@
+# M2c S-1 RED evidence (pre-fix): rc-9 'perl too old' keeps PerlExec pinned — every copy re-fails the agent tier
+# command: cargo test --lib red_demo_rc9_cap_stays_pinned (demo asserts the DEFECT: cache stays PerlExec, 2nd copy re-opens exec tier)
+# date: 2026-11-21T22:21:49Z  commit: feb9dbf (demo test uncommitted at capture)
+
+running 1 test
+test browser::fake::tests::red_demo_rc9_cap_stays_pinned ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 288 filtered out; finished in 0.09s
+
