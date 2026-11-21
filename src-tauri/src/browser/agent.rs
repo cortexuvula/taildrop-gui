@@ -667,6 +667,11 @@ pub mod loopback {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::process::{Child, ChildStdin, ChildStdout, Command};
 
+    /// Safety bound on joining the stderr-drain task inside `wait_exit`.
+    /// The child's exit EOFs the stderr pipe, so the drain always ends on
+    /// its own; this only guards a pathological case (never observed).
+    const STDERR_DRAIN_BOUND: Duration = Duration::from_secs(2);
+
     /// An `ExecChannel` backed by a local `sh -c <cmd>` child. Same framing,
     /// same lifecycle: stdin writes, stdout replies, capped stderr drain,
     /// EOF-by-drop, bounded wait.
@@ -675,6 +680,10 @@ pub mod loopback {
         stdin: Option<ChildStdin>,
         stdout: Option<ChildStdout>,
         stderr: Arc<Mutex<Vec<u8>>>,
+        /// JoinHandle of the spawned stderr drain. `wait_exit` joins it
+        /// before returning, so a `stderr_tail()` read after the wait can
+        /// never race a still-running drain (F-1: flaky delete tests).
+        stderr_drain: Option<tokio::task::JoinHandle<()>>,
         exit: Option<u32>,
     }
 
@@ -706,12 +715,14 @@ pub mod loopback {
                 .spawn()
                 .map_err(|e| BrowserError::unsupported(format!("exec spawn refused: {e}")))?;
             let stderr = Arc::new(Mutex::new(Vec::new()));
-            {
+            let stderr_drain = {
                 // Drain stderr concurrently (capped) so a chatty child can
-                // never deadlock on a full pipe.
+                // never deadlock on a full pipe. `wait_exit` JOINS this task
+                // before returning, so `stderr_tail()` read after the wait
+                // always sees the complete tail (F-1).
                 let mut es = child.stderr.take().expect("stderr piped");
                 let sink = Arc::clone(&stderr);
-                tokio::spawn(async move {
+                Some(tokio::spawn(async move {
                     let mut buf = [0u8; 4096];
                     loop {
                         match es.read(&mut buf).await {
@@ -726,13 +737,14 @@ pub mod loopback {
                             }
                         }
                     }
-                });
-            }
+                }))
+            };
             Ok(Box::new(Self {
                 stdin: child.stdin.take(),
                 stdout: child.stdout.take(),
                 child,
                 stderr,
+                stderr_drain,
                 exit: None,
             }))
         }
@@ -768,7 +780,7 @@ pub mod loopback {
             if let Some(rc) = self.exit {
                 return Some(rc);
             }
-            match tokio::time::timeout(timeout, self.child.wait()).await {
+            let status = match tokio::time::timeout(timeout, self.child.wait()).await {
                 Ok(Ok(st)) => {
                     // A signalled exit has no code; map it to 255 so callers
                     // still see "exited, not the success contract".
@@ -781,7 +793,22 @@ pub mod loopback {
                     let _ = self.child.start_kill();
                     None
                 }
+            };
+            // The child has exited (or was just killed): the stderr pipe
+            // EOFs, so the drain task necessarily finishes. Join it BEFORE
+            // returning so every `stderr_tail()` read after `wait_exit` is
+            // deterministic (F-1: the spawned drain used to race the
+            // assertions under parallel suite load). The bound is pure
+            // safety; abort so a wedged drain can never hang the harness.
+            if let Some(mut h) = self.stderr_drain.take() {
+                if tokio::time::timeout(STDERR_DRAIN_BOUND, &mut h)
+                    .await
+                    .is_err()
+                {
+                    h.abort();
+                }
             }
+            status
         }
         fn stderr_tail(&self) -> String {
             self.stderr
