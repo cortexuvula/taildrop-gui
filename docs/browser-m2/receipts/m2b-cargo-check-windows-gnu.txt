@@ -1,5 +1,5 @@
 # gate: cargo check --target x86_64-pc-windows-gnu
-# commit: 3b8787baa507c76246d61b4d16e78948025ca7d3
-    Checking taildrop-gui v0.16.0 (/Users/cortexuvula/Development/taildrop-gui/src-tauri)
-    Finished `dev` profile [unoptimized + debuginfo] target(s) in 2.35s
+# commit: 6dee72bd9b98a5b6feca07a34982c839c6880236
+Checking taildrop-gui v0.16.0 (/Users/cortexuvula/Development/taildrop-gui/src-tauri)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 3.88s
 exit: 0

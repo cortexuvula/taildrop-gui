@@ -1,3 +1,3 @@
 # gate: cargo fmt -- --check
-# commit: 3b8787baa507c76246d61b4d16e78948025ca7d3
+# commit: 6dee72bd9b98a5b6feca07a34982c839c6880236
 exit: 0

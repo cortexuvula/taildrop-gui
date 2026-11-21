@@ -1,0 +1,89 @@
+# gate: cargo test --lib stability loop (review F-1 acceptance: >=25 consecutive clean runs)
+# commit: 6dee72bd9b98a5b6feca07a34982c839c6880236
+# date: 2026-11-21T20:28:11Z
+# host: macOS 26.6.2 arm64, perl v5.34.1 in PATH
+
+## Result: 50/50 consecutive full-suite runs PASSED (283 tests each), 0 failures, 100s wall.
+
+## Pre-fix RED evidence (same machine, same loop harness):
+# At 20a384b (unfixed harness + unfixed ra01 test), full-suite loop stopped at run 3:
+#   tailscale::tests::acknowledge_returns_recorded_path_without_draining FAILED
+#   ('no duplicate receipt on ack', left: 2, right: 1, tailscale.rs:3823)
+#   -> pre-existing ra01 receipt-store race, fixed in e93578f (TEST_STORE_LOCK).
+# At e93578f (ra01 fixed, F-1 harness still racing), loop stopped at run 2 of 40:
+#   browser::agent::loopback_tests::loopback_delete_script_raw_exit_codes FAILED
+#   panicked at src/browser/agent.rs:1598: assertion failed:
+#   ch.stderr_tail().contains("not absolute")  -- exit code Some(4) asserted fine,
+#   stderr tail empty: the spawned drain had not consumed the pipe yet (review F-1).
+# Fix under test: 6dee72b -- LocalExecChannel::wait_exit joins the stderr-drain
+# JoinHandle on every path (bounded by pipe EOF; 2s safety bound + abort).
+
+## Pre-fix loop 1 (at 20a384b; stopped at first failure, run 3):
+run 1: pass (finished in 1.40s)
+run 2: pass (finished in 1.35s)
+run 3: FAIL rc=101
+test tailscale::tests::acknowledge_returns_recorded_path_without_draining ... FAILED
+failures:
+thread 'tailscale::tests::acknowledge_returns_recorded_path_without_draining' (24290570) panicked at src/tailscale.rs:3823:9:
+failures:
+test result: FAILED. 282 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.48s
+
+## Pre-fix loop 2 (at e93578f; stopped at first failure, run 2 of 40):
+run 1: pass
+run 2: FAIL rc=101
+test browser::agent::loopback_tests::loopback_delete_script_raw_exit_codes ... FAILED
+thread 'browser::agent::loopback_tests::loopback_delete_script_raw_exit_codes' (24345174) panicked at src/browser/agent.rs:1598:9:
+assertion failed: ch.stderr_tail().contains("not absolute")
+test result: FAILED. 282 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.63s
+
+## Post-fix stability loop (at 6dee72b; 50 consecutive runs, zero failures):
+run 1: PASS (test result: ok. 283 passed; finished in 1.63s)
+run 2: PASS (test result: ok. 283 passed; finished in 1.48s)
+run 3: PASS (test result: ok. 283 passed; finished in 1.51s)
+run 4: PASS (test result: ok. 283 passed; finished in 1.50s)
+run 5: PASS (test result: ok. 283 passed; finished in 1.37s)
+run 6: PASS (test result: ok. 283 passed; finished in 1.46s)
+run 7: PASS (test result: ok. 283 passed; finished in 1.41s)
+run 8: PASS (test result: ok. 283 passed; finished in 1.56s)
+run 9: PASS (test result: ok. 283 passed; finished in 1.56s)
+run 10: PASS (test result: ok. 283 passed; finished in 1.54s)
+run 11: PASS (test result: ok. 283 passed; finished in 1.47s)
+run 12: PASS (test result: ok. 283 passed; finished in 1.47s)
+run 13: PASS (test result: ok. 283 passed; finished in 1.58s)
+run 14: PASS (test result: ok. 283 passed; finished in 1.70s)
+run 15: PASS (test result: ok. 283 passed; finished in 1.58s)
+run 16: PASS (test result: ok. 283 passed; finished in 1.50s)
+run 17: PASS (test result: ok. 283 passed; finished in 1.44s)
+run 18: PASS (test result: ok. 283 passed; finished in 1.47s)
+run 19: PASS (test result: ok. 283 passed; finished in 1.52s)
+run 20: PASS (test result: ok. 283 passed; finished in 1.44s)
+run 21: PASS (test result: ok. 283 passed; finished in 1.55s)
+run 22: PASS (test result: ok. 283 passed; finished in 1.56s)
+run 23: PASS (test result: ok. 283 passed; finished in 1.54s)
+run 24: PASS (test result: ok. 283 passed; finished in 1.44s)
+run 25: PASS (test result: ok. 283 passed; finished in 1.56s)
+run 26: PASS (test result: ok. 283 passed; finished in 1.47s)
+run 27: PASS (test result: ok. 283 passed; finished in 1.58s)
+run 28: PASS (test result: ok. 283 passed; finished in 1.48s)
+run 29: PASS (test result: ok. 283 passed; finished in 1.58s)
+run 30: PASS (test result: ok. 283 passed; finished in 1.53s)
+run 31: PASS (test result: ok. 283 passed; finished in 1.59s)
+run 32: PASS (test result: ok. 283 passed; finished in 1.60s)
+run 33: PASS (test result: ok. 283 passed; finished in 1.68s)
+run 34: PASS (test result: ok. 283 passed; finished in 1.58s)
+run 35: PASS (test result: ok. 283 passed; finished in 1.56s)
+run 36: PASS (test result: ok. 283 passed; finished in 1.53s)
+run 37: PASS (test result: ok. 283 passed; finished in 1.61s)
+run 38: PASS (test result: ok. 283 passed; finished in 1.46s)
+run 39: PASS (test result: ok. 283 passed; finished in 1.43s)
+run 40: PASS (test result: ok. 283 passed; finished in 1.45s)
+run 41: PASS (test result: ok. 283 passed; finished in 1.58s)
+run 42: PASS (test result: ok. 283 passed; finished in 1.63s)
+run 43: PASS (test result: ok. 283 passed; finished in 1.58s)
+run 44: PASS (test result: ok. 283 passed; finished in 1.55s)
+run 45: PASS (test result: ok. 283 passed; finished in 1.46s)
+run 46: PASS (test result: ok. 283 passed; finished in 1.66s)
+run 47: PASS (test result: ok. 283 passed; finished in 1.46s)
+run 48: PASS (test result: ok. 283 passed; finished in 1.47s)
+run 49: PASS (test result: ok. 283 passed; finished in 1.40s)
+run 50: PASS (test result: ok. 283 passed; finished in 1.57s)

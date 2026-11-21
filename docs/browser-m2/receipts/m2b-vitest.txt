@@ -1,12 +1,10 @@
 # gate: npx vitest run
-# commit: 3b8787baa507c76246d61b4d16e78948025ca7d3
+# commit: 6dee72bd9b98a5b6feca07a34982c839c6880236
 
- RUN  v4.1.10 /Users/cortexuvula/Development/taildrop-gui
+RUN  v4.1.10 /Users/cortexuvula/Development/taildrop-gui
 
 
  Test Files  19 passed (19)
       Tests  193 passed (193)
-   Start at  12:39:15
-   Duration  6.68s (transform 2.47s, setup 0ms, import 4.99s, tests 8.47s, environment 12.42s)
-
-exit: 0
+   Start at  13:26:25
+   Duration  9.47s (transform 4.26s, setup 0ms, import 8.33s, tests 10.47s, environment 20.54s)

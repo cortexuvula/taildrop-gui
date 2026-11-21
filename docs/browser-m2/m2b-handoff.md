@@ -145,6 +145,15 @@ windows-dst tiers stay on SFTP with ZERO exec opens; wiring tripwire.
 RED-first spot-checked: disabling the run_copy tier gate fails the two
 agent-tier engine tests; restoring it passes all five.
 
+Harness determinism (review round 1, F-1): `wait_exit` JOINS the spawned
+stderr-drain task before returning (bounded by pipe EOF; 2s safety bound +
+abort), so every `stderr_tail()` read after the wait is race-free. The
+original spawn-and-forget drain made the delete tests intermittently red
+under parallel suite load (reproduced 1-in-2 runs pre-fix; 50/50
+consecutive clean full-suite runs post-fix — receipt
+`m2b-cargo-stability-loop.txt`). Production `SshExecChannel` is
+order-pumped (`ExtendedData` before `ExitStatus`) and was never affected.
+
 ### Ceilings / not verifiable locally
 
 - Real-fleet exec was NOT exercised (no fleet mutations allowed): whether
