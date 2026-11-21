@@ -102,6 +102,15 @@ npm run build                    # tsc + vite production bundle
    between the existence check and the rename can be replaced. The
    hardlink-no-replace tier (fleet-proven) avoids this where advertised;
    unsupported≠failed is enforced and tested (e126826).
+   **M2b CLOSED for perl-exec hosts:** where the capability probe found the
+   vendored Perl agent (POSIX + exec + perl), placement goes through the
+   agent's handle-bound renameat2 RENAME_NOREPLACE / renameatx_np
+   RENAME_EXCL tier — atomic by construction, so a destination appearing
+   after the listing is refused (loopback-proven,
+   `loopback_toctou_no_replace_refuses_late_collision` +
+   `engine_agent_tier_lands_bytes_via_loopback_perl`). The ceiling above
+   remains ONLY for hosts without perl/exec, which keep the M1/M2a SFTP
+   tiers unchanged (no silent downgrade).
 3. **posix_rename seam intentionally unwired** — trait method + fake support
    exist; Replace uses remove-then-place under explicit consent instead.
 4. **Pin management UI** (view/forget pins) not in M1 — `TrustStore::forget`
@@ -158,6 +167,14 @@ npm run build                    # tsc + vite production bundle
     Exposure is local-trash-only (reversible; macOS refuses to trash the
     data-volume root in practice). Cheap future hardening if ever wanted:
     canonicalize each ancestor before collecting its id.
+    **M2b note (remote side):** permanent REMOTE deletes on perl-exec hosts
+    now go through the vendored POSIX delete script, which re-resolves each
+    target's parent with `cd -P` AT DELETE TIME and re-runs the home guard
+    against the PHYSICAL spelling (`agent_delete`, browser/agent.rs) —
+    closing the "path changed between confirm and delete" class there. The
+    string+dev/ino local guards above are unchanged and still run first;
+    hosts without perl/exec keep the SFTP walk with this documented
+    residual.
 13. **Windows compile + runtime are CI-gated, not locally provable.** B2
     (E0412) is fixed statically; B1's ShellExecuteW path cannot be executed
     on this Mac. The B6-R probe semantics below are SOURCE-VERIFIED against
@@ -416,7 +433,12 @@ Result: `cargo clippy --target x86_64-pc-windows-gnu --lib --tests
 - `RenameNoReplace` seam (local_side): filesystem-behavior injection.
 - Trust store + flavor classification: ready for pin-management UI (M2)
   and Windows-flavor pins (M3).
-- CopySink protocol: the M2 Windows agent sink implements the same trait
-  (dir_begin/file_chunk/place/remove stack discipline).
+- CopySink protocol: PROVEN by a second implementation — the M2b
+  `AgentSink` (browser/agent.rs) drives the vendored Perl exec agent with
+  the same trait (dir_begin/file_begin(FileMeta)/file_chunk/place/remove
+  stack discipline). The M3 Windows agent sink slots into the same seam.
+- `agent::ExecChannel` seam (M2b): any transport that can open an exec
+  channel gets atomic agent placement + the physical delete re-check; the
+  default trait methods keep every other transport on the SFTP tiers.
 - Job registry + pump: queue survives webview suspension; UI resyncs via
   `browser_copy_jobs` — multi-job concurrency stays a Rust-side change.
