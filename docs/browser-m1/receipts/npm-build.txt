@@ -1,4 +1,4 @@
-# npm run build — B7 — HEAD 361eacd + this change
+# npm run build — B6-R (Windows read_link probe fix) — worktree at 2dd151c + this change
 $ npm run build
 
 > taildrop-gui@0.15.1 build
@@ -12,5 +12,6 @@ computing gzip size...
 dist/index.html                   0.46 kB │ gzip:  0.29 kB
 dist/assets/index-BTssCk3b.css   35.25 kB │ gzip:  6.41 kB
 dist/assets/index-B26kfhWL.js   300.28 kB │ gzip: 91.96 kB
-✓ built in 401ms
+✓ built in 397ms
+
 EXIT=0

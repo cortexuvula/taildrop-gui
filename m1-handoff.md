@@ -28,7 +28,8 @@ invariants (§7.4 v1 column — acceptance contract).
 | 5eea0ed | test(browser): W3 — end-to-end PULL tests through the real LocalSink |
 | 6562689 | test(browser): e2e — remote→remote copy refused in the UI with the M2 note (B5) |
 | 361eacd | docs(browser): fix-round receipts + corrected handoff (B1-B6, W1-W5; B7 pending owner) |
-| (this commit) | fix(browser): drop russh rsa feature — RUSTSEC-2023-0071 (owner decision; Ed25519/ECDSA retained) |
+| 2dd151c | fix(browser): drop russh rsa feature — RUSTSEC-2023-0071 (owner decision; Ed25519/ECDSA retained) |
+| (this commit) | fix(browser): B6-R — Windows read_link probe distinguishes plain dirs (generic FAILURE) from junctions (BAD_MESSAGE) |
 
 ## Gate receipts
 
@@ -148,11 +149,15 @@ npm run build                    # tsc + vite production bundle
     so exposure is remote-permanent-delete-only. Mitigation for M2: compare
     dev/ino locally in addition to strings.
 13. **Windows compile + runtime are CI-gated, not locally provable.** B2
-    (E0412) is fixed statically; B1's ShellExecuteW path and the B6 junction
-    probe semantics (Windows OpenSSH READLINK error codes for PLAIN dirs vs
-    junctions) cannot be executed on this Mac. `.github/workflows/ci.yml`
-    windows-latest is the compile gate; an on-device Windows smoke is
-    required before release.
+    (E0412) is fixed statically; B1's ShellExecuteW path cannot be executed
+    on this Mac. The B6-R probe semantics below are SOURCE-VERIFIED against
+    Win32-OpenSSH (`latestw_all`: sftp-server.c process_readlink →
+    win32compat/fileio.c fileio_readlink → errno_from_Win32Error →
+    errno_to_portable) and match the M0 room-6 junction evidence
+    (BadMessage), but the deployed OpenSSH_for_Windows_9.5 build could in
+    principle differ. `.github/workflows/ci.yml` windows-latest is the
+    compile gate; an on-device Windows smoke — a folder pull from room-6
+    containing a junction — is REQUIRED before release.
 14. **B7 RESOLVED (owner decision, decisions.md #6): the russh `rsa`
     feature is DROPPED** — RUSTSEC-2023-0071 (Marvin timing side channel)
     is gone from the dependency tree (`cargo audit` receipt:
@@ -185,8 +190,11 @@ are addressed in commits 136a14b…6562689 (table above). Per-blocker:
   specific same-host-two-account Account error) + UI mirror + unit test +
   e2e (447dc29, 6562689).
 - **B6** (Windows junctions followed): read_link probe before descending on
-  Windows sources — only clean NotFound descends; Ok/other-error skipped +
-  counted; fake junction knob + pull test (447dc29).
+  Windows sources (447dc29). **Superseded by B6-R** (continuation 6): the
+  first probe accepted only NotFound as "plain dir", but Win32-OpenSSH
+  answers generic FAILURE for plain dirs — the corrected probe descends on
+  raw SSH_FX_FAILURE and skips on BAD_MESSAGE/NAME/NO_SUCH_FILE/anything
+  else (see the semantics table below).
 - **W1**: file modes masked 0o777 at all three application points (136a14b).
 - **W2**: stale-tmp sweep + pid-nonce names + regression test; this
   handoff's claim corrected (136a14b).
@@ -202,6 +210,35 @@ are addressed in commits 136a14b…6562689 (table above). Per-blocker:
 - **W6** (flaky pre-existing master test): out of scope, untouched. It
   failed once across this round's ~10 full cargo-test runs and passed on
   immediate rerun — consistent with Codie's master-flake finding.
+
+## Windows READLINK probe semantics (B6-R) — M3 inherits this table
+
+For WINDOWS SOURCES ONLY (POSIX sources never probe — POSIX sftp-server
+answers BAD_MESSAGE/EINVAL for plain dirs and lstat flags links reliably),
+the walker probes every directory with READLINK before descending and
+dispatches on the RAW SSH_FXP_STATUS (carried through
+`BrowserError::sftp_status`, because `ErrorKind` merges FAILURE and
+BAD_MESSAGE into `other`):
+
+| READLINK answer | Meaning (Win32-OpenSSH source path) | Walker action |
+|---|---|---|
+| NAME (Ok) | real directory symlink | skip + count (Windows link policy: never followed) |
+| BAD_MESSAGE (5) | junction / non-symlink reparse point (IO_REPARSE_TAG_MOUNT_POINT → EINVAL → SSH2_FX_BAD_MESSAGE; M0 room-6 evidence) | skip + count, NEVER descend (outside-tree data / ancestor loops) |
+| generic FAILURE (4) | PLAIN directory (FSCTL_GET_REPARSE_POINT → ERROR_NOT_A_REPARSE_POINT 4390, unmapped by errno_from_Win32Error, errno_to_portable default) | **DESCEND** |
+| NO_SUCH_FILE (2) | directory vanished since listing (race) | skip + count, tolerated |
+| anything else | unknown | skip + count (fail closed) |
+
+Provenance: Codie's R3 walk of openssh-portable `latestw_all`
+(contrib/win32/win32compat/fileio.c) + their own POSIX
+/usr/libexec/sftp-server probe; NOT yet observed on room-6 (gap 13 smoke).
+The fake server answers with these exact semantics per flavor (plain dir:
+FAILURE on Windows / BAD_MESSAGE on POSIX; junction knob → BAD_MESSAGE;
+`vanish_readlink_for` → NO_SUCH_FILE; `dir_readlinks` counter proves POSIX
+never probes). Tests: `windows_pull_descends_plain_dirs_answering_failure`
+(the R3 regression), `windows_pull_skips_junctions_never_follows` (incl. a
+nested ancestor-pointing junction — no loop),
+`windows_pull_tolerates_dir_vanished_before_probe`,
+`posix_pull_never_probes_dir_readlink`.
 
 ## What M2/M3 inherit
 

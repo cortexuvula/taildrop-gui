@@ -1,3 +1,4 @@
-# npx tsc --noEmit — B7 — HEAD 361eacd + this change
+# npx tsc --noEmit — B6-R (Windows read_link probe fix) — worktree at 2dd151c + this change
 $ npx tsc --noEmit
+(no output — clean)
 EXIT=0

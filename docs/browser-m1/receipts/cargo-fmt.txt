@@ -1,3 +1,5 @@
-# cargo fmt --check — B7 — HEAD 361eacd + this change
+# cargo fmt --check — B6-R (Windows read_link probe fix) — worktree at 2dd151c + this change
 $ cargo fmt --check
+(no output — clean)
+
 EXIT=0

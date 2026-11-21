@@ -21,6 +21,12 @@ export interface BrowserError {
   kind: BrowserErrorKind;
   /** Present only when kind === "exists": the colliding names. */
   names?: string[];
+  /**
+   * Raw SSH_FXP_STATUS code when the error came from an SFTP status packet
+   * (4 = generic FAILURE, 5 = BAD_MESSAGE, ...). Backend-internal detail
+   * (B6-R Windows junction probe); the UI renders from `kind` only.
+   */
+  sftpStatus?: number;
 }
 
 export type EntryKind = "dir" | "file";

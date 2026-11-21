@@ -1,5 +1,6 @@
-# cargo clippy --all-targets -- -D warnings — B7 — HEAD 361eacd + this change
+# cargo clippy --all-targets -- -D warnings — B6-R (Windows read_link probe fix) — worktree at 2dd151c + this change
 $ CARGO_INCREMENTAL=0 cargo clippy --all-targets -- -D warnings
-   Compiling taildrop-gui v0.15.1 (/Users/cortexuvula/Development/taildrop-gui-browser-m1/src-tauri)
-    Finished `dev` profile [unoptimized + debuginfo] target(s) in 3.90s
+    Checking taildrop-gui v0.15.1 (/Users/cortexuvula/Development/taildrop-gui-browser-m1/src-tauri)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 4.24s
+
 EXIT=0

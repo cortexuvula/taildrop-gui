@@ -1,6 +1,6 @@
 # M1 gate receipts
 
-## Fix round (continuation 4) — CURRENT
+## Fix round (continuation 4)
 
 All gates run fresh against HEAD `6562689` (branch `feature/browser-m1`,
 worktree `/Users/cortexuvula/Development/taildrop-gui-browser-m1`) plus the
@@ -58,6 +58,38 @@ tree and the receipts in this directory refreshed:
 | `npx playwright test` | 0 | 54 passed |
 | `npm run build` | 0 | dist built |
 | `cargo audit --no-fetch --stale` | 1 (advisories present) | **RUSTSEC-2023-0071 GONE**; only the pre-existing master advisory set remains |
+
+## B6-R (continuation 6) — CURRENT
+
+The `fix(browser): B6-R` commit corrects the Windows junction probe to the
+REAL Win32-OpenSSH READLINK semantics (R3 blocker: the first probe treated
+only NO_SUCH_FILE as "plain dir", but Win32-OpenSSH answers generic
+SSH_FX_FAILURE for plain dirs and SSH_FX_BAD_MESSAGE for junctions — every
+ordinary Windows folder was refused). Raw SSH_FXP_STATUS now rides through
+`BrowserError::sftp_status`; the fake server answers per real-server flavor
+(Windows: plain→FAILURE, junction→BAD_MESSAGE; POSIX: plain→BAD_MESSAGE) so
+tests encode measured semantics, not desired ones. Changes: mod.rs,
+session.rs, transfer/remote_side.rs, fake.rs, types/browser.ts (additive
+optional field). New tests: plain-dir descent (the R3 regression), nested
+ancestor-junction no-loop, vanished-dir race tolerance, POSIX never-probes
+(counter), N1 RSA-key fail-safe pair.
+
+All seven gates re-run against this tree (receipts refreshed in this
+directory):
+
+| Gate | Exit | Result |
+|---|---|---|
+| `CARGO_INCREMENTAL=0 cargo test` | 0 | **224 passed, 0 failed** (first attempt, no W6 flake) |
+| `cargo clippy --all-targets -- -D warnings` | 0 | clean |
+| `cargo fmt --check` | 0 | clean |
+| `npx tsc --noEmit` | 0 | clean |
+| `npx vitest run` | 0 | 180/180 |
+| `npx playwright test` | 0 | 54 passed |
+| `npm run build` | 0 | dist built |
+
+cargo audit is unchanged from the B7 receipt (no dependency changes in
+B6-R). Windows runtime confirmation (room-6 folder pull with a junction)
+remains the pre-release smoke — handoff gap 13.
 
 ## Initial M1 completion (continuation 3, superseded by the table above)
 

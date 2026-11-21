@@ -98,6 +98,19 @@ pub struct BrowserError {
     /// Present only for `kind == exists`: the colliding names.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub names: Option<Vec<String>>,
+    /// Raw SSH_FXP_STATUS code when the error came from an SFTP status
+    /// packet (B6-R: `ErrorKind` merges SSH_FX_FAILURE and SSH_FX_BAD_MESSAGE
+    /// into `other`, but the Windows junction probe must tell them apart —
+    /// Win32-OpenSSH answers generic FAILURE for a PLAIN directory and
+    /// BAD_MESSAGE for a reparse point). Values per draft-ietf-secsh-filexfer:
+    /// 2=NO_SUCH_FILE, 3=PERMISSION_DENIED, 4=FAILURE, 5=BAD_MESSAGE,
+    /// 8=OP_UNSUPPORTED.
+    #[serde(
+        default,
+        rename = "sftpStatus",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub sftp_status: Option<u32>,
 }
 
 impl BrowserError {
@@ -105,6 +118,7 @@ impl BrowserError {
         Self {
             message: message.into(),
             kind,
+            sftp_status: None,
             names: None,
         }
     }
@@ -114,7 +128,14 @@ impl BrowserError {
             message: guards::exists_message(&names, folder, partial),
             kind: ErrorKind::Exists,
             names: Some(names),
+            sftp_status: None,
         }
+    }
+
+    /// Attach the raw SSH_FXP_STATUS code (B6-R probe disambiguation).
+    pub fn with_sftp_status(mut self, code: u32) -> Self {
+        self.sftp_status = Some(code);
+        self
     }
 
     pub fn unsupported(message: impl Into<String>) -> Self {

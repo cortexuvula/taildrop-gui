@@ -385,6 +385,7 @@ fn typed_or_recorded<E: std::fmt::Display>(
                 message: message.clone(),
                 kind,
                 names: None,
+                sftp_status: None,
             };
         }
     }
@@ -394,6 +395,7 @@ fn typed_or_recorded<E: std::fmt::Display>(
         message,
         kind,
         names: None,
+        sftp_status: None,
     }
 }
 
@@ -550,6 +552,7 @@ pub async fn connect(params: ConnectParams) -> Result<RusshTransport, BrowserErr
                     message: message.clone(),
                     kind,
                     names: None,
+                    sftp_status: None,
                 });
             }
         }
@@ -638,6 +641,7 @@ fn sftp_err(op: &str, e: SftpClientError) -> BrowserError {
                 _ => classify_message(&msg),
             };
             BrowserError::new(kind, format!("{op}: {msg}"))
+                .with_sftp_status(status.status_code as u32)
         }
         SftpClientError::Timeout => BrowserError::new(
             ErrorKind::Unreachable,
@@ -1107,4 +1111,103 @@ mod tests {
         let none = FileAttributes::default();
         assert!(node_from("x".into(), &none).is_unknown);
     }
+    /// N1 (B7 follow-up): with the russh `rsa` feature dropped
+    /// (RUSTSEC-2023-0071, decisions.md #6), both RSA key-file shapes
+    /// fail SAFE through the auth key-file loop — no panic, no silent
+    /// misbehavior:
+    /// - OpenSSH-format RSA still DECODES (ssh-key parses it under `alloc`,
+    ///   not `rsa`), hits the `Algorithm::Rsa` detection in the loop and
+    ///   yields the NAMED typed Unsupported error.
+    /// - Legacy PEM RSA does NOT decode (russh keys format layer returns
+    ///   UnsupportedKeyType with the feature off) → the loop's load-error
+    ///   `continue` → the generic Auth error.
+    ///
+    /// Keys below are throwaway test-only material (2048-bit, no passphrase,
+    /// generated for this fixture; authenticate nothing).
+    #[test]
+    fn rsa_key_files_fail_safe_without_the_rsa_feature() {
+        let dir = std::env::temp_dir().join(format!("m1-n1-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+
+        // 1. OpenSSH-format RSA: decodes, and the detection predicate that
+        //    drives the typed Unsupported error fires.
+        let ossh_path = dir.join("id_rsa_ossh");
+        std::fs::write(&ossh_path, OPENSSH_FORMAT_RSA_TEST_KEY).unwrap();
+        let parsed = keys::load_secret_key(&ossh_path, None)
+            .expect("OpenSSH-format RSA still decodes without the rsa feature");
+        assert!(
+            matches!(parsed.algorithm(), keys::Algorithm::Rsa { .. }),
+            "Algorithm::Rsa detection must fire → typed Unsupported path"
+        );
+
+        // 2. Legacy PEM RSA: load FAILS (UnsupportedKeyType with the feature
+        //    off) → the auth loop `continue`s → generic Auth error, no panic.
+        let pem_path = dir.join("id_rsa_pem");
+        std::fs::write(&pem_path, LEGACY_PEM_RSA_TEST_KEY).unwrap();
+        let err = keys::load_secret_key(&pem_path, None)
+            .expect_err("legacy PEM RSA must NOT decode without the rsa feature");
+        assert!(
+            err.to_string().to_lowercase().contains("unsupported")
+                || err.to_string().to_lowercase().contains("rsa"),
+            "unexpected load error: {err}"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    const OPENSSH_FORMAT_RSA_TEST_KEY: &str = "-----BEGIN OPENSSH PRIVATE KEY-----
+b3BlbnNzaC1rZXktdjEAAAAABG5vbmUAAAAEbm9uZQAAAAAAAAABAAABFwAAAAdzc2gtcn
+NhAAAAAwEAAQAAAQEAvlcbDHN9FOYVbs9NEzX/JKUQGcvil3Sa/JOQMcJDoUcEdzHVxxdZ
+WztDGy+ctLJt9NwRcXQwM/seYSSSQGX2Up3rQ6HgVCH5xVINrFBgTZC2ZLMS84OAl/lDMB
+U7Mx5ItdLVHlo8+La7DJzPsxcoPvOwKBkowViQT2ROB+gf94ujaitfWEMtFKEZmYrKnNyg
+UeRR15gi+Onx+L8E/Q6ZZgoqoFFITrPCmmP+xVjaH0oq2jYtrOM7dt1NazbeSxElFa6hQa
+nAI5Qk2nydsLmNr2AEQKYSRlI71CqRdWcpzVghRZOhszMNA2fec7AlI0Q1Ye7VoEuhpkBY
+aW6zwnQETQAAA8A0qNSnNKjUpwAAAAdzc2gtcnNhAAABAQC+VxsMc30U5hVuz00TNf8kpR
+AZy+KXdJr8k5AxwkOhRwR3MdXHF1lbO0MbL5y0sm303BFxdDAz+x5hJJJAZfZSnetDoeBU
+IfnFUg2sUGBNkLZksxLzg4CX+UMwFTszHki10tUeWjz4trsMnM+zFyg+87AoGSjBWJBPZE
+4H6B/3i6NqK19YQy0UoRmZisqc3KBR5FHXmCL46fH4vwT9DplmCiqgUUhOs8KaY/7FWNof
+SiraNi2s4zt23U1rNt5LESUVrqFBqcAjlCTafJ2wuY2vYARAphJGUjvUKpF1ZynNWCFFk6
+GzMw0DZ95zsCUjRDVh7tWgS6GmQFhpbrPCdARNAAAAAwEAAQAAAQAvHGYwfcE+0/gIFj0w
+fRPqoQRMLj+mVxEpZOiyuC9/EpHTYr1T6r6OKyvf5bf2rZcznOigWS65HvWU+7VLRTFjn3
+ykn8Njb4lfwoBp3vcHG8NZR01wgmLouqRbmVWuwFck0cs4GQOwV6ISbBmobRnkAvLd6eRB
+fscxL1V09Yo7/aDFNjQDrYRThDpV5BqWlXvwRZi1V+NrUBIcWbehFFKt9Dy3aBhx06hHb5
+8zjpE56aSCViWhyHm7MBSoeVojefpDpr7Jakix0/epkYYRduK119KbCzqTA3tEse1DtuqC
+IGH5uIVl1fe+nh6lfUkPnf6BT5Vy0KL9rpZQMR0MWRttAAAAgQD4Rq2GXZxvxvn0oj6eEo
+edKweoME5cLV3h3QB+dHb6/aAOOBjmsxjqPLWWAtElgAT8jdTEyLd8i6nWHCpl6isPwsyk
+bEtIog7z1wv4Rvdome45or08gJF01XoGI3YgraNb4lHWWSIigyQTPL27wBCl3j9jaj7Nfb
+/b7W3pIELoXAAAAIEA+x0goQfjmP4TH0FLegVhjDAQfx6fj6jFp/2H23T8Tn1x1BfsZtXT
+/1goRZii6z3v0AWSGiQ46pEHoFcDUpWQd/qgtGXVrknioABWN6CSaRTh5M05chThAfuSup
+qmMUqF60rq3u/V4hGFkT9ArRmRkF/Xblw0aDlIlm9Al7Pp2w8AAACBAMILP0c1gQU+ncs3
+vsdPFmmooQFgB6qy5dlCcUGSHAy5G7p8Yw1pFyfqN/UIcoABC5iN7VpJJBkA0ytPenno2w
+AwI5ZGq+ccZL9dBvuAzj167564GC6nTSzm64w2FNk/Bfln+S8d5knaQq2bhkv53hs16wtA
+JNTbjxt2+j8BtNrjAAAACm0xLW4xLXRlc3Q=
+-----END OPENSSH PRIVATE KEY-----";
+
+    const LEGACY_PEM_RSA_TEST_KEY: &str = "-----BEGIN RSA PRIVATE KEY-----
+MIIEowIBAAKCAQEAlecraqYTmFr2/D/mNe87sTPVDjZxo8ADBueFuwJMvscs8kBb
+3EajVwWkfpZQHF1XXUFlal3jHwHRDJWZJCJm6/Iac72MSVKfn2i877lOILs5CzbK
+zdxBlw1aG11pONfYqOHlmyRLiVXiFaHoDFqCkKNtXrf2ksqFd7so5b+nV9Evv14t
+d/uQTJhYFLTP/fBZYxAeY8cf32Vv7cb/JxNUxtzYbopkyI8nvVM6e7B13W/bceyg
+C12OkTek8s8uEyO3cWubmIBi4U+AZ9AtIdM/46SpZ7V7AfmnvyBUH+kLJ95Q9wLM
+fiSxlhddonxZlQcFd3W9npR9TZrAtLMN8a42cQIDAQABAoIBAFVaXzpGffnOMbvH
+lok3QsHPRYzmKyaV+iNASMEGujQWrNzzEFsITZELQXJinBLKgygySFCcTOom2qVT
+uPL+M6Q9Ihqs3ugRB5p4xLuqw3WXpQ9hj3BP7XjYvWm/cl5PaKogleAUdn4oTKcM
+nVgLYTSCGZBJJzjF3+EgzFSlH9+7+VlDa4uTRUbtViKKWZyN55qbu2xtARXS48D5
+y3ukgCAaFjxASZdv+bZUc4hQzfyAycAI5prZ1tQVs811EGyQMlubIJLvGvdzzOG7
+Cjmp423+LR8I+j3nSzsjPQmEZqh62zOxIV8ceWkziA4gigNv8xlTJb/l0lUIMJlT
+1LH6itECgYEAx2WSVQaDPmwychheWQ8niGfG1oQIs4/noka9a61Ksrz7l6WUPGBr
+CV/9XOmDQ3K6zrO/1qbURgjCkEHypLePsDyXQTEFFgMUAGJiWd/ZOe7TtPdy9RJw
+XVb0cbY9D87ytebOXlg2SvehChurggJ4A/CdZV/bpv4DG6Q7rk+ecFsCgYEAwHTS
+GLe6Vni7+XhJbc1kRTEoeXWZEKohV7zzz907LLIGa4XElhBtiy5XTp+68WY+IZCv
+vvd7P9IpO9r6WjPPv3LdNyfK5Pw08HcXaa+opvuVTbJhB3djP8xCqNXyAsckRjKB
+EQnDiLCKIVo/PM28bm68eH6+2+OtAqf+iRylriMCgYAJ/qBgHKx1c4zvxSLtieHs
+Z29DD2k0PvFYY/1YqV4GKYze5BDTGe4jkSktABNxTQ3qEH58Lu6S+Btwia207fKI
+3fCi9ucPXGYjQss1QBAuZDc+aezcNell9FbaYE0dPr1Rutj7R6apCVKMJCjrol4L
+rILnMu/apf7X4tqO+TSy4wKBgQCbZXhC9w7hRWlaPNLlcwN0jwXEVLz75LM5edtP
+yq0+IJzocsFR/f/FcuySEo1K36hpR79wLbn5xUMADoc5ED69sgyGvX2pOS+xvidM
+ccZ21gsvCkooUjD0UYS9eMqJjaxvddYbIMwecZWG6qzG9sQgUw+hJ44KVKLc0zLG
+GTh6CwKBgFmJ0tIBN0a4sQe5H9qeYfSPbpeJ1sIL+olscXP0+q+YwsI9N8MrMGqM
+ZUL/jkhM15B4OWsgkIS9a2a6+670bW1uL5660HbtwSxvAt7VhCa6IsULxDyx0Jx4
+Wdlj8alBZoITtFBHPGIPvHqqAjV8fNbDomLxImXrVYxsgRa3DssZ
+-----END RSA PRIVATE KEY-----";
 }

@@ -32,6 +32,7 @@ use std::collections::HashMap;
 use std::io;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -120,11 +121,20 @@ pub struct FakeConfig {
     /// the client-visible wire bytes are identical to production. The name
     /// does not resolve (no such file), exactly like a lossy guess.
     pub non_utf8_names: bool,
-    /// Hostility (B6): READLINK on any directory whose name contains
-    /// "junction" fails with Failure — the fake's stand-in for Windows
-    /// OpenSSH's BadMessage on a junction (M0 §5). Dirs otherwise answer
-    /// NoSuchFile ("clean not-a-link") and real symlinks answer Ok.
+    /// Hostility (B6/B6-R): with a Windows banner, READLINK on any directory
+    /// whose name contains "junction" answers BAD_MESSAGE — exactly what
+    /// Win32-OpenSSH returns for IO_REPARSE_TAG_MOUNT_POINT (EINVAL →
+    /// SSH2_FX_BAD_MESSAGE; M0 room-6 evidence). Plain dirs/files answer
+    /// per-flavor WITHOUT this knob (see readlink handler): Windows →
+    /// generic FAILURE, POSIX → BAD_MESSAGE.
     pub simulate_junctions: bool,
+    /// Instrumentation (B6-R): counts READLINK calls whose target is a
+    /// directory — the POSIX-never-probes assertion reads this.
+    pub dir_readlinks: Arc<AtomicU64>,
+    /// Hostility (B6-R): READLINK on the file/dir with this name answers
+    /// NO_SUCH_FILE even though it exists — a directory vanishing between
+    /// listing and probe (race tolerance).
+    pub vanish_readlink_for: Option<String>,
     /// Hostility (W3): the FIRST lstat of the file with this name reports a
     /// size `delta` bytes larger than reality; later lstats tell the truth —
     /// simulates a file changing between plan and stream (size-changed check).
@@ -152,6 +162,8 @@ impl FakeConfig {
             host_key_pem: HOST_KEY_PEM,
             non_utf8_names: false,
             simulate_junctions: false,
+            dir_readlinks: Arc::new(AtomicU64::new(0)),
+            vanish_readlink_for: None,
             lie_size_once: None,
             shrink_reads_for: None,
             fail_close: false,
@@ -171,6 +183,8 @@ impl FakeConfig {
             host_key_pem: HOST_KEY_PEM,
             non_utf8_names: false,
             simulate_junctions: false,
+            dir_readlinks: Arc::new(AtomicU64::new(0)),
+            vanish_readlink_for: None,
             lie_size_once: None,
             shrink_reads_for: None,
             fail_close: false,
@@ -835,24 +849,55 @@ impl russh_sftp::server::Handler for SftpHandler {
 
     async fn readlink(&mut self, id: u32, path: String) -> Result<Name, Self::Error> {
         let resolved = self.resolve(&path);
-        // B6 fixture: a "junction" dir answers Failure (the fake's BadMessage
-        // stand-in) even though it is a plain dir on disk.
-        if self.cfg.simulate_junctions
-            && resolved
-                .file_name()
-                .map(|n| n.to_string_lossy().contains("junction"))
-                .unwrap_or(false)
-            && resolved.is_dir()
+        // B6-R fixture — answers like the REAL servers, not like the probe
+        // wishes them to (R3: Win32-OpenSSH source walk + the reviewer's
+        // POSIX /usr/libexec/sftp-server measurements):
+        //   symlink                        → NAME (both flavors)
+        //   plain dir/file, Windows flavor → generic FAILURE
+        //     (fileio_readlink: ERROR_NOT_A_REPARSE_POINT 4390 is unmapped by
+        //      errno_from_Win32Error → errno_to_portable default → SSH2_FX_FAILURE)
+        //   plain dir/file, POSIX flavor   → BAD_MESSAGE (EINVAL)
+        //   junction (Windows + simulate_junctions + name contains "junction")
+        //                                    → BAD_MESSAGE (MOUNT_POINT → EINVAL)
+        //   missing path                   → NO_SUCH_FILE
+        if self
+            .cfg
+            .vanish_readlink_for
+            .as_ref()
+            .map(|n| {
+                resolved
+                    .file_name()
+                    .map(|f| f.to_string_lossy() == n.as_str())
+                    .unwrap_or(false)
+            })
+            .unwrap_or(false)
         {
-            return Err(StatusCode::Failure);
+            return Err(StatusCode::NoSuchFile);
         }
+        let windows_flavor = self.cfg.banner.contains("Windows");
         let target = match std::fs::read_link(&resolved) {
             Ok(t) => t,
-            // A plain dir/file is a CLEAN "not a link" — NoSuchFile, matching
-            // what the Windows-junction probe treats as safe to descend.
             Err(e) if e.kind() == io::ErrorKind::InvalidInput => {
-                return Err(StatusCode::NoSuchFile)
+                // Exists, not a symlink: a plain dir or file.
+                if resolved.is_dir() {
+                    self.cfg.dir_readlinks.fetch_add(1, Ordering::SeqCst);
+                    if windows_flavor
+                        && self.cfg.simulate_junctions
+                        && resolved
+                            .file_name()
+                            .map(|n| n.to_string_lossy().contains("junction"))
+                            .unwrap_or(false)
+                    {
+                        return Err(StatusCode::BadMessage);
+                    }
+                }
+                return Err(if windows_flavor {
+                    StatusCode::Failure
+                } else {
+                    StatusCode::BadMessage
+                });
             }
+            Err(e) if e.kind() == io::ErrorKind::NotFound => return Err(StatusCode::NoSuchFile),
             Err(e) => return Err(map_io(e)),
         };
         Ok(Name {
@@ -1656,6 +1701,10 @@ mod tests {
         std::fs::write(srv.root.join("real/inside.txt"), b"inside").unwrap();
         std::fs::create_dir(srv.root.join("junction-escape")).unwrap();
         std::fs::write(srv.root.join("junction-escape/outside.txt"), b"outside").unwrap();
+        // Ancestor-pointing junction NESTED inside a descended dir: if the
+        // probe ever followed it, the walk would loop to the depth cap
+        // instead of finishing — it must skip like any other reparse point.
+        std::fs::create_dir_all(srv.root.join("real/junction-back")).unwrap();
         std::os::unix::fs::symlink(srv.root.join("real"), srv.root.join("dirlink")).unwrap();
 
         let dst = temp_root("junc-dst");
@@ -1685,7 +1734,10 @@ mod tests {
         )
         .await
         .expect("windows pull succeeds");
-        assert_eq!(outcome.skipped, 2, "junction + dirlink skipped and counted");
+        assert_eq!(
+            outcome.skipped, 3,
+            "junction + nested ancestor junction + dirlink skipped and counted"
+        );
         assert_eq!(
             std::fs::read(dst.join("real/inside.txt")).unwrap(),
             b"inside"
@@ -1694,7 +1746,127 @@ mod tests {
             !dst.join("junction-escape").exists(),
             "junction never followed"
         );
+        assert!(
+            !dst.join("real/junction-back").exists(),
+            "ancestor junction never followed (no loop)"
+        );
         assert!(!dst.join("dirlink").exists(), "dir symlink never followed");
+        Box::new(t).close().await.unwrap();
+    }
+
+    /// B6-R REGRESSION: a PLAIN Windows directory answers READLINK with
+    /// generic SSH_FX_FAILURE (Win32-OpenSSH: ERROR_NOT_A_REPARSE_POINT 4390
+    /// is unmapped by errno_from_Win32Error, errno_to_portable defaults to
+    /// FAILURE). The probe must DESCEND — before B6-R it skipped these, so
+    /// Windows folder pulls copied nothing (R3 blocker). The fixture now
+    /// answers Failure for plain dirs, exactly like the real server.
+    #[tokio::test]
+    async fn windows_pull_descends_plain_dirs_answering_failure() {
+        let mut cfg = FakeConfig::openssh(temp_root("b6r-plain-srv"));
+        cfg.banner = "SSH-2.0-OpenSSH_for_Windows_8.1".to_string();
+        let srv = FakeServer::start(cfg).await;
+        std::fs::create_dir_all(srv.root.join("docs/reports")).unwrap();
+        std::fs::write(srv.root.join("docs/readme.md"), b"# hi").unwrap();
+        std::fs::write(srv.root.join("docs/reports/q3.txt"), b"numbers").unwrap();
+
+        let dst = temp_root("b6r-plain-dst");
+        let t = srv.connect(&temp_root("trustB6RP")).await;
+        let (emit, _p) = collector();
+        let outcome = transfer::run_copy(
+            &pull_req("/", dst.to_str().unwrap(), &["docs"]),
+            &Side::Remote {
+                transport: &t,
+                windows: true,
+            },
+            &Side::Local,
+            CancellationToken::new(),
+            emit,
+        )
+        .await
+        .expect("plain Windows dirs must descend");
+        assert_eq!(outcome.skipped, 0, "nothing may be skipped on a plain tree");
+        assert_eq!(std::fs::read(dst.join("docs/readme.md")).unwrap(), b"# hi");
+        assert_eq!(
+            std::fs::read(dst.join("docs/reports/q3.txt")).unwrap(),
+            b"numbers",
+            "nested plain dirs descend recursively"
+        );
+        assert!(stage_leftovers(&dst).is_empty());
+        Box::new(t).close().await.unwrap();
+    }
+
+    /// B6-R race tolerance: a directory that VANISHES between listing and
+    /// probe (NO_SUCH_FILE) is skipped + counted — never a hard error, never
+    /// a descend.
+    #[tokio::test]
+    async fn windows_pull_tolerates_dir_vanished_before_probe() {
+        let mut cfg = FakeConfig::openssh(temp_root("b6r-van-srv"));
+        cfg.banner = "SSH-2.0-OpenSSH_for_Windows_8.1".to_string();
+        cfg.vanish_readlink_for = Some("gone-dir".to_string());
+        let srv = FakeServer::start(cfg).await;
+        std::fs::create_dir_all(srv.root.join("gone-dir")).unwrap();
+        std::fs::write(srv.root.join("gone-dir/inner.txt"), b"x").unwrap();
+        std::fs::create_dir_all(srv.root.join("stays")).unwrap();
+        std::fs::write(srv.root.join("stays/keep.txt"), b"kept").unwrap();
+
+        let dst = temp_root("b6r-van-dst");
+        let t = srv.connect(&temp_root("trustB6RV")).await;
+        let (emit, _p) = collector();
+        let outcome = transfer::run_copy(
+            &pull_req("/", dst.to_str().unwrap(), &["gone-dir", "stays"]),
+            &Side::Remote {
+                transport: &t,
+                windows: true,
+            },
+            &Side::Local,
+            CancellationToken::new(),
+            emit,
+        )
+        .await
+        .expect("vanished dir is tolerated, not fatal");
+        assert_eq!(outcome.skipped, 1, "vanished dir skipped + counted");
+        assert!(!dst.join("gone-dir").exists());
+        assert_eq!(std::fs::read(dst.join("stays/keep.txt")).unwrap(), b"kept");
+        Box::new(t).close().await.unwrap();
+    }
+
+    /// B6-R: POSIX sources NEVER probe read_link on directories — the real
+    /// POSIX sftp-server answers BAD_MESSAGE (EINVAL) for plain dirs, so a
+    /// probing walker would refuse every folder. The fixture now encodes
+    /// that real answer; this pull must still copy the whole tree, and the
+    /// dir-readlink counter must stay at 0.
+    #[tokio::test]
+    async fn posix_pull_never_probes_dir_readlink() {
+        let cfg = FakeConfig::tailscale(temp_root("b6r-posix-srv"));
+        let probes = cfg.dir_readlinks.clone();
+        let srv = FakeServer::start(cfg).await;
+        std::fs::create_dir_all(srv.root.join("tree/sub")).unwrap();
+        std::fs::write(srv.root.join("tree/a.txt"), b"aaa").unwrap();
+        std::fs::write(srv.root.join("tree/sub/b.txt"), b"bbb").unwrap();
+
+        let dst = temp_root("b6r-posix-dst");
+        let t = srv.connect(&temp_root("trustB6RX")).await;
+        let (emit, _p) = collector();
+        let outcome = transfer::run_copy(
+            &pull_req("/", dst.to_str().unwrap(), &["tree"]),
+            &Side::Remote {
+                transport: &t,
+                windows: false,
+            },
+            &Side::Local,
+            CancellationToken::new(),
+            emit,
+        )
+        .await
+        .expect("POSIX pull succeeds without probing");
+        assert_eq!(outcome.skipped, 0);
+        assert_eq!(std::fs::read(dst.join("tree/a.txt")).unwrap(), b"aaa");
+        assert_eq!(std::fs::read(dst.join("tree/sub/b.txt")).unwrap(), b"bbb");
+        assert_eq!(
+            probes.load(Ordering::SeqCst),
+            0,
+            "POSIX sources must never readlink-probe directories"
+        );
         Box::new(t).close().await.unwrap();
     }
 

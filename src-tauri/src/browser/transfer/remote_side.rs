@@ -116,16 +116,30 @@ fn walk_node<'a>(
             return Ok(());
         }
         if st.is_dir {
-            // B6/A7 (Windows sources): junctions list as ORDINARY dirs and
-            // READLINK fails with BadMessage (M0 §5) — descending would copy
-            // data from outside the selected tree, or loop to the depth cap
-            // on an ancestor junction. Probe every dir: only a CLEAN
-            // "not a link" answer (NotFound) permits descent; anything else
-            // (Ok → dir symlink, other errors incl. BadMessage → reparse
-            // point or unknown) is skipped + counted, never followed.
+            // B6-R (Windows sources only; semantics verified against
+            // Win32-OpenSSH source in review R3 — raw SSH_FXP_STATUS carried
+            // through BrowserError::sftp_status because ErrorKind merges
+            // FAILURE and BAD_MESSAGE into `other`):
+            //   generic FAILURE (4) → PLAIN directory (fileio_readlink's
+            //     ERROR_NOT_A_REPARSE_POINT 4390 is unmapped by
+            //     errno_from_Win32Error, so errno_to_portable defaults to
+            //     SSH2_FX_FAILURE) → DESCEND.
+            //   BAD_MESSAGE (5) → junction / non-symlink reparse point
+            //     (IO_REPARSE_TAG_MOUNT_POINT → EINVAL; M0 room-6 evidence)
+            //     → skip + count, NEVER descend (would copy outside the
+            //     selected tree or loop on an ancestor junction).
+            //   NAME (Ok) → real directory symlink → skip + count (link
+            //     policy for Windows sources: never followed).
+            //   NO_SUCH_FILE (2) → dir vanished since listing → skip +
+            //     count (race tolerance).
+            //   anything else → fail closed: skip + count.
+            // POSIX sources NEVER probe: POSIX sftp-server answers
+            // BAD_MESSAGE (EINVAL) for plain dirs — the probe would refuse
+            // every folder — and POSIX lstat flags links reliably anyway.
             if windows {
+                const SSH_FX_FAILURE: u32 = 4;
                 match t.read_link(&path).await {
-                    Err(e) if e.kind == crate::browser::ErrorKind::Notfound => {}
+                    Err(e) if e.sftp_status == Some(SSH_FX_FAILURE) => {}
                     _ => {
                         b.push_skipped();
                         return Ok(());
