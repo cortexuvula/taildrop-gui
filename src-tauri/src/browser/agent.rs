@@ -45,10 +45,11 @@
 //!   remote shell (plugin invariant §4.9).
 
 use std::collections::HashMap;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use async_trait::async_trait;
+use tokio::sync::OnceCell;
 
 use crate::browser::transfer::{stage_dir_name, CopySink, FileMeta};
 use crate::browser::transport::{classify_message, SftpTransport};
@@ -542,8 +543,16 @@ pub async fn probe_agent_cap(t: &dyn SftpTransport) -> AgentCap {
 /// host/account"): a capability change is a server-admin event; the cache
 /// is invalidated on account change and on forget-host, and a runtime
 /// exec refusal falls back with a documented note (never a hard failure).
+///
+/// S-2 (Codie M2b review): entries are tokio `OnceCell`s, so "probe once
+/// per host/account" holds LITERALLY under concurrency — two concurrent
+/// first opens of the same host+user coalesce into exactly ONE bounded
+/// probe (`get_or_probe`'s `get_or_init` single-flight: the first caller
+/// runs it, late callers wait for and receive its result, never a second
+/// probe). A cancelled or panicked probe leaves the cell unfilled and the
+/// next caller retries — bounded, never poisoned.
 pub struct AgentCapCache {
-    inner: Mutex<HashMap<String, AgentCap>>,
+    inner: Mutex<HashMap<String, Arc<OnceCell<AgentCap>>>>,
 }
 
 impl AgentCapCache {
@@ -557,14 +566,42 @@ impl AgentCapCache {
         format!("{host}\u{0}{user}")
     }
 
+    /// The cached capability. `None` when unprobed OR while a probe is
+    /// still in flight — callers that must not wait (the delete-path gate)
+    /// read "no agent tier yet" and keep the SFTP path.
     pub fn get(&self, host: &str, user: &str) -> Option<AgentCap> {
         let map = self.inner.lock().unwrap_or_else(|p| p.into_inner());
-        map.get(&Self::key(host, user)).copied()
+        map.get(&Self::key(host, user))
+            .and_then(|cell| cell.get())
+            .copied()
     }
 
+    /// Test seam: force a cache entry. Production fills the cache ONLY
+    /// through `get_or_probe` (and the S-1 self-heal downgrade) — a forced
+    /// `put` must never stand in for a real probe result in shipped code.
+    #[cfg(test)]
     pub fn put(&self, host: &str, user: &str, cap: AgentCap) {
+        let cell = Arc::new(OnceCell::new());
+        let _ = cell.set(cap); // fresh, exclusively held: cannot fail
         let mut map = self.inner.lock().unwrap_or_else(|p| p.into_inner());
-        map.insert(Self::key(host, user), cap);
+        map.insert(Self::key(host, user), cell);
+    }
+
+    /// S-2 single-flight: the cached capability, probing EXACTLY ONCE. The
+    /// per-key cell is claimed under the short-lived map lock; the probe
+    /// itself runs with NO lock held. Concurrent callers for the same
+    /// host+user park on the cell and receive the winner's result — the
+    /// answer is identical whichever caller filled it. The probe is bounded
+    /// (`PROBE_WAIT`) and never errors.
+    pub async fn get_or_probe(&self, host: &str, user: &str, t: &dyn SftpTransport) -> AgentCap {
+        let cell = {
+            let mut map = self.inner.lock().unwrap_or_else(|p| p.into_inner());
+            Arc::clone(
+                map.entry(Self::key(host, user))
+                    .or_insert_with(|| Arc::new(OnceCell::new())),
+            )
+        };
+        *cell.get_or_init(|| probe_agent_cap(t)).await
     }
 
     /// Drop every cached capability for a host (account change / forget).
@@ -1450,6 +1487,26 @@ mod loopback_tests {
         t.refuse_exec = true;
         assert_eq!(probe_agent_cap(&t).await, AgentCap::SftpOnly);
         assert_eq!(t.exec_opens(), 0);
+    }
+
+    /// S-2 over the loopback harness: two concurrent first opens of the same
+    /// host+user share ONE real perl probe (exactly one exec open; the
+    /// waiter receives the winner's PerlExec), and a later call is a pure
+    /// cache hit — never a second probe.
+    #[tokio::test]
+    async fn loopback_get_or_probe_single_flight_one_exec() {
+        let cache = AgentCapCache::new();
+        let t = LoopTransport::new();
+        let (a, b) = tokio::join!(
+            cache.get_or_probe("h", "u", &t),
+            cache.get_or_probe("h", "u", &t),
+        );
+        assert_eq!(a, AgentCap::PerlExec);
+        assert_eq!(b, AgentCap::PerlExec);
+        assert_eq!(t.exec_opens(), 1, "concurrent first opens share one probe");
+        assert_eq!(cache.get_or_probe("h", "u", &t).await, AgentCap::PerlExec);
+        assert_eq!(t.exec_opens(), 1, "a cache hit never re-probes");
+        assert_eq!(cache.get("h", "u"), Some(AgentCap::PerlExec));
     }
 
     /// Full recv roundtrip through the production AgentSink: a folder with

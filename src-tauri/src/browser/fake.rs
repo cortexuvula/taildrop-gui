@@ -1192,6 +1192,7 @@ mod tests {
     // its methods on the concrete RusshTransport (trait must be in scope).
     // M2a: the remote→remote group also runs on ALL platforms (no local
     // side involved), so the shared engine helpers are ungated too.
+    use crate::browser::agent::{AgentCap, AgentCapCache, ExecChannel};
     use crate::browser::transfer::{self, Side, CHUNK};
     use crate::browser::transport::SftpTransport;
     use crate::browser::transport::{RemoteNode, RemoteReader, RemoteWriter};
@@ -1199,6 +1200,7 @@ mod tests {
     use async_trait::async_trait;
     use std::collections::BTreeMap;
     use std::sync::atomic::{AtomicU64, Ordering};
+    use std::time::Duration;
     use tokio_util::sync::CancellationToken;
 
     // ---- helpers ----
@@ -3307,6 +3309,200 @@ mod tests {
         Box::new(t).close().await.unwrap();
     }
 
+    // ---- S-2: single-flight probe doubles ----------------------------------
+
+    /// An `ExecChannel` whose `wait_exit` blocks on the test's gate — the
+    /// deterministic overlap the single-flight tests need (no sleeps): the
+    /// probe is INSIDE `wait_exit` from `started` until `gate` fires, and
+    /// then reports rc 2 (the bootstrap's positive signal → PerlExec).
+    struct GatedChannel {
+        gate: Arc<tokio::sync::Notify>,
+    }
+
+    #[async_trait]
+    impl ExecChannel for GatedChannel {
+        async fn write_all(&mut self, _data: &[u8]) -> Result<(), BrowserError> {
+            Ok(())
+        }
+        async fn read(&mut self, _buf: &mut [u8]) -> Result<usize, BrowserError> {
+            Ok(0) // EOF: the probe never reads the reply stream
+        }
+        async fn close_stdin(&mut self) -> Result<(), BrowserError> {
+            Ok(())
+        }
+        async fn wait_exit(&mut self, _timeout: Duration) -> Option<u32> {
+            self.gate.notified().await;
+            Some(2) // "perl ran and honored the framing contract"
+        }
+        fn stderr_tail(&self) -> String {
+            String::new()
+        }
+    }
+
+    /// Counting transport double for probe tests: `open_exec` increments the
+    /// counter, signals `started`, and returns the gated channel. Every SFTP
+    /// verb refuses — the probe lane must never touch SFTP.
+    struct GatedProbeTransport {
+        exts: std::collections::BTreeMap<String, String>,
+        exec_opens: Arc<std::sync::atomic::AtomicU64>,
+        started: Arc<tokio::sync::Notify>,
+        gate: Arc<tokio::sync::Notify>,
+    }
+
+    impl GatedProbeTransport {
+        fn new() -> Self {
+            Self {
+                exts: Default::default(),
+                exec_opens: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+                started: Arc::new(tokio::sync::Notify::new()),
+                gate: Arc::new(tokio::sync::Notify::new()),
+            }
+        }
+        fn exec_opens(&self) -> u64 {
+            self.exec_opens.load(std::sync::atomic::Ordering::SeqCst)
+        }
+        fn no_sftp<T>() -> Result<T, BrowserError> {
+            Err(BrowserError::other("no SFTP in the gated probe double"))
+        }
+    }
+
+    #[async_trait]
+    impl SftpTransport for GatedProbeTransport {
+        async fn realpath(&self, _path: &str) -> Result<String, BrowserError> {
+            Self::no_sftp()
+        }
+        async fn read_dir(
+            &self,
+            _path: &str,
+        ) -> Result<Vec<crate::browser::transport::RemoteNode>, BrowserError> {
+            Self::no_sftp()
+        }
+        async fn stat(
+            &self,
+            _path: &str,
+        ) -> Result<Option<crate::browser::transport::RemoteNode>, BrowserError> {
+            Self::no_sftp()
+        }
+        async fn lstat(
+            &self,
+            _path: &str,
+        ) -> Result<Option<crate::browser::transport::RemoteNode>, BrowserError> {
+            Self::no_sftp()
+        }
+        async fn mkdir(&self, _path: &str, _perm: u32) -> Result<(), BrowserError> {
+            Self::no_sftp()
+        }
+        async fn remove_file(&self, _path: &str) -> Result<(), BrowserError> {
+            Self::no_sftp()
+        }
+        async fn remove_dir(&self, _path: &str) -> Result<(), BrowserError> {
+            Self::no_sftp()
+        }
+        async fn rename(&self, _from: &str, _to: &str) -> Result<(), BrowserError> {
+            Self::no_sftp()
+        }
+        async fn posix_rename(&self, _from: &str, _to: &str) -> Result<(), BrowserError> {
+            Self::no_sftp()
+        }
+        async fn hardlink(&self, _from: &str, _to: &str) -> Result<(), BrowserError> {
+            Self::no_sftp()
+        }
+        async fn symlink(&self, _target: &str, _path: &str) -> Result<(), BrowserError> {
+            Self::no_sftp()
+        }
+        async fn read_link(&self, _path: &str) -> Result<String, BrowserError> {
+            Self::no_sftp()
+        }
+        async fn open_read(
+            &self,
+            _path: &str,
+        ) -> Result<Box<dyn crate::browser::transport::RemoteReader>, BrowserError> {
+            Self::no_sftp()
+        }
+        async fn create_exclusive(
+            &self,
+            _path: &str,
+            _perm: u32,
+        ) -> Result<Box<dyn crate::browser::transport::RemoteWriter>, BrowserError> {
+            Self::no_sftp()
+        }
+        async fn set_attrs(
+            &self,
+            _path: &str,
+            _mode: Option<u32>,
+            _mtime: Option<i64>,
+        ) -> Result<(), BrowserError> {
+            Self::no_sftp()
+        }
+        fn has_hardlink(&self) -> bool {
+            false
+        }
+        fn has_posix_rename(&self) -> bool {
+            false
+        }
+        fn extensions(&self) -> &std::collections::BTreeMap<String, String> {
+            &self.exts
+        }
+        async fn close(self: Box<Self>) -> Result<(), BrowserError> {
+            Ok(())
+        }
+        async fn open_exec(&self, _cmd: &str) -> Result<Box<dyn ExecChannel>, BrowserError> {
+            self.exec_opens
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            self.started.notify_one();
+            Ok(Box::new(GatedChannel {
+                gate: Arc::clone(&self.gate),
+            }))
+        }
+    }
+
+    /// S-2: two concurrent first opens of the same host+user run EXACTLY
+    /// ONE bounded probe (single-flight). Deterministic, no sleeps: the
+    /// gated double parks caller 1 inside the probe's `wait_exit`; caller 2
+    /// then parks on the in-flight cell (current-thread runtime: its task
+    /// yields only inside `get_or_init`'s wait), and releasing the gate
+    /// finishes the single real probe — both callers receive its result.
+    /// Pre-fix RED: the old open_side get/miss/probe/put shape ran TWO
+    /// probes here (m2c-red-s2-demo.txt receipt).
+    #[tokio::test]
+    async fn cap_cache_single_flights_concurrent_probes() {
+        let cache = Arc::new(AgentCapCache::new());
+        let t = Arc::new(GatedProbeTransport::new());
+        let started = Arc::clone(&t.started);
+        let gate = Arc::clone(&t.gate);
+
+        let c1 = Arc::clone(&cache);
+        let t1 = Arc::clone(&t);
+        let h1 = tokio::spawn(async move { c1.get_or_probe("h", "u", t1.as_ref()).await });
+        started.notified().await; // caller 1 is INSIDE the gated probe
+
+        let entered = Arc::new(tokio::sync::Notify::new());
+        let c2 = Arc::clone(&cache);
+        let t2 = Arc::clone(&t);
+        let e2 = Arc::clone(&entered);
+        let h2 = tokio::spawn(async move {
+            e2.notify_one();
+            c2.get_or_probe("h", "u", t2.as_ref()).await
+        });
+        entered.notified().await; // h2 has yielded INSIDE get_or_init's wait
+        assert_eq!(
+            cache.get("h", "u"),
+            None,
+            "an in-flight cell reads as None (never a guess)"
+        );
+
+        gate.notify_one(); // release the single real probe (rc 2 → PerlExec)
+        let (a, b) = (h1.await.unwrap(), h2.await.unwrap());
+        assert_eq!(a, AgentCap::PerlExec, "the winner got the probe result");
+        assert_eq!(b, AgentCap::PerlExec, "the waiter got the SAME result");
+        assert_eq!(
+            t.exec_opens(),
+            1,
+            "exactly one bounded probe under concurrency (S-2)"
+        );
+        assert_eq!(cache.get("h", "u"), Some(AgentCap::PerlExec));
+    }
+
     /// Tripwire for the M2b wiring (repo pattern): tier selection in
     /// run_copy, the once-per-host/account probe + cache in open_side, the
     /// invalidation pair, and the delete re-check — so a refactor can't
@@ -3321,12 +3517,17 @@ mod tests {
         assert!(tsrc.contains("AgentSink::open"), "agent tier wired");
         let csrc = include_str!("commands.rs");
         assert!(
-            csrc.contains("agent::probe_agent_cap(&transport)"),
-            "open_side probes the capability once per host/account"
+            csrc.contains(".get_or_probe(target, transport.user(), &transport)"),
+            "open_side probes the capability once per host/account THROUGH the single-flight cache (S-2)"
+        );
+        let asrc = include_str!("agent.rs");
+        assert!(
+            asrc.contains("get_or_init(|| probe_agent_cap(t))"),
+            "the cap cache coalesces concurrent probes into exactly one (S-2 single-flight)"
         );
         assert!(
-            csrc.contains("agent_caps.put("),
-            "the probe result is cached (no re-probe per copy)"
+            asrc.contains("pub fn classify_delete_failure"),
+            "the delete-helper failure mapping is pure + shape-pinned (S-3)"
         );
         assert_eq!(
             csrc.matches("agent_caps.invalidate_host").count(),

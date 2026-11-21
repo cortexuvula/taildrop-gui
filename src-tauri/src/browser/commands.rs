@@ -589,14 +589,17 @@ async fn open_side(
     // never probed here (the M3 C# agent is a separate lane). A refused or
     // failed probe leaves the host on the CURRENT SFTP tiers unchanged —
     // documented fallback, never a silent downgrade.
+    // S-2 (Codie M2b review): the probe is single-flighted INSIDE the cache
+    // (get_or_init-shaped) — concurrent first opens of the same host+account
+    // coalesce onto exactly one bounded probe and every caller receives the
+    // same result.
     let cap = if !is_posix(&os_hint, transport.flavor()) {
         AgentCap::SftpOnly
-    } else if let Some(cached) = state.agent_caps.get(target, transport.user()) {
-        cached
     } else {
-        let probed = agent::probe_agent_cap(&transport).await;
-        state.agent_caps.put(target, transport.user(), probed);
-        probed
+        state
+            .agent_caps
+            .get_or_probe(target, transport.user(), &transport)
+            .await
     };
     transport.set_agent_cap(cap);
     Ok(OwnedSide::Remote(Box::new(OwnedRemote {
