@@ -73,8 +73,8 @@ pub enum PlaceAction {
 
 /// The decision matrix. `merge_allowed` is false at nesting depth ≥ 512
 /// (plugin: `depth < 512` on the merge branch, else conflict).
-// Consumed only by the Unix local engine (its decision-table tests are
-// #[cfg(unix)] too).
+/// Consumed only by the Unix local engine (its decision-table tests are
+/// `#[cfg(unix)]` too).
 #[cfg_attr(not(unix), allow(dead_code))]
 pub fn place_action(
     outcome: RenameOutcome,
