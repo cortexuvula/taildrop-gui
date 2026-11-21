@@ -353,6 +353,20 @@ export function TwoPaneView({ seedPeer }: TwoPaneViewProps) {
       }
       const srcTarget = src.loadedTarget || src.target;
       const dstTarget = dst.loadedTarget || dst.target;
+      // S-3 (Codie M2a): instant UI mirror of the engine's same-host-two-
+      // account refusal — one connection can't be two accounts. The engine
+      // preflight (transfer/mod.rs) + queue row stay the authoritative path.
+      if (
+        srcTarget === dstTarget &&
+        srcTarget !== LOCAL_TARGET &&
+        (src.loadedUser ?? null) !== (dst.loadedUser ?? null)
+      ) {
+        notice(
+          `${nameFor(srcTarget)} is shown as two different accounts (${src.loadedUser ?? ""} and ${dst.loadedUser ?? ""}) — a copy needs one account for both sides`,
+          true,
+        );
+        return;
+      }
       // M2a: remote→remote is ALLOWED — the engine streams it through the
       // app on two independent sessions (the M1 B5 mirror refusal is gone;
       // the server preflight still enforces same-host-two-account and

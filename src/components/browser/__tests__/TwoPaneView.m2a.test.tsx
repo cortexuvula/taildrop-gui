@@ -424,3 +424,54 @@ describe("M2a: known-hosts dialog", () => {
     expect(await within(dialog).findByTestId("known-hosts-empty")).toBeTruthy();
   });
 });
+
+// ---------------------------------------------------------------------------
+// 6. S-3 (M2b carry-forward): same-host-two-account copy refuses INSTANTLY
+//    in the UI again — the engine Account refusal (transfer/mod.rs) stays
+//    authoritative, this is only the pre-enqueue mirror.
+// ---------------------------------------------------------------------------
+
+describe("M2b S-3: same-host-two-account instant refusal", () => {
+  it("refuses in the status line without calling browser_copy", async () => {
+    render(<TwoPaneView seedPeer={null} />);
+    await expectPanesLoaded();
+
+    // Left pane: peer1 as account "u" (default listing mock).
+    await pickMachine("left", "peer-one");
+    await within(screen.getByTestId("pane-left")).findByText("r.txt");
+
+    // Right pane: the SAME host, but the listing now pins account "u2".
+    mockInvoke.mockImplementation((async (cmd: string, args?: Record<string, unknown>) => {
+      switch (cmd) {
+        case "browser_peers":
+          return [peer1, peer2];
+        case "browser_config":
+          return { hosts: {}, last: "" };
+        case "browser_ls":
+          if (args?.target === "peer1") {
+            return listing("/home/u", [["z.txt", "file"]], "u2", "/home/u2");
+          }
+          return lsFor(args?.target, args?.path);
+        case "browser_copy_jobs":
+          return [];
+        case "browser_copy":
+          return 1;
+        default:
+          return null;
+      }
+    }) as unknown as typeof invoke);
+    await pickMachine("right", "peer-one");
+    await within(screen.getByTestId("pane-right")).findByText("z.txt");
+
+    // Select in the left pane and copy → instant refusal, never enqueued.
+    focusPane("left");
+    fireEvent.click(within(screen.getByTestId("pane-left")).getByText("r.txt"));
+    fireEvent.keyDown(screen.getByTestId("browser-view"), { key: "c" });
+
+    const status = await screen.findByRole("status");
+    await waitFor(() =>
+      expect(status.textContent).toMatch(/two different accounts \(u and u2\)/),
+    );
+    expect(calledWith("browser_copy")).toHaveLength(0);
+  });
+});
