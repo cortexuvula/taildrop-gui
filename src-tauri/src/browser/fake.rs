@@ -112,6 +112,14 @@ pub struct FakeConfig {
     pub fail_writes_after: Option<u64>,
     /// Which embedded test host key the server presents.
     pub host_key_pem: &'static str,
+    /// Hostility (B3): every READDIR gains a synthetic entry named
+    /// "caf\u{FFFD}" — byte-for-byte what a real server's raw invalid-UTF-8
+    /// name (`caf\xe9`) becomes after russh-sftp's LOSSY client decode
+    /// (String::from_utf8_lossy). macOS libc refuses paths with invalid
+    /// UTF-8 (EILSEQ), so the fixture injects the post-decode form directly:
+    /// the client-visible wire bytes are identical to production. The name
+    /// does not resolve (no such file), exactly like a lossy guess.
+    pub non_utf8_names: bool,
 }
 
 impl FakeConfig {
@@ -127,6 +135,7 @@ impl FakeConfig {
             rename_replaces: true, // M0: Tailscale SSH REPLACED destinations
             fail_writes_after: None,
             host_key_pem: HOST_KEY_PEM,
+            non_utf8_names: false,
         }
     }
     /// macOS/Windows OpenSSH-like defaults (M0: refused replacing renames).
@@ -141,6 +150,7 @@ impl FakeConfig {
             rename_replaces: false,
             fail_writes_after: None,
             host_key_pem: HOST_KEY_PEM,
+            non_utf8_names: false,
         }
     }
 }
@@ -150,8 +160,6 @@ impl FakeConfig {
 pub struct FakeServer {
     pub addr: SocketAddr,
     pub root: PathBuf,
-    /// Base64 of the server host key's SSH wire blob — for tailscale
-    /// `sshHostKeys` cross-check tests.
     /// The server's host key in the REAL `tailscale status --json`
     /// sshHostKeys entry format: a full "<algorithm> <base64>" line
     /// (M0 evidence/fleet.json). B4 regression fixture.
@@ -669,6 +677,23 @@ impl russh_sftp::server::Handler for SftpHandler {
             let name = entry.file_name().to_string_lossy().to_string();
             let meta = std::fs::symlink_metadata(entry.path()).map_err(map_io)?;
             files.push(File::new(name, attrs_of(&meta)));
+        }
+        // B3 fixture: serve a lossy-decoded non-UTF-8 name (see the
+        // FakeConfig knob). Regular file, 17 bytes; resolves to nothing.
+        if self.cfg.non_utf8_names {
+            files.push(File::new(
+                "caf\u{FFFD}".to_string(),
+                FileAttributes {
+                    size: Some(17),
+                    uid: None,
+                    user: None,
+                    gid: None,
+                    group: None,
+                    permissions: Some(0o100644),
+                    atime: Some(1_700_000_000),
+                    mtime: Some(1_700_000_000),
+                },
+            ));
         }
         // Deterministic order (the client sorts, but stability helps diffs).
         files.sort_by(|a, b| a.filename.cmp(&b.filename));
@@ -1282,6 +1307,73 @@ mod tests {
         let names: Vec<&str> = l.entries.iter().map(|e| e.name.as_str()).collect();
         assert_eq!(names, vec!["good.txt"]);
         assert_eq!(l.path, "/");
+        Box::new(t).close().await.unwrap();
+    }
+
+    /// B3: a raw non-UTF-8 name served through the lossy decode must be
+    /// skipped and counted exactly once — never rendered, never actionable.
+    #[tokio::test]
+    async fn listing_skips_non_utf8_name_exactly_once() {
+        let mut cfg = FakeConfig::tailscale(temp_root("nu8list"));
+        cfg.non_utf8_names = true;
+        let srv = FakeServer::start(cfg).await;
+        std::fs::write(srv.root.join("good.txt"), b"g").unwrap();
+        let t = srv.connect(&temp_root("trustNU8L")).await;
+        let l = listing::list_remote(&t, "/", "", "fakeuser").await.unwrap();
+        let names: Vec<&str> = l.entries.iter().map(|e| e.name.as_str()).collect();
+        assert_eq!(names, vec!["good.txt"]);
+        assert_eq!(l.skipped, 1);
+        assert!(!names.iter().any(|n| n.contains('\u{FFFD}')));
+        Box::new(t).close().await.unwrap();
+    }
+
+    /// B3 + W3: remote→local PULL through the real LocalSink — the walker
+    /// skips the lossy-decoded name (counted exactly once in the outcome),
+    /// copies the rest with fidelity, and no U+FFFD name materializes at
+    /// the destination.
+    #[tokio::test]
+    async fn pull_skips_non_utf8_names_and_counts_them() {
+        let mut cfg = FakeConfig::tailscale(temp_root("nu8srv"));
+        cfg.non_utf8_names = true;
+        let srv = FakeServer::start(cfg).await;
+        // The knob injects the lossy name into every READDIR, so the walker
+        // meets it inside "sub" alongside a normal sibling.
+        std::fs::create_dir(srv.root.join("sub")).unwrap();
+        std::fs::write(srv.root.join("sub/keep.txt"), b"keep").unwrap();
+
+        let dst = temp_root("nu8dst");
+        let t = srv.connect(&temp_root("trustNU8W")).await;
+        let (emit, _p) = collector();
+        let outcome = transfer::run_copy(
+            &CopyRequest {
+                src_target: "fakehost".into(),
+                src_user: Some("fakeuser".into()),
+                src_dir: "/".into(),
+                dst_target: "local".into(),
+                dst_user: None,
+                dst_dir: dst.to_str().unwrap().to_string(),
+                names: vec!["sub".into()],
+                replace: false,
+            },
+            &Side::Remote {
+                transport: &t,
+                windows: false,
+            },
+            &Side::Local,
+            CancellationToken::new(),
+            emit,
+        )
+        .await
+        .expect("pull succeeds");
+        assert_eq!(outcome.skipped, 1, "lossy name counted exactly once");
+        assert_eq!(std::fs::read(dst.join("sub/keep.txt")).unwrap(), b"keep");
+        // The guessed name must not materialize anywhere in the destination.
+        for e in std::fs::read_dir(dst.join("sub")).unwrap().flatten() {
+            assert!(
+                !e.file_name().to_string_lossy().contains('\u{FFFD}'),
+                "no replacement-char name may be created"
+            );
+        }
         Box::new(t).close().await.unwrap();
     }
 

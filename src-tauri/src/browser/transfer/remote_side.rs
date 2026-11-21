@@ -27,7 +27,7 @@ use async_trait::async_trait;
 use tokio_util::sync::CancellationToken;
 
 use crate::browser::guards;
-use crate::browser::listing::safe_name;
+use crate::browser::listing::safe_remote_name;
 use crate::browser::transfer::place::{remote_tier, PlaceAction, RemoteTier};
 use crate::browser::transfer::plan::{CopyPlan, PlanBuilder, PlanItem, PlanKind, MAX_REMOTE_SIZE};
 use crate::browser::transfer::{join_remote, stage_dir_name, CopySink, ProgressReporter, CHUNK};
@@ -128,7 +128,9 @@ fn walk_node<'a>(
             let raw = t.read_dir(&path).await?;
             let mut children: Vec<_> = Vec::with_capacity(raw.len());
             for c in raw {
-                if safe_name(&c.name) {
+                // B3: remote names — U+FFFD means the lossy decode guessed;
+                // skipped and counted exactly once, never copied.
+                if safe_remote_name(&c.name) {
                     children.push(c);
                 } else {
                     b.push_skipped();
@@ -577,7 +579,7 @@ impl<'a> RemoteSink<'a> {
             let src_path = self.staged(&staged_rel);
             let children = self.t.read_dir(&src_path).await?;
             for c in children {
-                if !safe_name(&c.name) {
+                if !safe_remote_name(&c.name) {
                     continue;
                 }
                 let child_rel = format!("{staged_rel}/{}", c.name);
@@ -648,7 +650,7 @@ impl<'a> RemoteSink<'a> {
                 Err(_) => return,
             };
             for e in entries {
-                if !safe_name(&e.name) {
+                if !safe_remote_name(&e.name) {
                     continue;
                 }
                 let child = join_remote(&path, &e.name);

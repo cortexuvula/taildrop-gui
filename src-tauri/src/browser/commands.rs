@@ -1070,7 +1070,9 @@ async fn remote_delete_one(
         return t.remove_file(path).await;
     }
     for child in t.read_dir(path).await? {
-        if !listing::safe_name(&child.name) {
+        // B3: remote rule — a lossy-decoded (U+FFFD) name is a guess; refuse
+        // the whole delete rather than act on or around it.
+        if !listing::safe_remote_name(&child.name) {
             return Err(BrowserError::new(
                 ErrorKind::Denied,
                 format!(

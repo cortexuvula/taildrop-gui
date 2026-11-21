@@ -2,11 +2,15 @@
 //! `Listing` wire shape the panes render. Two safety rules carried from the
 //! plugin here (report §4.8 superseded for the text-forgery class by binary
 //! SFTP attrs, but these remain):
-//!   - names that cannot be read safely (control chars, empty, non-UTF-8)
-//!     are SKIPPED and COUNTED, never rendered and never guessed (§4.16,
-//!     M0: russh-sftp filenames are UTF-8 String, so a non-UTF-8 remote name
-//!     never becomes a corrupt Entry — it's skipped at the transport/listing
-//!     boundary and counted exactly once).
+//!   - names that cannot be read safely are SKIPPED and COUNTED, never
+//!     rendered and never guessed (§4.16). IMPORTANT (B3): russh-sftp
+//!     decodes remote filenames LOSSILY (`String::from_utf8_lossy`,
+//!     buf.rs:20-24) — a raw non-UTF-8 name arrives as U+FFFD replacements,
+//!     NOT as an error. A remote name containing U+FFFD is therefore a
+//!     GUESS (the true bytes are unrecoverable, and two distinct raw names
+//!     can collapse into one); acting on it would send `ef bf bd` back to
+//!     the server and could hit a different file. `safe_remote_name`
+//!     rejects it at every remote boundary and it is counted exactly once.
 //!   - directory symlinks resolve to `kind: dir` so Enter opens them like
 //!     folders (bounded by MAX_LINK_PROBES; §8 "start with links-as-files"
 //!     is upgraded here to a bounded follow since it's cheap and matches the
@@ -28,6 +32,15 @@ pub fn safe_name(name: &str) -> bool {
         && name != ".."
         && !name.contains('/')
         && guards::control_char_problem(name).is_none()
+}
+
+/// Remote-only extension of [`safe_name`] (B3): any U+FFFD means the name
+/// came through russh-sftp's lossy decode — the real bytes are unknown and
+/// the name is a guess. Skip + count exactly once; never actionable.
+/// (A server literally sending U+FFFD is indistinguishable from the lossy
+/// case — treating both as unsafe is the fail-closed direction.)
+pub fn safe_remote_name(name: &str) -> bool {
+    safe_name(name) && !name.contains('\u{FFFD}')
 }
 
 fn mtime_of(sys: &std::fs::Metadata) -> i64 {
@@ -188,7 +201,7 @@ pub async fn list_remote(
     let mut link_probes = 0usize;
     let mut seen = std::collections::HashSet::new();
     for node in nodes {
-        if !safe_name(&node.name) {
+        if !safe_remote_name(&node.name) {
             if node.name != "." && node.name != ".." {
                 skipped += 1;
             }
@@ -346,6 +359,26 @@ mod tests {
             assert_eq!(link.kind, EntryKind::Dir, "dir symlink opens like a dir");
             let _ = std::fs::remove_dir_all(&dir);
         }
+    }
+
+    #[test]
+    fn safe_remote_name_rejects_the_lossy_replacement_char() {
+        // B3: russh-sftp decodes raw bytes 63 61 66 e9 as "caf\u{FFFD}".
+        assert!(!safe_remote_name("caf\u{FFFD}"));
+        assert!(!safe_remote_name("\u{FFFD}"));
+        assert!(!safe_remote_name("a\u{FFFD}b"));
+        // Ordinary unicode names stay safe (U+FFFD is the ONLY extra reject).
+        assert!(safe_remote_name("café"));
+        assert!(safe_remote_name("报告.pdf"));
+        assert!(safe_remote_name("emoji-🎉.txt"));
+        // The LOCAL rule is unchanged: a literal U+FFFD is valid UTF-8 on
+        // disk, where the real bytes are known and never guessed.
+        assert!(safe_name("caf\u{FFFD}"));
+        // Everything safe_name rejects stays rejected.
+        assert!(!safe_remote_name(""));
+        assert!(!safe_remote_name(".."));
+        assert!(!safe_remote_name("a/b"));
+        assert!(!safe_remote_name("a\nb"));
     }
 
     fn tempdir(tag: &str) -> PathBuf {
