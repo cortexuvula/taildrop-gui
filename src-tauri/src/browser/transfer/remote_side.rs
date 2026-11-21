@@ -846,3 +846,262 @@ pub fn extensions_summary(exts: &BTreeMap<String, String>) -> String {
         .collect::<Vec<_>>()
         .join(",")
 }
+
+#[cfg(test)]
+mod tests {
+    //! Platform-neutral remote-side coverage: source-walk probe semantics
+    //! (B6-R), RemoteSink staging/placement, and a full stream_plan
+    //! roundtrip. These drive ONLY the fake SFTP server — every filesystem
+    //! effect lands inside the fixture's temp root — so they also run on
+    //! Windows, where the Unix-only local engine (local_side.rs is
+    //! `#[cfg(unix)]`, callers fail closed) makes the run_copy-based fake.rs
+    //! tests inapplicable.
+
+    use super::*;
+    use crate::browser::fake::{temp_root, write_temp_key, FakeConfig, FakeServer};
+    use crate::browser::STAGE_PREFIX;
+    use std::sync::Arc;
+
+    fn noop_emit() -> Arc<dyn Fn(u8, String, String) + Send + Sync> {
+        Arc::new(|_pct, _rate, _file| ())
+    }
+
+    /// Staging dirs (anywhere one level under `dir`) that survived — the
+    /// cleanup invariant says this must be empty after `sink.remove()`.
+    fn stage_leftovers(dir: &std::path::Path) -> Vec<String> {
+        std::fs::read_dir(dir)
+            .map(|rd| {
+                rd.filter_map(|e| e.ok())
+                    .map(|e| e.file_name().to_string_lossy().to_string())
+                    .filter(|n| n.starts_with(STAGE_PREFIX))
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// B6-R probe semantics at the PLAN level (all platforms): plain Windows
+    /// dirs answering generic SSH_FX_FAILURE descend recursively; junctions
+    /// (BAD_MESSAGE) and vanished dirs (NO_SUCH_FILE) are skipped + counted,
+    /// never descended — without needing a local sink.
+    #[tokio::test]
+    async fn windows_plan_probe_descends_plain_dirs_skips_reparse_and_vanished() {
+        let mut cfg = FakeConfig::openssh(temp_root("planprobe-srv"));
+        cfg.banner = "SSH-2.0-OpenSSH_for_Windows_8.1".to_string();
+        cfg.simulate_junctions = true;
+        cfg.vanish_readlink_for = Some("gone-dir".to_string());
+        let srv = FakeServer::start(cfg).await;
+        std::fs::create_dir_all(srv.root.join("real/nested")).unwrap();
+        std::fs::write(srv.root.join("real/inside.txt"), b"inside").unwrap();
+        std::fs::write(srv.root.join("real/nested/deep.txt"), b"deep").unwrap();
+        std::fs::create_dir(srv.root.join("junction-escape")).unwrap();
+        std::fs::write(srv.root.join("junction-escape/outside.txt"), b"outside").unwrap();
+        std::fs::create_dir(srv.root.join("gone-dir")).unwrap();
+
+        // Explicit fixture key: OpenSSH-flavor auth never falls back to
+        // none-auth, so keyless connect() would depend on ambient developer
+        // credentials that do not exist on CI runners.
+        let (key, _g) = write_temp_key("planprobe");
+        let t = srv
+            .connect_as(&temp_root("trustPLANPROBE"), "fakeuser", &[key])
+            .await;
+        let plan = build_plan(
+            &t,
+            "/",
+            &[
+                "real".to_string(),
+                "junction-escape".to_string(),
+                "gone-dir".to_string(),
+            ],
+            true,
+        )
+        .await
+        .expect("plan builds");
+        let rels: Vec<&str> = plan.items.iter().map(|i| i.rel.as_str()).collect();
+        assert_eq!(
+            rels,
+            vec![
+                "real",
+                "real/inside.txt",
+                "real/nested",
+                "real/nested/deep.txt"
+            ],
+            "plain dirs answering FAILURE descend; junction/vanished never do"
+        );
+        assert_eq!(
+            plan.skipped, 2,
+            "junction + vanished dir skipped and counted, never descended"
+        );
+        assert!(
+            !rels.iter().any(|r| r.contains("outside")),
+            "junction contents never enter the plan"
+        );
+        assert_eq!(plan.total, 10);
+        Box::new(t).close().await.unwrap();
+    }
+
+    /// B6-R: POSIX sources NEVER readlink-probe directories (a real POSIX
+    /// sftp-server answers BAD_MESSAGE for plain dirs — probing would refuse
+    /// every folder). Plan-level twin of the fake.rs pull test, running on
+    /// all platforms.
+    #[tokio::test]
+    async fn posix_plan_never_probes_dir_readlink() {
+        let cfg = FakeConfig::tailscale(temp_root("planposix-srv"));
+        let probes = cfg.dir_readlinks.clone();
+        let srv = FakeServer::start(cfg).await;
+        std::fs::create_dir_all(srv.root.join("tree/sub")).unwrap();
+        std::fs::write(srv.root.join("tree/a.txt"), b"aaa").unwrap();
+        std::fs::write(srv.root.join("tree/sub/b.txt"), b"bbb").unwrap();
+        let t = srv.connect(&temp_root("trustPLANPOSIX")).await;
+        let plan = build_plan(&t, "/", &["tree".to_string()], false)
+            .await
+            .expect("plan builds");
+        let rels: Vec<&str> = plan.items.iter().map(|i| i.rel.as_str()).collect();
+        assert_eq!(
+            rels,
+            vec!["tree", "tree/a.txt", "tree/sub", "tree/sub/b.txt"]
+        );
+        assert_eq!(plan.skipped, 0);
+        assert_eq!(plan.total, 6);
+        assert_eq!(
+            probes.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "POSIX sources must never readlink-probe directories"
+        );
+        Box::new(t).close().await.unwrap();
+    }
+
+    /// RemoteSink staging + tier placement driven directly (no local side):
+    /// exclusive stage creation, planted-lookalike refusal, staged writes
+    /// with attrs, hardlink-tier file placement, rename-tier dir placement,
+    /// and cleanup — on all platforms.
+    #[tokio::test]
+    async fn remote_sink_stages_exclusively_places_and_cleans() {
+        let srv = FakeServer::start(FakeConfig::tailscale(temp_root("sink-srv"))).await;
+        std::fs::create_dir_all(srv.root.join("dst")).unwrap();
+        let t = srv.connect(&temp_root("trustSINK")).await;
+
+        // A planted lookalike at the exact stage name blocks the sink
+        // (SFTP mkdir is exclusive) and the collision is named.
+        let tag = crate::browser::transfer::new_stage_tag();
+        let planted = join_remote("/dst", &stage_dir_name(&tag));
+        t.mkdir(&planted, 0o700).await.unwrap();
+        let e = match RemoteSink::open(&t, "/dst", &tag).await {
+            Ok(_) => panic!("planted stage name must refuse"),
+            Err(e) => e,
+        };
+        assert_eq!(e.kind, ErrorKind::Exists);
+        assert!(e.message.contains("already exists"), "{e:?}");
+        t.remove_dir(&planted).await.unwrap();
+
+        let mut sink = RemoteSink::open(&t, "/dst", &tag)
+            .await
+            .expect("stage opens");
+        sink.file_begin("a.txt").await.unwrap();
+        sink.file_chunk(b"payload").await.unwrap();
+        sink.file_end(0o644, 1_700_000_000).await.unwrap();
+        sink.dir_begin("d", 0o755, 1_700_000_001).await.unwrap();
+        sink.file_begin("d/b.txt").await.unwrap();
+        sink.file_chunk(b"inner").await.unwrap();
+        sink.file_end(0o644, 1_700_000_002).await.unwrap();
+        sink.dir_end().await.unwrap();
+        let (conflicts, errors) = sink
+            .place(&["a.txt".to_string(), "d".to_string()], false)
+            .await
+            .unwrap();
+        assert!(conflicts.is_empty(), "{conflicts:?}");
+        assert!(errors.is_empty(), "{errors:?}");
+        sink.remove().await.unwrap();
+
+        // Placed through the hardlink tier (file) and rename tier (dir):
+        // content exact, and the staged mtime survives the hardlink.
+        assert_eq!(
+            std::fs::read(srv.root.join("dst/a.txt")).unwrap(),
+            b"payload"
+        );
+        assert_eq!(
+            std::fs::read(srv.root.join("dst/d/b.txt")).unwrap(),
+            b"inner"
+        );
+        let mt = std::fs::metadata(srv.root.join("dst/a.txt"))
+            .unwrap()
+            .modified()
+            .unwrap()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        assert_eq!(mt, 1_700_000_000, "SETSTAT mtime applied through placement");
+        assert!(
+            stage_leftovers(&srv.root.join("dst")).is_empty(),
+            "cleanup removes the whole stage tree"
+        );
+        Box::new(t).close().await.unwrap();
+    }
+
+    /// Full engine roundtrip without a local side: walk a remote tree into
+    /// a plan, STREAM it over the wire into a RemoteSink (chunking +
+    /// exact-size enforcement in `stream_plan`), place, and verify byte
+    /// fidelity across chunk boundaries — on all platforms.
+    #[tokio::test]
+    async fn engine_streams_plan_into_remote_sink_roundtrip() {
+        let srv = FakeServer::start(FakeConfig::tailscale(temp_root("rt-srv"))).await;
+        std::fs::create_dir_all(srv.root.join("src/docs")).unwrap();
+        std::fs::write(srv.root.join("src/docs/readme.md"), b"# hi").unwrap();
+        std::fs::write(srv.root.join("src/big.bin"), vec![7u8; CHUNK * 2 + 123]).unwrap();
+        std::fs::create_dir_all(srv.root.join("dst")).unwrap();
+        let t = srv.connect(&temp_root("trustRT")).await;
+
+        let plan = build_plan(
+            &t,
+            "/src",
+            &["docs".to_string(), "big.bin".to_string()],
+            false,
+        )
+        .await
+        .expect("plan builds");
+        assert_eq!(plan.skipped, 0);
+        assert_eq!(plan.total, 4 + (CHUNK * 2 + 123) as u64);
+
+        let tag = crate::browser::transfer::new_stage_tag();
+        let mut sink = RemoteSink::open(&t, "/dst", &tag)
+            .await
+            .expect("stage opens");
+        let mut prog = ProgressReporter::new(plan.total, noop_emit());
+        let skipped = stream_plan(
+            &t,
+            "/src",
+            &plan,
+            &mut sink,
+            &mut prog,
+            &CancellationToken::new(),
+        )
+        .await
+        .expect("stream succeeds");
+        assert_eq!(skipped, 0);
+        assert_eq!(
+            prog.done_bytes(),
+            plan.total,
+            "progress counted every acknowledged byte"
+        );
+        let (conflicts, errors) = sink
+            .place(&["docs".to_string(), "big.bin".to_string()], false)
+            .await
+            .unwrap();
+        assert!(
+            conflicts.is_empty() && errors.is_empty(),
+            "{conflicts:?} {errors:?}"
+        );
+        sink.remove().await.unwrap();
+
+        assert_eq!(
+            std::fs::read(srv.root.join("dst/docs/readme.md")).unwrap(),
+            b"# hi"
+        );
+        assert_eq!(
+            std::fs::read(srv.root.join("dst/big.bin")).unwrap(),
+            vec![7u8; CHUNK * 2 + 123],
+            "multi-chunk file streams with byte fidelity"
+        );
+        assert!(stage_leftovers(&srv.root.join("dst")).is_empty());
+        Box::new(t).close().await.unwrap();
+    }
+}
