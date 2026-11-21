@@ -483,7 +483,6 @@ impl SftpHandler {
 }
 
 fn attrs_of(meta: &std::fs::Metadata) -> FileAttributes {
-    use std::os::unix::fs::PermissionsExt;
     let secs = |t: io::Result<SystemTime>| {
         t.ok()
             .and_then(|s| s.duration_since(UNIX_EPOCH).ok())
@@ -495,10 +494,44 @@ fn attrs_of(meta: &std::fs::Metadata) -> FileAttributes {
         user: None,
         gid: None,
         group: None,
-        permissions: Some(meta.permissions().mode()),
+        permissions: Some(mode_of(meta)),
         atime: secs(meta.accessed()),
         mtime: secs(meta.modified()),
     }
+}
+
+/// Unix: the real st_mode (type + permission bits), exactly what OpenSSH
+/// serves.
+#[cfg(unix)]
+fn mode_of(meta: &std::fs::Metadata) -> u32 {
+    use std::os::unix::fs::PermissionsExt;
+    meta.permissions().mode()
+}
+
+/// Windows: there is no st_mode. Synthesize the OpenSSH-style mode the wire
+/// protocol expects so `FileAttributes::file_type()` classifies entries —
+/// the SFTP type bits are what the client trusts, and omitting permissions
+/// would mark every node unknown. Permission bits follow the same readonly
+/// convention as `listing::perm_of` (Win32-OpenSSH synthesizes from the ACL
+/// the same way).
+#[cfg(not(unix))]
+fn mode_of(meta: &std::fs::Metadata) -> u32 {
+    let ft = meta.file_type();
+    let type_bits = if ft.is_dir() {
+        0o040_000 // S_IFDIR
+    } else if ft.is_symlink() {
+        0o120_000 // S_IFLNK
+    } else {
+        0o100_000 // S_IFREG
+    };
+    let perm_bits = if ft.is_dir() {
+        0o755 // dirs must appear traversable
+    } else if meta.permissions().readonly() {
+        0o444
+    } else {
+        0o644
+    };
+    type_bits | perm_bits
 }
 
 fn ok(id: u32) -> Status {
@@ -531,6 +564,55 @@ fn map_io(e: io::Error) -> StatusCode {
         _ => StatusCode::Failure,
     }
 }
+
+/// Positional read — Unix keeps the real `pread` (`FileExt::read_at`);
+/// Windows seeks+reads, equivalent here because every call opens its own
+/// handle (no shared file offset to preserve).
+fn pread(f: &std::fs::File, buf: &mut [u8], offset: u64) -> io::Result<usize> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::FileExt;
+        f.read_at(buf, offset)
+    }
+    #[cfg(not(unix))]
+    {
+        use std::io::{Read, Seek, SeekFrom};
+        let f = &mut &*f;
+        f.seek(SeekFrom::Start(offset))?;
+        f.read(buf)
+    }
+}
+
+/// Positional write-all — same portability split as [`pread`].
+fn pwrite_all(f: &std::fs::File, data: &[u8], offset: u64) -> io::Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::FileExt;
+        f.write_all_at(data, offset)
+    }
+    #[cfg(not(unix))]
+    {
+        use std::io::{Seek, SeekFrom, Write};
+        let f = &mut &*f;
+        f.seek(SeekFrom::Start(offset))?;
+        f.write_all(data)
+    }
+}
+
+/// Best-effort mode application on a freshly opened file. Unix: real chmod.
+/// Windows: mode bits have no local equivalent (and setting readonly would
+/// break remove_file — Windows refuses to delete read-only files), so the
+/// fixture ignores them, like a server that ignores SETSTAT permissions.
+#[cfg(unix)]
+fn apply_open_perms(f: &std::fs::File, attrs: &FileAttributes) {
+    if let Some(perm) = attrs.permissions {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = f.set_permissions(std::fs::Permissions::from_mode(perm & 0o7777));
+    }
+}
+
+#[cfg(not(unix))]
+fn apply_open_perms(_f: &std::fs::File, _attrs: &FileAttributes) {}
 
 /// SSH_FXP_EXTENDED data is a byte string; extension payloads are sequences
 /// of SFTP strings (u32be length + bytes).
@@ -585,10 +667,7 @@ impl russh_sftp::server::Handler for SftpHandler {
         let opts: std::fs::OpenOptions = pflags.into();
         match opts.open(&path) {
             Ok(f) => {
-                if let Some(perm) = attrs.permissions {
-                    use std::os::unix::fs::PermissionsExt;
-                    let _ = f.set_permissions(std::fs::Permissions::from_mode(perm & 0o7777));
-                }
+                apply_open_perms(&f, &attrs);
                 let h = self.alloc(HEntry::File(path));
                 Ok(Handle { id, handle: h })
             }
@@ -620,7 +699,6 @@ impl russh_sftp::server::Handler for SftpHandler {
         offset: u64,
         len: u32,
     ) -> Result<Data, Self::Error> {
-        use std::os::unix::fs::FileExt;
         let path = match self.handles.get(&handle) {
             Some(HEntry::File(p)) => p.clone(),
             _ => return Err(StatusCode::Failure),
@@ -649,7 +727,7 @@ impl russh_sftp::server::Handler for SftpHandler {
         }
         let want = std::cmp::min(len as u64, size - offset) as usize;
         let mut buf = vec![0u8; want];
-        let n = f.read_at(&mut buf, offset).map_err(map_io)?;
+        let n = pread(&f, &mut buf, offset).map_err(map_io)?;
         buf.truncate(n);
         Ok(Data { id, data: buf })
     }
@@ -661,7 +739,6 @@ impl russh_sftp::server::Handler for SftpHandler {
         offset: u64,
         data: Vec<u8>,
     ) -> Result<Status, Self::Error> {
-        use std::os::unix::fs::FileExt;
         if let Some(limit) = self.cfg.fail_writes_after {
             self.written += data.len() as u64;
             if self.written > limit {
@@ -676,7 +753,7 @@ impl russh_sftp::server::Handler for SftpHandler {
             .write(true)
             .open(&path)
             .map_err(map_io)?;
-        f.write_all_at(&data, offset).map_err(map_io)?;
+        pwrite_all(&f, &data, offset).map_err(map_io)?;
         Ok(ok(id))
     }
 
@@ -877,8 +954,12 @@ impl russh_sftp::server::Handler for SftpHandler {
         let windows_flavor = self.cfg.banner.contains("Windows");
         let target = match std::fs::read_link(&resolved) {
             Ok(t) => t,
-            Err(e) if e.kind() == io::ErrorKind::InvalidInput => {
-                // Exists, not a symlink: a plain dir or file.
+            Err(e) if e.kind() == io::ErrorKind::NotFound => return Err(StatusCode::NoSuchFile),
+            // Exists, not a symlink: a plain dir or file. Host-agnostic
+            // match — Unix read_link fails EINVAL (InvalidInput), Windows
+            // fails ERROR_NOT_A_REPARSE_POINT (Uncategorized) — so the
+            // branch keys on "the path still exists", not on the error kind.
+            Err(_) if resolved.symlink_metadata().is_ok() => {
                 if resolved.is_dir() {
                     self.cfg.dir_readlinks.fetch_add(1, Ordering::SeqCst);
                     if windows_flavor
@@ -897,7 +978,6 @@ impl russh_sftp::server::Handler for SftpHandler {
                     StatusCode::BadMessage
                 });
             }
-            Err(e) if e.kind() == io::ErrorKind::NotFound => return Err(StatusCode::NoSuchFile),
             Err(e) => return Err(map_io(e)),
         };
         Ok(Name {
@@ -915,7 +995,35 @@ impl russh_sftp::server::Handler for SftpHandler {
         linkpath: String,
         targetpath: String,
     ) -> Result<Status, Self::Error> {
-        std::os::unix::fs::symlink(&targetpath, self.resolve(&linkpath)).map_err(map_io)?;
+        let link = self.resolve(&linkpath);
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(&targetpath, &link).map_err(map_io)?;
+        }
+        #[cfg(windows)]
+        {
+            // Windows separates file and dir symlinks; pick by the target's
+            // type (resolved against the link's parent, same view as POSIX).
+            // Creation needs Developer Mode / SeCreateSymbolicLinkPrivilege;
+            // when it fails the error travels back and the copy engine treats
+            // it as "destination can't hold links" (skip+count) — honest.
+            use std::os::windows::fs::{symlink_dir, symlink_file};
+            let target = Path::new(&targetpath);
+            let resolved = if target.is_absolute() {
+                target.to_path_buf()
+            } else {
+                link.parent()
+                    .map(Path::to_path_buf)
+                    .unwrap_or_default()
+                    .join(target)
+            };
+            let r = if resolved.is_dir() {
+                symlink_dir(&targetpath, &link)
+            } else {
+                symlink_file(&targetpath, &link)
+            };
+            r.map_err(map_io)?;
+        }
         Ok(ok(id))
     }
 
@@ -966,25 +1074,61 @@ impl SftpHandler {
     /// Apply the subset of FileAttributes production uses: permissions and
     /// mtime (best effort, like a real server that may ignore SETSTAT).
     fn apply_attrs(&self, path: &Path, attrs: &FileAttributes) {
-        use std::os::unix::ffi::OsStrExt;
-        use std::os::unix::fs::PermissionsExt;
-        if let Some(perm) = attrs.permissions {
-            let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(perm & 0o7777));
-        }
-        if let Some(mtime) = attrs.mtime {
-            let ts = libc::timespec {
-                tv_sec: i64::from(mtime),
-                tv_nsec: 0,
-            };
-            let times = [ts, ts];
-            unsafe {
-                let c = std::ffi::CString::new(path.as_os_str().as_bytes()).unwrap_or_default();
-                if !c.is_empty() {
-                    libc::utimensat(libc::AT_FDCWD, c.as_ptr(), times.as_ptr(), 0);
+        #[cfg(unix)]
+        {
+            use std::os::unix::ffi::OsStrExt;
+            use std::os::unix::fs::PermissionsExt;
+            if let Some(perm) = attrs.permissions {
+                let _ =
+                    std::fs::set_permissions(path, std::fs::Permissions::from_mode(perm & 0o7777));
+            }
+            if let Some(mtime) = attrs.mtime {
+                let ts = libc::timespec {
+                    tv_sec: i64::from(mtime),
+                    tv_nsec: 0,
+                };
+                let times = [ts, ts];
+                unsafe {
+                    let c = std::ffi::CString::new(path.as_os_str().as_bytes()).unwrap_or_default();
+                    if !c.is_empty() {
+                        libc::utimensat(libc::AT_FDCWD, c.as_ptr(), times.as_ptr(), 0);
+                    }
                 }
             }
         }
+        #[cfg(not(unix))]
+        {
+            // Windows: SFTP mode bits have no local equivalent (and setting
+            // readonly would break staging cleanup — Windows refuses to
+            // delete read-only files), so permissions are ignored best
+            // effort, like a server that ignores SETSTAT. mtime is portable
+            // via std FileTimes.
+            let _ = attrs.permissions;
+            if let Some(mtime) = attrs.mtime {
+                set_mtime_best_effort(path, u64::from(mtime));
+            }
+        }
     }
+}
+
+/// Windows-only best-effort mtime setter for the fake server (std
+/// `FileTimes`; dirs are opened read-only — if the platform refuses, the
+/// SETSTAT is ignored exactly like a real server may).
+#[cfg(not(unix))]
+fn set_mtime_best_effort(path: &Path, secs: u64) {
+    let when = UNIX_EPOCH + std::time::Duration::from_secs(secs);
+    let times = std::fs::FileTimes::new()
+        .set_accessed(when)
+        .set_modified(when);
+    let r = if path.is_dir() {
+        std::fs::File::open(path).and_then(|f| f.set_times(times))
+    } else {
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(path)
+            .and_then(|f| f.set_times(times))
+    };
+    let _ = r;
 }
 
 // ---------------------------------------------------------------------------
@@ -997,18 +1141,35 @@ impl SftpHandler {
 mod tests {
     use super::*;
     use crate::browser::listing;
+    use crate::browser::{ErrorKind, ServerFlavor};
+    // Everything below drives `transfer::run_copy` through its local side,
+    // which is Unix-only in M1 (whole module #[cfg(unix)], callers fail
+    // closed) — imports used solely by those tests are gated with them.
+    // SftpTransport stays ungated: the cross-platform transport tests call
+    // its methods on the concrete RusshTransport (trait must be in scope).
+    #[cfg(unix)]
     use crate::browser::transfer::{self, Side, CHUNK};
-    use crate::browser::transport::{RemoteNode, RemoteReader, RemoteWriter, SftpTransport};
-    use crate::browser::{BrowserError, CopyRequest, ErrorKind, ServerFlavor, STAGE_PREFIX};
+    use crate::browser::transport::SftpTransport;
+    #[cfg(unix)]
+    use crate::browser::transport::{RemoteNode, RemoteReader, RemoteWriter};
+    #[cfg(unix)]
+    use crate::browser::{BrowserError, CopyRequest, STAGE_PREFIX};
+    #[cfg(unix)]
     use async_trait::async_trait;
+    #[cfg(unix)]
     use std::collections::BTreeMap;
+    #[cfg(unix)]
     use std::sync::atomic::{AtomicU64, Ordering};
+    #[cfg(unix)]
     use tokio_util::sync::CancellationToken;
 
     // ---- helpers ----
 
+    // Unix-only: used exclusively by the Unix-gated run_copy tests below.
+    #[cfg(unix)]
     type Emit = Arc<dyn Fn(u8, String, String) + Send + Sync>;
 
+    #[cfg(unix)]
     fn collector() -> (Emit, Arc<Mutex<Vec<u8>>>) {
         let v: Arc<Mutex<Vec<u8>>> = Arc::new(Mutex::new(Vec::new()));
         let v2 = v.clone();
@@ -1020,6 +1181,7 @@ mod tests {
         )
     }
 
+    #[cfg(unix)] // Unix-only: run_copy local side (see imports note)
     fn req(src_dir: &str, dst_dir: &str, names: &[&str], replace: bool) -> CopyRequest {
         CopyRequest {
             src_target: "local".to_string(),
@@ -1036,6 +1198,7 @@ mod tests {
     /// Staging dirs (anywhere one level under `dir`) that survived — the
     /// cleanup invariant says this must ALWAYS be empty after run_copy
     /// returns, on every exit path (done / failed / cancelled).
+    #[cfg(unix)] // Unix-only: run_copy local side (see imports note)
     fn stage_leftovers(dir: &Path) -> Vec<String> {
         std::fs::read_dir(dir)
             .map(|rd| {
@@ -1056,6 +1219,7 @@ mod tests {
 
     /// Transport wrapper that cancels the token after N written bytes —
     /// makes mid-copy cancellation deterministic (no sleeps, no races).
+    #[cfg(unix)] // Unix-only: run_copy local side (see imports note)
     struct CancelAfterBytes<'a> {
         inner: &'a RusshTransport,
         cancel: CancellationToken,
@@ -1063,6 +1227,7 @@ mod tests {
         written: Arc<AtomicU64>,
     }
 
+    #[cfg(unix)]
     struct CountingWriter {
         inner: Box<dyn RemoteWriter>,
         cancel: CancellationToken,
@@ -1070,6 +1235,7 @@ mod tests {
         written: Arc<AtomicU64>,
     }
 
+    #[cfg(unix)]
     #[async_trait]
     impl RemoteWriter for CountingWriter {
         async fn write_all(&mut self, data: &[u8]) -> Result<(), BrowserError> {
@@ -1088,6 +1254,7 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     #[async_trait]
     impl SftpTransport for CancelAfterBytes<'_> {
         async fn realpath(&self, path: &str) -> Result<String, BrowserError> {
@@ -1341,6 +1508,9 @@ mod tests {
         // which runs a REAL-hardlink server.)
     }
 
+    // Unix-only: drives run_copy through the local side, which is
+    // #[cfg(unix)] and fails closed elsewhere (local_side.rs module head).
+    #[cfg(unix)]
     #[tokio::test]
     async fn hardlink_lies_end_to_end_copy_uses_documented_fallback() {
         let mut cfg = FakeConfig::tailscale(temp_root("hl4srv"));
@@ -1452,6 +1622,9 @@ mod tests {
     /// skips the lossy-decoded name (counted exactly once in the outcome),
     /// copies the rest with fidelity, and no U+FFFD name materializes at
     /// the destination.
+    // Unix-only: drives run_copy through the local side, which is
+    // #[cfg(unix)] and fails closed elsewhere (local_side.rs module head).
+    #[cfg(unix)]
     #[tokio::test]
     async fn pull_skips_non_utf8_names_and_counts_them() {
         let mut cfg = FakeConfig::tailscale(temp_root("nu8srv"));
@@ -1500,6 +1673,9 @@ mod tests {
 
     // ---- Group C: full copy runs — fidelity, consent, cleanup ----
 
+    // Unix-only: builds real Unix symlinks + chmod modes; used solely by
+    // the Unix-gated run_copy fidelity tests.
+    #[cfg(unix)]
     fn fidelity_source(tag: &str) -> PathBuf {
         let src = temp_root(tag);
         std::fs::write(src.join("hello.txt"), b"hello world").unwrap();
@@ -1516,6 +1692,9 @@ mod tests {
         src
     }
 
+    // Unix-only: drives run_copy through the local side, which is
+    // #[cfg(unix)] and fails closed elsewhere (local_side.rs module head).
+    #[cfg(unix)]
     #[tokio::test]
     async fn copy_local_to_remote_fidelity_and_cleanup() {
         let srv = FakeServer::start(FakeConfig::tailscale(temp_root("cp1srv"))).await;
@@ -1588,6 +1767,9 @@ mod tests {
         Box::new(t).close().await.unwrap();
     }
 
+    // Unix-only: drives run_copy through the local side, which is
+    // #[cfg(unix)] and fails closed elsewhere (local_side.rs module head).
+    #[cfg(unix)]
     #[tokio::test]
     async fn copy_onto_existing_without_consent_refuses_and_cleans() {
         let srv = FakeServer::start(FakeConfig::tailscale(temp_root("cp2srv"))).await;
@@ -1619,6 +1801,9 @@ mod tests {
         Box::new(t).close().await.unwrap();
     }
 
+    // Unix-only: drives run_copy through the local side, which is
+    // #[cfg(unix)] and fails closed elsewhere (local_side.rs module head).
+    #[cfg(unix)]
     #[tokio::test]
     async fn copy_replace_consent_replaces_and_cleans() {
         let srv = FakeServer::start(FakeConfig::tailscale(temp_root("cp3srv"))).await;
@@ -1650,6 +1835,9 @@ mod tests {
     /// Deterministic mid-copy cancel: the counting writer cancels the token
     /// after the first chunk lands; the next chunk boundary must stop the
     /// stream, and cleanup must remove the staging tree before returning.
+    // Unix-only: drives run_copy through the local side, which is
+    // #[cfg(unix)] and fails closed elsewhere (local_side.rs module head).
+    #[cfg(unix)]
     #[tokio::test]
     async fn cancel_midcopy_leaves_no_stage_and_no_destination() {
         let srv = FakeServer::start(FakeConfig::tailscale(temp_root("cp4srv"))).await;
@@ -1760,6 +1948,9 @@ mod tests {
     /// FAILURE). The probe must DESCEND — before B6-R it skipped these, so
     /// Windows folder pulls copied nothing (R3 blocker). The fixture now
     /// answers Failure for plain dirs, exactly like the real server.
+    // Unix-only: drives run_copy through the local side, which is
+    // #[cfg(unix)] and fails closed elsewhere (local_side.rs module head).
+    #[cfg(unix)]
     #[tokio::test]
     async fn windows_pull_descends_plain_dirs_answering_failure() {
         let mut cfg = FakeConfig::openssh(temp_root("b6r-plain-srv"));
@@ -1804,6 +1995,9 @@ mod tests {
     /// B6-R race tolerance: a directory that VANISHES between listing and
     /// probe (NO_SUCH_FILE) is skipped + counted — never a hard error, never
     /// a descend.
+    // Unix-only: drives run_copy through the local side, which is
+    // #[cfg(unix)] and fails closed elsewhere (local_side.rs module head).
+    #[cfg(unix)]
     #[tokio::test]
     async fn windows_pull_tolerates_dir_vanished_before_probe() {
         let mut cfg = FakeConfig::openssh(temp_root("b6r-van-srv"));
@@ -1844,6 +2038,9 @@ mod tests {
     /// probing walker would refuse every folder. The fixture now encodes
     /// that real answer; this pull must still copy the whole tree, and the
     /// dir-readlink counter must stay at 0.
+    // Unix-only: drives run_copy through the local side, which is
+    // #[cfg(unix)] and fails closed elsewhere (local_side.rs module head).
+    #[cfg(unix)]
     #[tokio::test]
     async fn posix_pull_never_probes_dir_readlink() {
         let cfg = FakeConfig::tailscale(temp_root("b6r-posix-srv"));
@@ -1882,6 +2079,9 @@ mod tests {
     /// Hostile server: writes start failing mid-copy (PermissionDenied).
     /// The primary error surfaces (never masked by cleanup errors) and the
     /// staging tree is removed on the failed path.
+    // Unix-only: drives run_copy through the local side, which is
+    // #[cfg(unix)] and fails closed elsewhere (local_side.rs module head).
+    #[cfg(unix)]
     #[tokio::test]
     async fn write_failure_midcopy_reports_primary_error_and_cleans() {
         let mut cfg = FakeConfig::tailscale(temp_root("cp5srv"));
@@ -1911,6 +2111,9 @@ mod tests {
     }
 
     /// Pre-cancelled token: refused before any staging exists.
+    // Unix-only: drives run_copy through the local side, which is
+    // #[cfg(unix)] and fails closed elsewhere (local_side.rs module head).
+    #[cfg(unix)]
     #[tokio::test]
     async fn pre_cancelled_copy_creates_nothing() {
         let srv = FakeServer::start(FakeConfig::tailscale(temp_root("cp6srv"))).await;
@@ -1942,6 +2145,7 @@ mod tests {
     /// from remote files — deterministic remote-source cancellation at a
     /// chunk boundary (no sleeps, no races). Read-side twin of
     /// CancelAfterBytes.
+    #[cfg(unix)] // Unix-only: run_copy local side (see imports note)
     struct CancelAfterReads<'a> {
         inner: &'a RusshTransport,
         cancel: CancellationToken,
@@ -1949,6 +2153,7 @@ mod tests {
         read: Arc<AtomicU64>,
     }
 
+    #[cfg(unix)]
     struct CountingReader {
         inner: Box<dyn RemoteReader>,
         cancel: CancellationToken,
@@ -1956,6 +2161,7 @@ mod tests {
         read: Arc<AtomicU64>,
     }
 
+    #[cfg(unix)]
     #[async_trait]
     impl RemoteReader for CountingReader {
         async fn read(&mut self, buf: &mut [u8]) -> Result<usize, BrowserError> {
@@ -1971,6 +2177,7 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     #[async_trait]
     impl SftpTransport for CancelAfterReads<'_> {
         async fn realpath(&self, path: &str) -> Result<String, BrowserError> {
@@ -2047,6 +2254,7 @@ mod tests {
         }
     }
 
+    #[cfg(unix)] // Unix-only: run_copy local side (see imports note)
     fn pull_req(src_dir: &str, dst_dir: &str, names: &[&str]) -> CopyRequest {
         CopyRequest {
             src_target: "fakehost".into(),
@@ -2106,6 +2314,9 @@ mod tests {
     /// W3: a file that changes size between plan and stream fails the copy
     /// with the "changed" error (§6.4 ceiling) — and the local stage is
     /// cleaned on the failed path.
+    // Unix-only: drives run_copy through the local side, which is
+    // #[cfg(unix)] and fails closed elsewhere (local_side.rs module head).
+    #[cfg(unix)]
     #[tokio::test]
     async fn pull_size_changed_fails_and_cleans() {
         let mut cfg = FakeConfig::tailscale(temp_root("pull-sz-srv"));
@@ -2140,6 +2351,9 @@ mod tests {
 
     /// W3 + spike limit #1: the PRIMARY read error ("got shorter") surfaces
     /// even though the reader's CLOSE also fails — close never masks it.
+    // Unix-only: drives run_copy through the local side, which is
+    // #[cfg(unix)] and fails closed elsewhere (local_side.rs module head).
+    #[cfg(unix)]
     #[tokio::test]
     async fn pull_read_error_not_masked_by_close_error() {
         let mut cfg = FakeConfig::tailscale(temp_root("pull-rd-srv"));
@@ -2173,6 +2387,9 @@ mod tests {
 
     /// W3: cancelling a REMOTE-SOURCE copy at a chunk boundary leaves no
     /// local stage and no partial file (read-side twin of the push cancel).
+    // Unix-only: drives run_copy through the local side, which is
+    // #[cfg(unix)] and fails closed elsewhere (local_side.rs module head).
+    #[cfg(unix)]
     #[tokio::test]
     async fn cancel_remote_source_leaves_no_stage() {
         let srv = FakeServer::start(FakeConfig::tailscale(temp_root("pull-cx-srv"))).await;
