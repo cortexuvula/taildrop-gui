@@ -323,22 +323,19 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    #[cfg(unix)]
+    /// Portable mtime setter (std `FileTimes` — same semantics on every
+    /// platform, so the W2 sweep test also runs on Windows; the previous
+    /// libc `utimensat` version was Unix-only). Sets atime+mtime, matching
+    /// the old `timespec [ts, ts]` behavior.
     fn set_mtime_for_test(path: &Path, when: std::time::SystemTime) {
-        use std::os::unix::ffi::OsStrExt;
-        let c = std::ffi::CString::new(path.as_os_str().as_bytes()).unwrap();
-        let secs = when
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_secs() as i64;
-        let ts = libc::timespec {
-            tv_sec: secs,
-            tv_nsec: 0,
-        };
-        let times = [ts, ts];
-        unsafe {
-            libc::utimensat(libc::AT_FDCWD, c.as_ptr(), times.as_ptr(), 0);
-        }
+        let f = std::fs::OpenOptions::new()
+            .write(true)
+            .open(path)
+            .expect("open file for mtime change");
+        let times = std::fs::FileTimes::new()
+            .set_accessed(when)
+            .set_modified(when);
+        f.set_times(times).expect("set mtime");
     }
 
     /// Unique temp dir under the system temp root (isolated per test).
