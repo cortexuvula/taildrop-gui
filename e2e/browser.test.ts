@@ -257,6 +257,27 @@ test.describe('browser copy queue', () => {
   });
 });
 
+test.describe('browser copy scope', () => {
+  test('remote→remote copy is refused in the UI with the M2 note (B5)', async ({ page }) => {
+    await page.setViewportSize({ width: 1180, height: 740 });
+    await openFilesView(page);
+    // Put BOTH panes on a remote machine.
+    await pickMachine(page, 'left', 'studio-mac');
+    await pickMachine(page, 'right', 'studio-mac');
+    await expect(pane(page, 'left').locator('.machine-label')).toHaveText('studio-mac');
+    await expect(pane(page, 'right').locator('.machine-label')).toHaveText('studio-mac');
+    // Select a file and try to copy — must be refused before any IPC.
+    await pane(page, 'left').locator('.pane-row[data-name="notes.txt"]').click();
+    await focusList(page, 'left');
+    await page.keyboard.press('c');
+    await expect(page.locator('.browser-status')).toContainText('M2');
+    const copies = await page.evaluate(
+      () => window.__e2e!.calls.filter((c) => c.cmd === 'browser_copy').length,
+    );
+    expect(copies).toBe(0);
+  });
+});
+
 test.describe('browser peer behaviors', () => {
   test('sidebar peer selection seeds the right pane', async ({ page }) => {
     await page.setViewportSize({ width: 1180, height: 740 });
