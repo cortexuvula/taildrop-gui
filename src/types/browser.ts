@@ -132,6 +132,14 @@ export interface HostConfig {
   user?: string | null;
 }
 
+/** One pinned host key for the Known-hosts dialog (M2a, M1 gap 4). */
+export interface KnownHostPin {
+  host: string;
+  flavor: ServerFlavor;
+  /** ssh-keygen-style SHA256 fingerprint ("" when the stored pin can't be parsed). */
+  fingerprint: string;
+}
+
 export interface BrowserConfig {
   hosts: Record<string, HostConfig>;
   last: string;

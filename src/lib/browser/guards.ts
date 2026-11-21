@@ -19,6 +19,7 @@ import type {
   CopyEvent,
   CopyJobSnapshot,
   JobState,
+  KnownHostPin,
   ProbeInfo,
   ServerFlavor,
 } from "../../types/browser";
@@ -281,19 +282,27 @@ export function isWindowsPeer(peer: Pick<BrowserPeer, "os"> | null): boolean {
 }
 
 /**
- * B5: remote→remote copies are M2 (report §7.5) — the Rust preflight
- * refuses them (Unsupported) and the UI mirrors the refusal so the queue
- * never even gets the job. Returns the user-facing reason, or null when the
- * direction is allowed in M1.
+ * M2a: remote→remote copies are ALLOWED (the M1 B5 refusal was lifted —
+ * the Rust engine streams them through the app on two independent
+ * sessions). The client keeps no mirror refusal for them; the server-side
+ * preflight still enforces same-host-two-account and Windows-destination
+ * refusals authoritatively.
  */
-export function remoteToRemoteProblem(
-  srcTarget: string,
-  dstTarget: string,
-): string | null {
-  if (srcTarget !== "local" && dstTarget !== "local") {
-    return "Copying directly between two remote machines arrives with M2 — pull the files to This computer first, then push them";
+
+/** Sanitizer for the Known-hosts pin list (boundary-guard style: drop bad rows). */
+export function sanitizeKnownHosts(v: unknown): KnownHostPin[] {
+  if (!Array.isArray(v)) return [];
+  const out: KnownHostPin[] = [];
+  for (const p of v) {
+    if (!isRecord(p) || !isString(p.host) || p.host.length === 0) continue;
+    if (!(isString(p.flavor) && FLAVORS.includes(p.flavor))) continue;
+    out.push({
+      host: p.host,
+      flavor: p.flavor as ServerFlavor,
+      fingerprint: isString(p.fingerprint) ? p.fingerprint : "",
+    });
   }
-  return null;
+  return out;
 }
 
 /** Can the UI offer write actions (New folder / Rename / Delete / copy-INTO)

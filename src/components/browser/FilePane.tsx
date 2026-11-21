@@ -322,7 +322,8 @@ export function ErrorPane({
         <p className="pane-error-hint">
           The key this machine presents no longer matches the one you accepted.
           Refusing to connect is intentional — verify the change out of band
-          before trusting it (pin management lands in M2).
+          before trusting it, then remove the old pin via Known hosts in the
+          toolbar and reconnect.
         </p>
       )}
       <div className="pane-error-actions">

@@ -17,12 +17,15 @@ import type {
   CopyJobSnapshot,
   CopyRequest,
   DeleteOutcome,
+  KnownHostPin,
   ProbeInfo,
+  ServerFlavor,
 } from "../../types/browser";
 import {
   sanitizeBrowserConfig,
   sanitizeCopyEvent,
   sanitizeJobs,
+  sanitizeKnownHosts,
   sanitizeListing,
   sanitizePeers,
   sanitizeProbe,
@@ -129,6 +132,19 @@ export async function browserSetLast(host: string): Promise<void> {
 
 export async function browserConfig(): Promise<BrowserConfig> {
   return sanitizeBrowserConfig(await call<unknown>("browser_config"));
+}
+
+/** M2a (M1 gap 4): pinned host keys across the three flavor stores. */
+export async function browserKnownHosts(): Promise<KnownHostPin[]> {
+  return sanitizeKnownHosts(await call<unknown>("browser_known_hosts"));
+}
+
+/** Forget one pin (rotation recovery; next connect is accept-new again). */
+export async function browserForgetHostKey(
+  host: string,
+  flavor: ServerFlavor,
+): Promise<void> {
+  await call<void>("browser_forget_host_key", { host, flavor });
 }
 
 /** Subscribe to copy progress/lifecycle events (sanitized). */

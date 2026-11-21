@@ -18,13 +18,12 @@ import { useBrowserTransfers } from "../../hooks/useBrowserTransfers";
 import * as api from "../../lib/browser/api";
 import {
   canWriteTo,
-  remoteToRemoteProblem,
   toBrowserError,
 } from "../../lib/browser/guards";
 import { join as joinPath } from "../../lib/browser/paths";
 import { FilePane } from "./FilePane";
 import { TransferQueue } from "./TransferQueue";
-import { ConfirmDialog, NameDialog } from "./dialogs";
+import { ConfirmDialog, HelpDialog, KnownHostsDialog, NameDialog } from "./dialogs";
 
 type PaneId = "left" | "right";
 
@@ -40,6 +39,8 @@ type DialogState =
   | { kind: "rename"; paneId: PaneId; scope: DialogScope; name: string }
   | { kind: "delete"; paneId: PaneId; scope: DialogScope; names: string[] }
   | { kind: "user"; paneId: PaneId; host: string; initial: string }
+  | { kind: "help" }
+  | { kind: "hosts" }
   | {
       kind: "replace";
       job: CopyJobSnapshot;
@@ -278,6 +279,9 @@ export function TwoPaneView({ seedPeer }: TwoPaneViewProps) {
         .catch((e) => notice(toBrowserError(e).message, true));
       return;
     }
+    // help / hosts dialogs close on their own (no confirm path) — never reach
+    // the scope-stale revalidation below, which needs paneId/scope.
+    if (d.kind === "help" || d.kind === "hosts") return;
     // mkdir / rename / delete: pane must still sit where the dialog opened.
     if (scopeStale(d.paneId, d.scope)) {
       notice("That dialog no longer applies — the folder changed", true);
@@ -349,12 +353,10 @@ export function TwoPaneView({ seedPeer }: TwoPaneViewProps) {
       }
       const srcTarget = src.loadedTarget || src.target;
       const dstTarget = dst.loadedTarget || dst.target;
-      // B5: remote→remote is M2 — mirror the Rust preflight refusal.
-      const r2r = remoteToRemoteProblem(srcTarget, dstTarget);
-      if (r2r) {
-        notice(r2r, true);
-        return;
-      }
+      // M2a: remote→remote is ALLOWED — the engine streams it through the
+      // app on two independent sessions (the M1 B5 mirror refusal is gone;
+      // the server preflight still enforces same-host-two-account and
+      // Windows-destination refusals authoritatively).
       const dstPeer = machines.find((m) => m.host === dstTarget);
       if (!canWriteTo(dstTarget, dstPeer)) {
         notice(
@@ -551,6 +553,12 @@ export function TwoPaneView({ seedPeer }: TwoPaneViewProps) {
         other.setPaneTarget(v.loadedTarget || v.target, v.loadedPath || v.path);
         break;
       }
+      case "?":
+      case "F1":
+        // M2a: help overlay (plugin App.qml:487 — "?" or F1).
+        e.preventDefault();
+        setDialog({ kind: "help" });
+        break;
       default:
         break;
     }
@@ -598,6 +606,15 @@ export function TwoPaneView({ seedPeer }: TwoPaneViewProps) {
             onClick={() => copyFrom("right")}
           >
             ← Copy
+          </button>
+          <button
+            type="button"
+            className="toolbar-btn"
+            data-testid="known-hosts-button"
+            title="Manage pinned host keys"
+            onClick={() => setDialog({ kind: "hosts" })}
+          >
+            Known hosts
           </button>
         </div>
         <FilePane {...paneProps("right")} />
@@ -659,6 +676,8 @@ export function TwoPaneView({ seedPeer }: TwoPaneViewProps) {
           onClose={closeDialog}
         />
       )}
+      {dialog?.kind === "help" && <HelpDialog onClose={closeDialog} />}
+      {dialog?.kind === "hosts" && <KnownHostsDialog onClose={closeDialog} />}
       {dialog?.kind === "replace" && (
         <ConfirmDialog
           title="Replace existing items?"
