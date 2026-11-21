@@ -289,7 +289,12 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     permissions:
-      contents: read
+      # contents: write is required even though this job only READS: the
+      # release is still a DRAFT at this point, and GitHub's API hides draft
+      # releases (and their assets) from read-only tokens — listReleaseAssets
+      # returns 403 "Resource not accessible by integration" with contents: read
+      # (observed on v0.16.0 run 44871231178). No write call is made here.
+      contents: write
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
