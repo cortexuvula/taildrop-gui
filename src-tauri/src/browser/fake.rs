@@ -1770,7 +1770,13 @@ mod tests {
         std::fs::write(srv.root.join("docs/reports/q3.txt"), b"numbers").unwrap();
 
         let dst = temp_root("b6r-plain-dst");
-        let t = srv.connect(&temp_root("trustB6RP")).await;
+        // Explicit fixture key: OpenSSH-flavor auth never falls back to
+        // none-auth, so keyless connect() would depend on ambient developer
+        // credentials that do not exist on CI runners.
+        let (key, _g) = write_temp_key("b6rp");
+        let t = srv
+            .connect_as(&temp_root("trustB6RP"), "fakeuser", &[key])
+            .await;
         let (emit, _p) = collector();
         let outcome = transfer::run_copy(
             &pull_req("/", dst.to_str().unwrap(), &["docs"]),
@@ -1810,7 +1816,10 @@ mod tests {
         std::fs::write(srv.root.join("stays/keep.txt"), b"kept").unwrap();
 
         let dst = temp_root("b6r-van-dst");
-        let t = srv.connect(&temp_root("trustB6RV")).await;
+        let (key, _g) = write_temp_key("b6rv");
+        let t = srv
+            .connect_as(&temp_root("trustB6RV"), "fakeuser", &[key])
+            .await;
         let (emit, _p) = collector();
         let outcome = transfer::run_copy(
             &pull_req("/", dst.to_str().unwrap(), &["gone-dir", "stays"]),
