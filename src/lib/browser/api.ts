@@ -130,6 +130,15 @@ export async function browserSetLast(host: string): Promise<void> {
   await call<void>("browser_set_last", { host });
 }
 
+/**
+ * S-2 (owner decision): mirror the "Desktop notifications" Settings toggle
+ * into the browser config so the Rust-side copy pump's finish notifications
+ * honor it. Best-effort: Rust's default (off) is the safe fallback.
+ */
+export async function browserSetFinishNotifications(enabled: boolean): Promise<void> {
+  await call<void>("browser_set_finish_notifications", { enabled });
+}
+
 export async function browserConfig(): Promise<BrowserConfig> {
   return sanitizeBrowserConfig(await call<unknown>("browser_config"));
 }

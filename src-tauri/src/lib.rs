@@ -908,6 +908,7 @@ pub fn run() {
             browser::commands::browser_open,
             browser::commands::browser_set_user,
             browser::commands::browser_set_last,
+            browser::commands::browser_set_finish_notifications,
             browser::commands::browser_config,
             browser::commands::browser_known_hosts,
             browser::commands::browser_forget_host_key,

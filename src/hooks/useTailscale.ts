@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, type RefObject } from "react";
 import type { TransferRecord } from "../types";
+import { browserSetFinishNotifications } from "../lib/browser/api";
 import { useSettings } from "./useSettings";
 import { usePeers } from "./usePeers";
 import { useTransfers, type SendErrorInfoLike } from "./useTransfers";
@@ -43,6 +44,20 @@ export function useTailscale(options?: UseTailscaleOptions) {
   useEffect(() => {
     onSendErrorRef.current = onSendError;
   }, [onSendError]);
+
+  // S-2 (owner decision): copy-finish notifications fire from the RUST pump
+  // (they must survive a suspended webview), so the pump can't read the
+  // webview-owned "Desktop notifications" toggle directly. This hook is the
+  // settings owner: ONE effect mirrors the toggle into the browser config
+  // after hydration (TD-03: never push pre-hydration defaults as truth) and
+  // on every change. Best-effort — Rust's persisted default is OFF.
+  useEffect(() => {
+    if (!hydrated) return;
+    browserSetFinishNotifications(settings.notifications).catch(() => {
+      // Mirror failure is not actionable here; Rust keeps its last value
+      // (default off), which is the safe direction.
+    });
+  }, [hydrated, settings.notifications]);
 
   // Bridge between useIncomingFiles (owner) and useTransfers (consumer).
   // Created here as a mutable ref, populated below once useIncomingFiles

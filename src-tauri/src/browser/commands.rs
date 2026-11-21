@@ -468,6 +468,13 @@ pub fn finish_notification(
 /// registration; no new dependency.
 fn notify_finish(app: &AppHandle, state: &BrowserState, id: u64) {
     use tauri_plugin_notification::NotificationExt;
+    // S-2 (owner decision): honor the app's "Desktop notifications" Settings
+    // toggle — the webview mirrors it into the browser config at startup and
+    // on every change (`browser_set_finish_notifications`). Default OFF: an
+    // unmirrored/old config never fires. The queue row stays the feedback.
+    if !state.ctx.config.notify_enabled() {
+        return;
+    }
     let Some(snap) = state.jobs.snapshot(id) else {
         return;
     };
@@ -1499,6 +1506,20 @@ pub async fn browser_set_last(
     state.ctx.config.set_last(&host).map_err(|e| e.message)
 }
 
+/// S-2 (owner decision): mirror the webview's "Desktop notifications"
+/// Settings toggle into the browser config. The Rust pump consults the flag
+/// before firing copy-finish notifications (they must not bypass a disabled
+/// toggle just because they live server-side). Called at startup (after
+/// settings hydration) and on every toggle change — one effect in
+/// useTailscale.ts, the settings owner.
+#[tauri::command]
+pub async fn browser_set_finish_notifications(
+    state: State<'_, Arc<BrowserState>>,
+    enabled: bool,
+) -> Result<(), String> {
+    state.ctx.config.set_notify(enabled).map_err(|e| e.message)
+}
+
 /// List every pinned host key across the three flavor stores (M2a pin
 /// management, M1 gap 4). A corrupt store fails closed with the typed
 /// Hostkey error — the dialog shows the failure, never a partial guess.
@@ -1770,6 +1791,26 @@ mod tests {
         assert!(
             cancelled_arm.contains(&needle),
             "the failed-path notification must stay inside the !cancelled guard"
+        );
+        // S-2 (owner decision) wiring tripwire: notify_finish must consult
+        // the mirrored Settings toggle BEFORE anything fires, and the
+        // command that mirrors it must write the same flag it reads.
+        let gate = format!("if !{}.{}{}() {{", "state.ctx.config", "notify_", "enabled");
+        let notify_body = src
+            .split("fn notify_finish(")
+            .nth(1)
+            .expect("notify_finish exists");
+        assert!(
+            notify_body.contains(&gate),
+            "notify_finish must gate on the mirrored Desktop-notifications flag"
+        );
+        let setter = src
+            .split("pub async fn browser_set_finish_notifications(")
+            .nth(1)
+            .expect("the mirror command exists");
+        assert!(
+            setter.contains(&format!("set_{}(enabled)", "notify")),
+            "the mirror command must persist the flag the gate reads"
         );
     }
 

@@ -453,6 +453,14 @@ pub struct BrowserConfig {
     pub hosts: BTreeMap<String, HostConfig>,
     #[serde(default)]
     pub last: String,
+    /// S-2 (owner decision): copy-finish notifications honor the app's
+    /// "Desktop notifications" Settings toggle. The toggle lives in the
+    /// webview's localStorage, so the frontend mirrors it here (startup +
+    /// every change) for the Rust-side pump to consult. Default OFF matches
+    /// the Settings default — a missing/old config never newly enables
+    /// notifications.
+    #[serde(default)]
+    pub notify: bool,
 }
 
 /// Format a byte count the way the plugin's Progress does ("12.3MB/s").
@@ -548,6 +556,19 @@ impl ConfigStore {
     pub fn set_last(&self, host: &str) -> Result<(), BrowserError> {
         let mut cfg = self.load();
         cfg.last = host.to_string();
+        self.save(&cfg)
+    }
+
+    /// S-2 (owner decision): the copy-finish notification gate. Mirrored
+    /// from the webview's "Desktop notifications" Settings toggle; default
+    /// OFF (a missing/corrupt/old config never enables notifications).
+    pub fn notify_enabled(&self) -> bool {
+        self.load().notify
+    }
+
+    pub fn set_notify(&self, enabled: bool) -> Result<(), BrowserError> {
+        let mut cfg = self.load();
+        cfg.notify = enabled;
         self.save(&cfg)
     }
 }
@@ -658,6 +679,41 @@ mod tests {
         );
         // set_user refuses the same shapes on the way in.
         assert!(store.set_user("x", Some("bad name".into())).is_err());
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    /// S-2 (owner decision): the copy-finish notification flag defaults OFF
+    /// — a fresh, missing, or corrupt config never enables notifications —
+    /// and set_notify persists across ConfigStore instances (an app restart
+    /// keeps the mirrored Settings toggle).
+    #[test]
+    fn notify_flag_defaults_off_and_persists() {
+        let path = config_tmp("notify");
+        // Missing file → default OFF.
+        let store = ConfigStore::new(path.clone());
+        assert!(
+            !store.notify_enabled(),
+            "a missing config must never enable finish notifications"
+        );
+        // Corrupt file → default OFF (load falls back to defaults).
+        std::fs::write(&path, b"{not json").unwrap();
+        assert!(!ConfigStore::new(path.clone()).notify_enabled());
+        // An OLD config without the field → OFF (serde default).
+        std::fs::write(&path, br#"{"hosts":{},"last":"studio"}"#).unwrap();
+        assert!(!ConfigStore::new(path.clone()).notify_enabled());
+        // set-on persists across instances (restart model); set-off too.
+        store.set_notify(true).unwrap();
+        assert!(ConfigStore::new(path.clone()).notify_enabled());
+        // Per-host accounts survive the notify write (shared file, no clobber).
+        store.set_user("studio", Some("corte".into())).unwrap();
+        let reopened = ConfigStore::new(path.clone());
+        assert!(reopened.notify_enabled());
+        assert_eq!(reopened.user_for("studio").as_deref(), Some("corte"));
+        reopened.set_notify(false).unwrap();
+        assert!(
+            !ConfigStore::new(path.clone()).notify_enabled(),
+            "set-off suppresses again"
+        );
         let _ = std::fs::remove_dir_all(path.parent().unwrap());
     }
 }
