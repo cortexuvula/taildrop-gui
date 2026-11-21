@@ -11,13 +11,13 @@ import {
   sanitizeCopyEvent,
   sanitizeBrowserConfig,
   sanitizeProbe,
+  sanitizeKnownHosts,
   toBrowserError,
   newNameProblem,
   controlCharProblem,
   isWindowsPeer,
   canWriteTo,
   isBrowserEntry,
-  remoteToRemoteProblem,
 } from "../guards";
 
 const goodEntry = {
@@ -200,16 +200,41 @@ describe("newNameProblem (mirror of Rust guards)", () => {
   });
 });
 
-describe("remoteToRemoteProblem (B5: remote→remote is M2)", () => {
-  it("refuses remote→remote with the M2 explanation", () => {
-    const why = remoteToRemoteProblem("peer-a", "peer-b");
-    expect(why).toMatch(/M2/);
-    expect(why).toMatch(/pull/i);
+// NOTE (M2a): the former `remoteToRemoteProblem` mirror of the B5 refusal is
+// GONE — remote→remote copies are now allowed and stream through the app on
+// two independent sessions (Rust preflight stays authoritative for the
+// same-host-two-account and Windows-destination refusals). The lifted
+// behavior is covered by the TwoPaneView r2r-enqueue vitest and the e2e
+// remote→remote copy test.
+
+describe("sanitizeKnownHosts (M2a pin-management boundary)", () => {
+  const good = {
+    host: "studio",
+    flavor: "tailscale-ssh",
+    fingerprint: "SHA256:WnFigd6vxW1unbyFJHKepROv0zUUHGzEQZiaKA2ez/4",
+  };
+  it("passes well-formed rows through", () => {
+    expect(sanitizeKnownHosts([good])).toEqual([good]);
   });
-  it("allows both local-involved directions", () => {
-    expect(remoteToRemoteProblem("local", "peer-a")).toBeNull();
-    expect(remoteToRemoteProblem("peer-a", "local")).toBeNull();
-    expect(remoteToRemoteProblem("local", "local")).toBeNull();
+  it("drops malformed rows instead of throwing", () => {
+    const rows = [
+      good,
+      null,
+      { host: "", flavor: "openssh", fingerprint: "x" }, // empty host
+      { host: "h", flavor: "not-a-flavor", fingerprint: "x" }, // bad flavor
+      { host: "h", flavor: "openssh" }, // fingerprint coerced to ""
+      42,
+    ];
+    const out = sanitizeKnownHosts(rows);
+    expect(out).toEqual([
+      good,
+      { host: "h", flavor: "openssh", fingerprint: "" },
+    ]);
+  });
+  it("degrades to [] on non-arrays", () => {
+    expect(sanitizeKnownHosts(undefined)).toEqual([]);
+    expect(sanitizeKnownHosts({ host: "x" })).toEqual([]);
+    expect(sanitizeKnownHosts("nope")).toEqual([]);
   });
 });
 
