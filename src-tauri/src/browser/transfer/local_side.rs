@@ -947,8 +947,10 @@ impl CopySink for LocalSink {
             .take()
             .ok_or_else(|| BrowserError::new(ErrorKind::Other, "no file open"))?;
         // Source mode/date through the held fd, then closed (plugin F path).
+        // FILES are masked 0o777 (plugin bin/tailfiles:924): setuid/setgid/
+        // sticky bits must never propagate onto a copied file (W1).
         unsafe {
-            libc::fchmod(fd.as_raw_fd(), (mode & 0o7777) as libc::mode_t);
+            libc::fchmod(fd.as_raw_fd(), (mode & 0o777) as libc::mode_t);
         }
         set_times(fd.as_raw_fd(), mtime);
         Ok(())

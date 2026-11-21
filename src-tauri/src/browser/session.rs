@@ -212,8 +212,21 @@ impl client::Handler for ClientHandler {
         // already authenticated this machine; a key outside the published
         // set means something is between us and the peer.
         if self.flavor == ServerFlavor::TailscaleSsh && !self.tailscale_host_keys.is_empty() {
-            let blob = openssh.split_whitespace().nth(1).unwrap_or("");
-            if !blob.is_empty() && !self.tailscale_host_keys.iter().any(|h| h == blob) {
+            // Real sshHostKeys entries are FULL LINES: "<algorithm> <base64>"
+            // (M0 evidence/fleet.json; the spike's probe.py splits on
+            // whitespace for the same reason). Compare (algorithm, blob)
+            // PAIRS — a bare blob can never equal a full line, and a blob
+            // published under a different algorithm must not pass either.
+            let mut offered = openssh.split_whitespace();
+            let alg = offered.next().unwrap_or("");
+            let blob = offered.next().unwrap_or("");
+            let matched = !alg.is_empty()
+                && !blob.is_empty()
+                && self.tailscale_host_keys.iter().any(|entry| {
+                    let mut parts = entry.split_whitespace();
+                    parts.next() == Some(alg) && parts.next() == Some(blob)
+                });
+            if !matched {
                 self.record(
                     "hostkey: offered key does not match any tailscale status sshHostKeys entry"
                         .into(),

@@ -121,9 +121,35 @@ fn save_pins(dir: &Path, file: &Path, pins: &BTreeMap<String, String>) -> Result
         std::fs::create_dir_all(dir)
             .map_err(|e| BrowserError::new(ErrorKind::Other, format!("trust dir: {e}")))?;
     }
+    // Crash-leftover recovery (W2): sweep stale tmp files for THIS flavor
+    // before writing. The mtime guard (older than 1 h) means a concurrent
+    // live writer's tmp is never touched; callers hold TRUST_LOCK so
+    // in-process writers are serialized. Best effort — a sweep failure must
+    // not block a legitimate pin write.
+    if let Ok(rd) = std::fs::read_dir(dir) {
+        let stem = file.file_stem().and_then(|t| t.to_str()).unwrap_or("pins");
+        let prefix = format!("{stem}.tmp-");
+        let cutoff = std::time::SystemTime::now() - std::time::Duration::from_secs(3600);
+        for e in rd.flatten() {
+            let name = e.file_name();
+            if name.to_string_lossy().starts_with(&prefix)
+                && e.metadata()
+                    .and_then(|m| m.modified())
+                    .map(|m| m < cutoff)
+                    .unwrap_or(false)
+            {
+                let _ = std::fs::remove_file(e.path());
+            }
+        }
+    }
     // Atomic write: exclusive-create tmp (0600), write, sync, rename. The
-    // tmp name carries the pid so concurrent processes can't share it.
-    let tmp = file.with_extension(format!("tmp-{}", std::process::id()));
+    // tmp name carries pid + random suffix: a crash leftover with the same
+    // recycled pid can never collide with create_new (W2).
+    let tmp = {
+        use rand::Rng as _;
+        let nonce: u32 = rand::rng().random();
+        file.with_extension(format!("tmp-{}-{:08x}", std::process::id(), nonce))
+    };
     {
         let mut opts = std::fs::OpenOptions::new();
         opts.write(true).create_new(true).truncate(true);
@@ -248,6 +274,71 @@ mod tests {
             .unwrap_err();
         assert_eq!(e.kind, ErrorKind::Hostkey);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// W2: crash leftovers must never block a legitimate pin write (random
+    /// suffix can't collide even with a recycled pid), and STALE leftovers
+    /// (mtime > 1 h) are swept while fresh ones — possibly a concurrent live
+    /// writer's — are left alone.
+    #[test]
+    fn tmp_leftovers_never_block_writes_and_stale_ones_are_swept() {
+        let dir = tempfile_like("trust-tmp".to_string());
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("pins.openssh.json");
+
+        // Crash leftover with OUR pid in the OLD naming scheme: the pre-W2
+        // create_new would have failed with "File exists" on pid reuse.
+        let recycled = dir.join(format!("pins.openssh.tmp-{}", std::process::id()));
+        std::fs::write(&recycled, b"crash").unwrap();
+        // Stale leftover (mtime 2 h ago): must be swept.
+        let stale = dir.join("pins.openssh.tmp-999999-deadbeef");
+        std::fs::write(&stale, b"stale").unwrap();
+        set_mtime_for_test(
+            &stale,
+            std::time::SystemTime::now() - std::time::Duration::from_secs(7200),
+        );
+        // Fresh leftover: must survive (could be a concurrent live writer).
+        let fresh = dir.join("pins.openssh.tmp-999999-0000beef");
+        std::fs::write(&fresh, b"fresh").unwrap();
+
+        let mut pins = BTreeMap::new();
+        pins.insert("host".to_string(), "ssh-ed25519 AAA".to_string());
+        save_pins(&dir, &file, &pins).expect("write succeeds despite leftovers");
+        assert!(file.exists());
+        assert!(!stale.exists(), "stale leftover swept");
+        assert!(fresh.exists(), "fresh leftover untouched");
+        assert!(recycled.exists(), "crash leftover (fresh mtime) untouched");
+        // No tmp file from THIS write survived (renamed onto the pin file).
+        let tmps: Vec<String> = std::fs::read_dir(&dir)
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().to_string())
+            .filter(|n| n.contains(".tmp-"))
+            .collect();
+        assert_eq!(
+            tmps.len(),
+            2,
+            "recycled-pid + fresh leftovers remain (stale one swept): {tmps:?}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    fn set_mtime_for_test(path: &Path, when: std::time::SystemTime) {
+        use std::os::unix::ffi::OsStrExt;
+        let c = std::ffi::CString::new(path.as_os_str().as_bytes()).unwrap();
+        let secs = when
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64;
+        let ts = libc::timespec {
+            tv_sec: secs,
+            tv_nsec: 0,
+        };
+        let times = [ts, ts];
+        unsafe {
+            libc::utimensat(libc::AT_FDCWD, c.as_ptr(), times.as_ptr(), 0);
+        }
     }
 
     /// Unique temp dir under the system temp root (isolated per test).

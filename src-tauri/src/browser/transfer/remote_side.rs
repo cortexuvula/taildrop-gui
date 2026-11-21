@@ -162,7 +162,8 @@ fn walk_node<'a>(
                 rel: rel.clone(),
                 kind: PlanKind::File,
                 size: st.size,
-                mode: st.perm & 0o7777,
+                // FILES masked 0o777 (W1): setuid/setgid/sticky never travel.
+                mode: st.perm & 0o777,
                 mtime: st.mtime,
             })?;
             return Ok(());
@@ -715,10 +716,11 @@ impl CopySink for RemoteSink<'_> {
         let rel = std::mem::take(&mut self.writer_rel);
         w.close().await?;
         // Source mode/date best effort (fidelity; servers may ignore).
+        // FILES masked 0o777 (W1): setuid/setgid/sticky never propagate.
         let path = self.staged(&rel);
         if self
             .t
-            .set_attrs(&path, Some(mode), Some(mtime))
+            .set_attrs(&path, Some(mode & 0o777), Some(mtime))
             .await
             .is_err()
         {
@@ -756,20 +758,15 @@ impl CopySink for RemoteSink<'_> {
         for name in top_names {
             let dst_path = join_remote(&self.dst_dir, name);
             let staged = match self.t.lstat(&self.staged(name)).await? {
-                Some(_) => true,
+                Some(st) => st,
                 None => continue, // nothing staged for this name
             };
-            let _ = staged;
             match self.t.lstat(&dst_path).await? {
                 None => {
                     // Existence already checked; place at the best tier. The
                     // tier's own failure path re-checks and reports conflict.
-                    let st = self.t.lstat(&self.staged(name)).await?;
-                    let is_dir = st.as_ref().map(|s| s.is_dir).unwrap_or(false);
-                    let is_file = st
-                        .as_ref()
-                        .map(|s| !s.is_dir && !s.is_symlink)
-                        .unwrap_or(false);
+                    let is_dir = staged.is_dir;
+                    let is_file = !staged.is_dir && !staged.is_symlink;
                     self.place_no_exists(
                         name,
                         &dst_path,

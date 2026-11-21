@@ -845,12 +845,9 @@ async fn mkdir_remote(
     if t.flavor().is_windows() {
         return Err(windows_write_refusal("New folder", target));
     }
-    if let Some(why) = crate::browser::winnames::windows_name_problem(name) {
-        // Not a Windows target, but a name that can't travel to one is a
-        // foot-gun; the plugin validates on the destination only — mirror
-        // that (refusal here is Windows-target-only, done above).
-        let _ = why;
-    }
+    // Note: for non-Windows targets the plugin validates names only on the
+    // Windows destination itself; this branch intentionally does not refuse
+    // winnames-problematic names when the target is not Windows (parity).
     t.mkdir(path, 0o755).await.map_err(|mut e| {
         if e.kind == ErrorKind::Exists {
             e.message = format!("{name} already exists");
@@ -1436,10 +1433,6 @@ impl AsRawFdRef for std::os::fd::OwnedFd {
         std::os::fd::AsRawFd::as_raw_fd(self)
     }
 }
-
-// Silence unused-import warnings on non-unix builds for the cfg-gated paths.
-#[cfg(not(unix))]
-const _: Option<ConnectParams> = None;
 
 #[cfg(test)]
 mod tests {

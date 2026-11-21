@@ -7,6 +7,12 @@
 //! only guard. Windows peers are browse+pull only in M1, but this runs
 //! now (and is unit-tested now) so the guard is real before the M3 gate.
 
+// M1 status: Windows targets refuse ALL writes by probed flavor before name
+// validation is reached, so no production path calls this module yet. It is
+// wired into the Windows write gate at M3 — kept compiled and unit-tested
+// now so the guard is real when that gate opens.
+#![allow(dead_code)]
+
 /// Characters Windows refuses in a name: `\ / : * ? " < > |` plus the C0
 /// control range. (The plugin also rejects `\x7f`; we include it too — it's
 /// a control char and never valid in a Windows name.)

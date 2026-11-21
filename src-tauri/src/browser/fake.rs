@@ -152,7 +152,10 @@ pub struct FakeServer {
     pub root: PathBuf,
     /// Base64 of the server host key's SSH wire blob — for tailscale
     /// `sshHostKeys` cross-check tests.
-    pub host_key_base64: String,
+    /// The server's host key in the REAL `tailscale status --json`
+    /// sshHostKeys entry format: a full "<algorithm> <base64>" line
+    /// (M0 evidence/fleet.json). B4 regression fixture.
+    pub host_key_line: String,
     task: JoinHandle<()>,
 }
 
@@ -170,16 +173,14 @@ impl FakeServer {
         // results strip_prefix cleanly back to virtual paths.
         cfg.root = std::fs::canonicalize(&cfg.root).expect("canonicalize fake root");
         let host_key = decode_test_key(cfg.host_key_pem);
-        // tailscale status --json sshHostKeys entries are the base64 blob
-        // part of the OpenSSH public-key line — exactly what the client's
-        // cross-check compares against (session.rs check_server_key).
-        let host_key_base64 = host_key
+        // tailscale status --json sshHostKeys entries are FULL LINES:
+        // "<algorithm> <base64>" (M0 evidence/fleet.json — verified format;
+        // the old blob-only fixture encoded B4's bug).
+        let host_key_line = host_key
             .public_key()
             .to_openssh()
             .expect("pubkey openssh encoding")
-            .split_whitespace()
-            .nth(1)
-            .unwrap_or_default()
+            .trim()
             .to_string();
         let ssh_cfg = Arc::new(russh::server::Config {
             server_id: SshId::Standard(Cow::Owned(cfg.banner.clone())),
@@ -203,7 +204,7 @@ impl FakeServer {
         FakeServer {
             addr,
             root,
-            host_key_base64,
+            host_key_line,
             task,
         }
     }
@@ -1079,24 +1080,54 @@ mod tests {
     #[tokio::test]
     async fn tailscale_ssh_host_keys_crosscheck() {
         let srv = FakeServer::start(FakeConfig::tailscale(temp_root("xc"))).await;
-        // Wrong published set: fail closed (something is between us).
+        let alg = srv.host_key_line.split_whitespace().next().unwrap();
+        let blob = srv.host_key_line.split_whitespace().nth(1).unwrap();
+
+        // Wrong published blob (full-line format): fail closed.
         let trust1 = temp_root("trustD1");
         let err = srv
             .try_connect(
                 &trust1,
                 "fakeuser",
                 &[],
-                vec!["AAAAnot-the-real-blob".into()],
+                vec![format!("{alg} AAAAnot-the-real-blob")],
             )
             .await
             .expect_err("mismatched sshHostKeys must refuse");
         assert_eq!(err.kind, ErrorKind::Hostkey);
-        // Correct published set: accepted, and the pin lands.
+
+        // B4 regression: a BARE-BLOB entry (the old, wrong format) must NOT
+        // match — real entries are "<algorithm> <base64>" full lines.
         let trust2 = temp_root("trustD2");
-        let t = srv
-            .try_connect(&trust2, "fakeuser", &[], vec![srv.host_key_base64.clone()])
+        let err = srv
+            .try_connect(&trust2, "fakeuser", &[], vec![blob.to_string()])
             .await
-            .expect("matching sshHostKeys entry accepted");
+            .expect_err("bare-blob entry must not match a full-line format");
+        assert_eq!(err.kind, ErrorKind::Hostkey);
+
+        // Algorithm-confusion guard: right blob under a wrong algorithm.
+        let trust3 = temp_root("trustD3");
+        let err = srv
+            .try_connect(&trust3, "fakeuser", &[], vec![format!("ssh-rsa {blob}")])
+            .await
+            .expect_err("wrong-algorithm entry must not match");
+        assert_eq!(err.kind, ErrorKind::Hostkey);
+
+        // Correct published set (real full-line format, alongside an
+        // unrelated entry): accepted, and the pin lands.
+        let trust4 = temp_root("trustD4");
+        let t = srv
+            .try_connect(
+                &trust4,
+                "fakeuser",
+                &[],
+                vec![
+                    "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAunrelated".to_string(),
+                    srv.host_key_line.clone(),
+                ],
+            )
+            .await
+            .expect("matching full-line sshHostKeys entry accepted");
         Box::new(t).close().await.unwrap();
     }
 
