@@ -19,8 +19,6 @@
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { render, screen, fireEvent, waitFor, within, cleanup } from "@testing-library/react";
-import { readFileSync } from "node:fs";
-import { join } from "node:path";
 
 vi.mock("@tauri-apps/api/core", () => ({ invoke: vi.fn() }));
 vi.mock("@tauri-apps/api/event", () => ({ listen: vi.fn() }));
@@ -28,6 +26,9 @@ vi.mock("@tauri-apps/api/event", () => ({ listen: vi.fn() }));
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { TwoPaneView } from "../TwoPaneView";
+// Vite ?raw import (typed via vite/client): the router source text, used by
+// the help-overlay truthfulness pin below.
+import routerSource from "../TwoPaneView.tsx?raw";
 
 const mockInvoke = vi.mocked(invoke);
 const mockListen = vi.mocked(listen);
@@ -300,12 +301,7 @@ const KEY_LABELS: Record<string, string> = {
 const PRE_SWITCH_LABELS = ["Tab", "Esc", "Ctrl+A", "Ctrl+R", "Ctrl+H", "Ctrl+L"];
 
 function routerCaseKeys(): string[] {
-  // jsdom rewrites import.meta.url to http:, so resolve from the vitest root
-  // (the repo root) instead of fileURLToPath.
-  const src = readFileSync(
-    join(process.cwd(), "src", "components", "browser", "TwoPaneView.tsx"),
-    "utf8",
-  );
+  const src = routerSource;
   const start = src.indexOf("switch (key) {");
   expect(start).toBeGreaterThan(0); // the router must keep this shape
   const body = src.slice(start, src.indexOf("default:", start));
