@@ -17,6 +17,7 @@
 //! The existing Taildrop flow (tailscale.rs, receipts.rs) is untouched; this
 //! module tree is purely additive.
 
+pub mod agent;
 pub mod commands;
 #[cfg(test)]
 pub mod fake;

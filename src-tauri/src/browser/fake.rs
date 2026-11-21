@@ -2969,4 +2969,373 @@ mod tests {
         );
         Box::new(t).close().await.unwrap();
     }
+
+    // ---- M2b: exec-agent engine tier (loopback perl as the dst agent) ----
+
+    /// Exec-capable transport double: every SFTP verb delegates to the real
+    /// RusshTransport (the SOURCE walk), while the agent seams answer for
+    /// the destination — `open_exec` spawns the vendored Perl agent as a
+    /// LOCAL child (the loopback harness), so `dst_dir` is a real local
+    /// temp path and placement/cleanup are the real perl's.
+    #[cfg(unix)]
+    struct ExecCapable<'a> {
+        inner: &'a RusshTransport,
+        cap: crate::browser::agent::AgentCap,
+        exec_opens: Arc<AtomicU64>,
+        /// Optional cancel-after-N-bytes hook on exec-stream writes (the
+        /// mid-copy cancel test — the agent-tier twin of CancelAfterBytes).
+        cancel: Option<(CancellationToken, u64, Arc<AtomicU64>)>,
+    }
+
+    #[cfg(unix)]
+    struct CountingExec {
+        inner: Box<dyn crate::browser::agent::ExecChannel>,
+        cancel: CancellationToken,
+        threshold: u64,
+        written: Arc<AtomicU64>,
+    }
+
+    #[cfg(unix)]
+    #[async_trait]
+    impl crate::browser::agent::ExecChannel for CountingExec {
+        async fn write_all(&mut self, data: &[u8]) -> Result<(), BrowserError> {
+            self.inner.write_all(data).await?;
+            let n = self.written.fetch_add(data.len() as u64, Ordering::SeqCst) + data.len() as u64;
+            if n >= self.threshold {
+                self.cancel.cancel();
+            }
+            Ok(())
+        }
+        async fn read(&mut self, buf: &mut [u8]) -> Result<usize, BrowserError> {
+            self.inner.read(buf).await
+        }
+        async fn close_stdin(&mut self) -> Result<(), BrowserError> {
+            self.inner.close_stdin().await
+        }
+        async fn wait_exit(&mut self, timeout: std::time::Duration) -> Option<u32> {
+            self.inner.wait_exit(timeout).await
+        }
+        fn stderr_tail(&self) -> String {
+            self.inner.stderr_tail()
+        }
+    }
+
+    #[cfg(unix)]
+    #[async_trait]
+    impl SftpTransport for ExecCapable<'_> {
+        async fn realpath(&self, path: &str) -> Result<String, BrowserError> {
+            self.inner.realpath(path).await
+        }
+        async fn read_dir(&self, path: &str) -> Result<Vec<RemoteNode>, BrowserError> {
+            self.inner.read_dir(path).await
+        }
+        async fn stat(&self, path: &str) -> Result<Option<RemoteNode>, BrowserError> {
+            self.inner.stat(path).await
+        }
+        async fn lstat(&self, path: &str) -> Result<Option<RemoteNode>, BrowserError> {
+            self.inner.lstat(path).await
+        }
+        async fn mkdir(&self, path: &str, perm: u32) -> Result<(), BrowserError> {
+            self.inner.mkdir(path, perm).await
+        }
+        async fn remove_file(&self, path: &str) -> Result<(), BrowserError> {
+            self.inner.remove_file(path).await
+        }
+        async fn remove_dir(&self, path: &str) -> Result<(), BrowserError> {
+            self.inner.remove_dir(path).await
+        }
+        async fn rename(&self, from: &str, to: &str) -> Result<(), BrowserError> {
+            self.inner.rename(from, to).await
+        }
+        async fn posix_rename(&self, from: &str, to: &str) -> Result<(), BrowserError> {
+            self.inner.posix_rename(from, to).await
+        }
+        async fn hardlink(&self, from: &str, to: &str) -> Result<(), BrowserError> {
+            self.inner.hardlink(from, to).await
+        }
+        async fn symlink(&self, target: &str, path: &str) -> Result<(), BrowserError> {
+            self.inner.symlink(target, path).await
+        }
+        async fn read_link(&self, path: &str) -> Result<String, BrowserError> {
+            self.inner.read_link(path).await
+        }
+        async fn open_read(&self, path: &str) -> Result<Box<dyn RemoteReader>, BrowserError> {
+            self.inner.open_read(path).await
+        }
+        async fn create_exclusive(
+            &self,
+            path: &str,
+            perm: u32,
+        ) -> Result<Box<dyn RemoteWriter>, BrowserError> {
+            self.inner.create_exclusive(path, perm).await
+        }
+        async fn set_attrs(
+            &self,
+            path: &str,
+            mode: Option<u32>,
+            mtime: Option<i64>,
+        ) -> Result<(), BrowserError> {
+            self.inner.set_attrs(path, mode, mtime).await
+        }
+        fn has_hardlink(&self) -> bool {
+            self.inner.has_hardlink()
+        }
+        fn has_posix_rename(&self) -> bool {
+            self.inner.has_posix_rename()
+        }
+        fn extensions(&self) -> &BTreeMap<String, String> {
+            self.inner.extensions()
+        }
+        async fn close(self: Box<Self>) -> Result<(), BrowserError> {
+            Ok(()) // inner is borrowed; the test closes it
+        }
+        fn agent_cap(&self) -> crate::browser::agent::AgentCap {
+            self.cap
+        }
+        async fn open_exec(
+            &self,
+            cmd: &str,
+        ) -> Result<Box<dyn crate::browser::agent::ExecChannel>, BrowserError> {
+            self.exec_opens.fetch_add(1, Ordering::SeqCst);
+            let ch = crate::browser::agent::loopback::LocalExecChannel::spawn(cmd).await?;
+            Ok(match &self.cancel {
+                Some((tok, threshold, written)) => Box::new(CountingExec {
+                    inner: ch,
+                    cancel: tok.clone(),
+                    threshold: *threshold,
+                    written: Arc::clone(written),
+                }),
+                None => ch,
+            })
+        }
+    }
+
+    /// M2b engine: run_copy with a PerlExec destination must take the AGENT
+    /// tier — bytes land through the REAL vendored perl (loopback child),
+    /// mtime travels in the F header, the stage is the agent's own and is
+    /// cleaned by the agent, and no SFTP staging was involved on the dst.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn engine_agent_tier_lands_bytes_via_loopback_perl() {
+        let srv = FakeServer::start(FakeConfig::tailscale(temp_root("agent-eng-src"))).await;
+        let payload = vec![5u8; CHUNK * 3 + 9];
+        std::fs::create_dir_all(srv.root.join("src/docs")).unwrap();
+        std::fs::write(srv.root.join("src/big.bin"), &payload).unwrap();
+        set_mtime_secs(&srv.root.join("src/big.bin"), 1_700_000_321);
+        std::fs::write(srv.root.join("src/docs/in.txt"), b"inner").unwrap();
+        let dst = temp_root("agent-eng-dst"); // real LOCAL dir: perl writes here
+
+        let t = srv.connect(&temp_root("trustAGENTENG")).await;
+        let wrapper = ExecCapable {
+            inner: &t,
+            cap: crate::browser::agent::AgentCap::PerlExec,
+            exec_opens: Arc::new(AtomicU64::new(0)),
+            cancel: None,
+        };
+        let (emit, _p) = collector();
+        let outcome = transfer::run_copy(
+            &r2r_req("/src", dst.to_str().unwrap(), &["big.bin", "docs"], false),
+            &Side::Remote {
+                transport: &t,
+                windows: false,
+            },
+            &Side::Remote {
+                transport: &wrapper,
+                windows: false,
+            },
+            CancellationToken::new(),
+            emit,
+        )
+        .await
+        .expect("agent-tier copy succeeds");
+        assert_eq!(outcome.skipped, 0);
+        assert_eq!(outcome.bytes, payload.len() as u64 + 5);
+        assert_eq!(
+            std::fs::read(dst.join("big.bin")).unwrap(),
+            payload,
+            "3×CHUNK+9 bytes land through the real perl agent"
+        );
+        assert_eq!(mtime_secs(&dst.join("big.bin")), 1_700_000_321);
+        assert_eq!(std::fs::read(dst.join("docs/in.txt")).unwrap(), b"inner");
+        assert!(
+            stage_leftovers(&dst).is_empty(),
+            "the agent dropped its own stage"
+        );
+        assert!(
+            wrapper.exec_opens.load(Ordering::SeqCst) >= 1,
+            "the exec lane was used"
+        );
+        assert_eq!(
+            std::fs::read(srv.root.join("src/big.bin")).unwrap(),
+            payload,
+            "source untouched"
+        );
+        assert!(stage_leftovers(&srv.root.join("src")).is_empty());
+        Box::new(t).close().await.unwrap();
+        let _ = std::fs::remove_dir_all(&dst);
+    }
+
+    /// M2b engine, the brief's hard requirement: cancel MID-COPY on the
+    /// agent tier — the stream ends without `Z`, run_copy's cleanup closes
+    /// the agent's stdin, the agent removes its own stage through its held
+    /// handles. No partial file, no stage leftovers, source untouched.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn engine_agent_tier_cancel_midcopy_leaves_nothing() {
+        let srv = FakeServer::start(FakeConfig::tailscale(temp_root("agent-eng-x-src"))).await;
+        let payload = vec![3u8; CHUNK * 8];
+        std::fs::write(srv.root.join("big.bin"), &payload).unwrap();
+        let dst = temp_root("agent-eng-x-dst");
+        let t = srv.connect(&temp_root("trustAGENTX")).await;
+        let cancel = CancellationToken::new();
+        let wrapper = ExecCapable {
+            inner: &t,
+            cap: crate::browser::agent::AgentCap::PerlExec,
+            exec_opens: Arc::new(AtomicU64::new(0)),
+            // Cancel once the first real chunk has gone into the agent.
+            cancel: Some((cancel.clone(), CHUNK as u64, Arc::new(AtomicU64::new(0)))),
+        };
+        let (emit, _p) = collector();
+        let e = transfer::run_copy(
+            &r2r_req("/", dst.to_str().unwrap(), &["big.bin"], false),
+            &Side::Remote {
+                transport: &t,
+                windows: false,
+            },
+            &Side::Remote {
+                transport: &wrapper,
+                windows: false,
+            },
+            cancel,
+            emit,
+        )
+        .await
+        .expect_err("cancelled copy errors");
+        assert!(transfer::is_cancelled(&e), "expected cancelled, got {e:?}");
+        assert!(!dst.join("big.bin").exists(), "no partial destination file");
+        assert!(
+            stage_leftovers(&dst).is_empty(),
+            "the agent removed its stage after its stdin ended"
+        );
+        assert_eq!(std::fs::read(srv.root.join("big.bin")).unwrap(), payload);
+        Box::new(t).close().await.unwrap();
+        let _ = std::fs::remove_dir_all(&dst);
+    }
+
+    /// M2b engine: a host WITHOUT perl (ExecNoPerl) keeps the CURRENT SFTP
+    /// tiers unchanged — the exec channel is never opened and the bytes
+    /// land through RemoteSink (documented fallback, no silent downgrade).
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn engine_sftp_tier_unchanged_without_perl() {
+        let srv = FakeServer::start(FakeConfig::tailscale(temp_root("agent-eng-sftp"))).await;
+        std::fs::create_dir_all(srv.root.join("src")).unwrap();
+        std::fs::write(srv.root.join("src/a.txt"), b"aaa").unwrap();
+        std::fs::create_dir_all(srv.root.join("dst")).unwrap();
+        let t = srv.connect(&temp_root("trustAGENTSFTP")).await;
+        let wrapper = ExecCapable {
+            inner: &t,
+            cap: crate::browser::agent::AgentCap::ExecNoPerl,
+            exec_opens: Arc::new(AtomicU64::new(0)),
+            cancel: None,
+        };
+        let (emit, _p) = collector();
+        transfer::run_copy(
+            &r2r_req("/src", "/dst", &["a.txt"], false),
+            &Side::Remote {
+                transport: &t,
+                windows: false,
+            },
+            &Side::Remote {
+                transport: &wrapper,
+                windows: false,
+            },
+            CancellationToken::new(),
+            emit,
+        )
+        .await
+        .expect("SFTP-tier copy still succeeds for no-perl hosts");
+        assert_eq!(std::fs::read(srv.root.join("dst/a.txt")).unwrap(), b"aaa");
+        assert_eq!(
+            wrapper.exec_opens.load(Ordering::SeqCst),
+            0,
+            "no-perl hosts must never open an exec channel"
+        );
+        assert!(stage_leftovers(&srv.root.join("dst")).is_empty());
+        Box::new(t).close().await.unwrap();
+    }
+
+    /// M2b engine: a WINDOWS destination never takes the agent tier even
+    /// when the capability says PerlExec — run_copy's own `!windows` gate
+    /// (the M3 gate; commands-layer preflight refuses separately).
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn engine_windows_dst_never_uses_agent_tier() {
+        let srv = FakeServer::start(FakeConfig::tailscale(temp_root("agent-eng-win"))).await;
+        std::fs::create_dir_all(srv.root.join("src")).unwrap();
+        std::fs::write(srv.root.join("src/a.txt"), b"aaa").unwrap();
+        std::fs::create_dir_all(srv.root.join("dst")).unwrap();
+        let t = srv.connect(&temp_root("trustAGENTWIN")).await;
+        let wrapper = ExecCapable {
+            inner: &t,
+            cap: crate::browser::agent::AgentCap::PerlExec,
+            exec_opens: Arc::new(AtomicU64::new(0)),
+            cancel: None,
+        };
+        let (emit, _p) = collector();
+        transfer::run_copy(
+            &r2r_req("/src", "/dst", &["a.txt"], false),
+            &Side::Remote {
+                transport: &t,
+                windows: false,
+            },
+            &Side::Remote {
+                transport: &wrapper,
+                windows: true,
+            },
+            CancellationToken::new(),
+            emit,
+        )
+        .await
+        .expect("windows-dst copy stays on the SFTP tier");
+        assert_eq!(std::fs::read(srv.root.join("dst/a.txt")).unwrap(), b"aaa");
+        assert_eq!(
+            wrapper.exec_opens.load(Ordering::SeqCst),
+            0,
+            "windows destinations must never open an exec channel"
+        );
+        Box::new(t).close().await.unwrap();
+    }
+
+    /// Tripwire for the M2b wiring (repo pattern): tier selection in
+    /// run_copy, the once-per-host/account probe + cache in open_side, the
+    /// invalidation pair, and the delete re-check — so a refactor can't
+    /// silently drop a gate even if a behavior test is reworked.
+    #[test]
+    fn agent_tier_wiring_tripwire() {
+        let tsrc = include_str!("transfer/mod.rs");
+        assert!(
+            tsrc.contains("agent_cap() == crate::browser::agent::AgentCap::PerlExec"),
+            "run_copy must gate the agent tier on the probed capability"
+        );
+        assert!(tsrc.contains("AgentSink::open"), "agent tier wired");
+        let csrc = include_str!("commands.rs");
+        assert!(
+            csrc.contains("agent::probe_agent_cap(&transport)"),
+            "open_side probes the capability once per host/account"
+        );
+        assert!(
+            csrc.contains("agent_caps.put("),
+            "the probe result is cached (no re-probe per copy)"
+        );
+        assert_eq!(
+            csrc.matches("agent_caps.invalidate_host").count(),
+            2,
+            "capability cache invalidated on account change AND forget-host"
+        );
+        assert!(
+            csrc.contains("agent::agent_delete(&transport, &resolved)"),
+            "remote delete goes through the physical re-check"
+        );
+    }
 }

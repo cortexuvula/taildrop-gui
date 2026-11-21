@@ -21,7 +21,7 @@ use async_trait::async_trait;
 use russh::keys::agent::client::{AgentClient, AgentStream};
 use russh::keys::agent::AgentIdentity;
 use russh::keys::{self, PrivateKeyWithHashAlg, PublicKeyOrCertificate};
-use russh::{client, Disconnect};
+use russh::{client, ChannelMsg, Disconnect};
 use russh_sftp::client::error::Error as SftpClientError;
 use russh_sftp::client::{RawSftpSession, SftpSession};
 use russh_sftp::protocol::{FileAttributes, FileType, OpenFlags, StatusCode};
@@ -399,6 +399,10 @@ pub struct RusshTransport {
     /// Diagnostics surface: which auth method succeeded (probe detail, M2).
     #[allow(dead_code)]
     auth_method: String,
+    /// M2b: probed exec-agent capability, set once by the commands layer
+    /// after connect (`set_agent_cap`); read by the copy engine's tier
+    /// selection. `None` = not probed = the SFTP-only default.
+    agent_cap: Mutex<Option<crate::browser::agent::AgentCap>>,
 }
 
 impl RusshTransport {
@@ -411,6 +415,12 @@ impl RusshTransport {
     #[allow(dead_code)]
     pub fn auth_method(&self) -> &str {
         &self.auth_method
+    }
+    /// M2b: record the probed exec-agent capability for this transport.
+    pub fn set_agent_cap(&self, cap: crate::browser::agent::AgentCap) {
+        if let Ok(mut slot) = self.agent_cap.lock() {
+            *slot = Some(cap);
+        }
     }
 }
 
@@ -644,6 +654,7 @@ pub async fn connect(params: ConnectParams) -> Result<RusshTransport, BrowserErr
         flavor,
         user,
         auth_method,
+        agent_cap: Mutex::new(None),
     })
 }
 
@@ -945,6 +956,33 @@ impl SftpTransport for RusshTransport {
         &self.extensions
     }
 
+    fn agent_cap(&self) -> crate::browser::agent::AgentCap {
+        self.agent_cap
+            .lock()
+            .ok()
+            .and_then(|slot| *slot)
+            .unwrap_or(crate::browser::agent::AgentCap::SftpOnly)
+    }
+
+    async fn open_exec(
+        &self,
+        cmd: &str,
+    ) -> Result<Box<dyn crate::browser::agent::ExecChannel>, BrowserError> {
+        // A dedicated session channel per exec (never multiplexed with the
+        // SFTP channel). Both failure shapes map to Unsupported so callers
+        // treat them uniformly: the probe degrades to SftpOnly, and the
+        // delete re-check falls back to the documented SFTP walk.
+        let channel =
+            self.ssh.channel_open_session().await.map_err(|e| {
+                BrowserError::unsupported(format!("denied: exec channel open: {e}"))
+            })?;
+        channel
+            .exec(true, cmd)
+            .await
+            .map_err(|e| BrowserError::unsupported(format!("denied: exec request: {e}")))?;
+        Ok(Box::new(SshExecChannel::new(channel)))
+    }
+
     async fn close(self: Box<Self>) -> Result<(), BrowserError> {
         let _ = self.sftp.close().await;
         let _ = self
@@ -952,6 +990,141 @@ impl SftpTransport for RusshTransport {
             .disconnect(Disconnect::ByApplication, "browser session done", "en")
             .await;
         Ok(())
+    }
+}
+
+/// M2b: the real exec-channel adapter — one SSH exec session driven as an
+/// `agent::ExecChannel`. A single internal demux over `channel.wait()`:
+/// Data → stdout buffer, ExtendedData(ext 1) → capped stderr capture,
+/// ExitStatus → exit slot, want_reply Failure → typed "exec refused".
+/// `make_writer()` is 'static (russh 0.65.2, channels/mod.rs:429 — verified
+/// against the vendored source), so writes and reads could interleave; the
+/// agent protocol is strictly request/reply, so no concurrent pumping is
+/// needed and none is done.
+struct SshExecChannel {
+    channel: russh::Channel<client::Msg>,
+    writer: Box<dyn tokio::io::AsyncWrite + Unpin + Send>,
+    stdout: std::collections::VecDeque<u8>,
+    stderr: Arc<Mutex<Vec<u8>>>,
+    exit: Option<u32>,
+    eof: bool,
+}
+
+impl SshExecChannel {
+    fn new(channel: russh::Channel<client::Msg>) -> Self {
+        let writer = Box::new(channel.make_writer());
+        Self {
+            channel,
+            writer,
+            stdout: std::collections::VecDeque::new(),
+            stderr: Arc::new(Mutex::new(Vec::new())),
+            exit: None,
+            eof: false,
+        }
+    }
+
+    /// Consume one channel message. `Ok(true)` = keep pumping;
+    /// `Ok(false)` = channel exhausted (no more messages will arrive).
+    async fn pump(&mut self) -> Result<bool, BrowserError> {
+        let Some(msg) = self.channel.wait().await else {
+            self.eof = true;
+            return Ok(false);
+        };
+        match msg {
+            ChannelMsg::Data { data } => self.stdout.extend(data.iter().copied()),
+            ChannelMsg::ExtendedData { data, ext } => {
+                if ext == 1 {
+                    // stderr, capped — diagnostics only, never unbounded.
+                    let mut g = self.stderr.lock().unwrap_or_else(|p| p.into_inner());
+                    let room = crate::browser::agent::STDERR_CAP.saturating_sub(g.len());
+                    g.extend(data.iter().take(room).copied());
+                }
+            }
+            ChannelMsg::ExitStatus { exit_status } => self.exit = Some(exit_status),
+            // RFC 4254 ordering: exit-status precedes EOF/Close.
+            ChannelMsg::Eof | ChannelMsg::Close => self.eof = true,
+            // want_reply=true: the server's refusal of the exec request.
+            ChannelMsg::Failure => {
+                return Err(BrowserError::unsupported(
+                    "the server refused the remote exec request",
+                ))
+            }
+            _ => {}
+        }
+        Ok(true)
+    }
+}
+
+#[async_trait]
+impl crate::browser::agent::ExecChannel for SshExecChannel {
+    async fn write_all(&mut self, data: &[u8]) -> Result<(), BrowserError> {
+        AsyncWriteExt::write_all(&mut self.writer, data)
+            .await
+            .map_err(|e| {
+                BrowserError::new(
+                    classify_message(&e.to_string()),
+                    format!("agent stream write: {e}"),
+                )
+            })?;
+        AsyncWriteExt::flush(&mut self.writer).await.map_err(|e| {
+            BrowserError::new(
+                classify_message(&e.to_string()),
+                format!("agent stream flush: {e}"),
+            )
+        })
+    }
+
+    async fn read(&mut self, buf: &mut [u8]) -> Result<usize, BrowserError> {
+        loop {
+            if !self.stdout.is_empty() {
+                let n = buf.len().min(self.stdout.len());
+                for (slot, b) in buf.iter_mut().zip(self.stdout.drain(..n)) {
+                    *slot = b;
+                }
+                return Ok(n);
+            }
+            if self.eof {
+                return Ok(0);
+            }
+            self.pump().await?;
+        }
+    }
+
+    async fn close_stdin(&mut self) -> Result<(), BrowserError> {
+        // SSH channel EOF = "no more stdin" for the remote process — the
+        // agent's self-clean arming, and the plugin cleanup ordering's
+        // first step (close the child's stdin, then wait bounded).
+        self.channel
+            .eof()
+            .await
+            .map_err(|e| BrowserError::other(format!("agent stdin close: {e}")))
+    }
+
+    async fn wait_exit(&mut self, timeout: Duration) -> Option<u32> {
+        if self.exit.is_some() {
+            return self.exit;
+        }
+        let waited = tokio::time::timeout(timeout, async {
+            loop {
+                if self.exit.is_some() || self.eof {
+                    return self.exit;
+                }
+                match self.pump().await {
+                    Ok(_) => continue,
+                    Err(_) => return self.exit,
+                }
+            }
+        })
+        .await;
+        // Timeout: report what we have (None = capability/exit unknown).
+        waited.unwrap_or(self.exit)
+    }
+
+    fn stderr_tail(&self) -> String {
+        self.stderr
+            .lock()
+            .map(|g| String::from_utf8_lossy(&g).into_owned())
+            .unwrap_or_default()
     }
 }
 

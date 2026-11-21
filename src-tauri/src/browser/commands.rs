@@ -22,8 +22,9 @@ use tauri::{AppHandle, Emitter, State};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
+use crate::browser::agent::{self, AgentCap, AgentCapCache};
 use crate::browser::listing;
-use crate::browser::probe::{build_probe_info, ProbeCache};
+use crate::browser::probe::{build_probe_info, is_posix, ProbeCache};
 use crate::browser::session::{RusshTransport, SessionCtx};
 use crate::browser::transfer::{self, Side};
 use crate::browser::transport::SftpTransport as _;
@@ -492,6 +493,10 @@ fn notify_finish(app: &AppHandle, state: &BrowserState, id: u64) {
 pub struct BrowserState {
     pub ctx: Arc<SessionCtx>,
     pub probes: ProbeCache,
+    /// M2b: exec-agent capability per host+account — probed ONCE, no TTL
+    /// (a capability change is a server-admin event; invalidated on account
+    /// change and forget-host alongside the probe cache).
+    pub agent_caps: AgentCapCache,
     pub peers: Arc<PeerMetaCache>,
     pub jobs: Arc<JobRegistry>,
     pub config_dir: PathBuf,
@@ -505,6 +510,7 @@ impl BrowserState {
         Self {
             ctx: Arc::new(SessionCtx::new(&config_dir)),
             probes: ProbeCache::new(),
+            agent_caps: AgentCapCache::new(),
             peers: Arc::new(PeerMetaCache::new()),
             jobs: Arc::new(JobRegistry::new()),
             config_dir,
@@ -578,6 +584,21 @@ async fn open_side(
         }
     }
     let windows = transport.flavor().is_windows();
+    // M2b: exec-agent capability — probed ONCE per host/account (cached, no
+    // TTL; invalidated on account change / forget-host). Windows flavors are
+    // never probed here (the M3 C# agent is a separate lane). A refused or
+    // failed probe leaves the host on the CURRENT SFTP tiers unchanged —
+    // documented fallback, never a silent downgrade.
+    let cap = if !is_posix(&os_hint, transport.flavor()) {
+        AgentCap::SftpOnly
+    } else if let Some(cached) = state.agent_caps.get(target, transport.user()) {
+        cached
+    } else {
+        let probed = agent::probe_agent_cap(&transport).await;
+        state.agent_caps.put(target, transport.user(), probed);
+        probed
+    };
+    transport.set_agent_cap(cap);
     Ok(OwnedSide::Remote(Box::new(OwnedRemote {
         transport,
         windows,
@@ -1096,6 +1117,35 @@ pub async fn browser_delete(
             }
             resolved.push(real);
         }
+        // M2b: PHYSICAL delete re-check — where the exec-agent capability
+        // was probed for this host/account, the vendored POSIX script
+        // re-resolves each target's parent PHYSICALLY (cd -P) AT DELETE TIME
+        // and re-runs the home guard against the resolved spelling before
+        // rm -rf, closing the "path changed between confirm and delete"
+        // class. A runtime exec refusal falls back to the UNCHANGED SFTP
+        // walk below (documented note); a REFUSAL (exit 5) is a decision
+        // and never falls back.
+        let cap = state
+            .agent_caps
+            .get(&target, transport.user())
+            .unwrap_or(AgentCap::SftpOnly);
+        if !windows && cap == AgentCap::PerlExec {
+            match agent::agent_delete(&transport, &resolved).await {
+                Ok(()) => {
+                    return Ok(DeleteOutcome {
+                        trashed: false,
+                        done: resolved.len(),
+                    });
+                }
+                Err(e) if e.kind == ErrorKind::Unsupported => {
+                    log::info!(
+                        "browser delete: exec agent unavailable at delete time ({e}) — \
+                         falling back to the SFTP walk (documented M2b fallback)"
+                    );
+                }
+                Err(e) => return Err(e),
+            }
+        }
         let mut done = 0usize;
         for p in &resolved {
             remote_delete_one(&transport, p, 0).await.map_err(|mut e| {
@@ -1485,6 +1535,7 @@ pub async fn browser_set_user(
         .set_user(&host, user)
         .map_err(|e| e.message)?;
     state.probes.invalidate_host(&host);
+    state.agent_caps.invalidate_host(&host);
     Ok(())
 }
 
@@ -1557,6 +1608,7 @@ pub async fn browser_forget_host_key(
     }
     state.ctx.trust.forget(flavor, &host)?;
     state.probes.invalidate_host(&host);
+    state.agent_caps.invalidate_host(&host);
     Ok(())
 }
 

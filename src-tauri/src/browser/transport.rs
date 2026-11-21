@@ -149,6 +149,30 @@ pub trait SftpTransport: Send + Sync {
     #[allow(dead_code)] // consented-Replace seam; placement never uses it
     fn has_posix_rename(&self) -> bool;
 
+    /// M2b: what the exec-agent probe found for this transport's server
+    /// (set once per host/account by the commands layer; see
+    /// `agent::probe_agent_cap`). Defaults to `SftpOnly` — hosts without a
+    /// probed capability keep the CURRENT SFTP placement tiers UNCHANGED
+    /// (documented fallback, never a silent downgrade).
+    fn agent_cap(&self) -> crate::browser::agent::AgentCap {
+        crate::browser::agent::AgentCap::SftpOnly
+    }
+
+    /// M2b: open an exec channel running a FIXED command string (the
+    /// vendored agent bootstrap or the POSIX delete re-check). Paths are
+    /// never part of the command — they travel as stdin data (plugin
+    /// invariant §4.9). Default: typed Unsupported refusal, so only the
+    /// real russh transport opts in.
+    async fn open_exec(
+        &self,
+        cmd: &str,
+    ) -> Result<Box<dyn crate::browser::agent::ExecChannel>, BrowserError> {
+        let _ = cmd;
+        Err(BrowserError::unsupported(
+            "this transport can't run remote helper commands (no exec channel)",
+        ))
+    }
+
     /// The raw VERSION extension map, captured from the wire at connect
     /// (M0: advertisement does not prove operation semantics, but selects
     /// the placement tier to attempt + verify).

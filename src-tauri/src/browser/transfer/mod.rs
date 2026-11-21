@@ -347,8 +347,27 @@ pub async fn run_copy(
             #[cfg(not(unix))]
             return Err(local_unsupported());
         }
-        Side::Remote { transport, .. } => {
-            Box::new(remote_side::RemoteSink::open(*transport, &req.dst_dir, &stage_tag).await?)
+        Side::Remote { transport, windows } => {
+            // M2b tier selection: on a POSIX destination whose capability
+            // probe found the vendored Perl agent, placement goes through
+            // the exec channel — atomic no-replace renames and handle-bound
+            // stage cleanup by the agent itself. EVERY other host keeps the
+            // current SFTP tiers UNCHANGED (documented fallback, never a
+            // silent downgrade): Windows destinations (M3 gate) and
+            // SftpOnly/ExecNoPerl hosts use RemoteSink exactly as in M2a.
+            if !*windows && transport.agent_cap() == crate::browser::agent::AgentCap::PerlExec {
+                Box::new(
+                    crate::browser::agent::AgentSink::open(
+                        *transport,
+                        &req.dst_dir,
+                        &stage_tag,
+                        req.replace,
+                    )
+                    .await?,
+                )
+            } else {
+                Box::new(remote_side::RemoteSink::open(*transport, &req.dst_dir, &stage_tag).await?)
+            }
         }
     };
 

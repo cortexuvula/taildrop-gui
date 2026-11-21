@@ -50,6 +50,13 @@ hyper-util = { version = "0.1", features = ["client-legacy", "tokio"] }
 http-body-util = "0.1"
 bytes = "1"
 
+[dev-dependencies]
+# M2b loopback harness: the vendored Perl agent runs as a LOCAL child
+# process (tokio::process) with the exact NUL-framed SSH-exec protocol.
+tokio = { version = "1", features = ["process"] }
+# Vendoring-integrity pins (sha256 of the byte-identical agent bodies).
+sha2 = "0.10"
+
 [profile.release]
 lto = "thin"
 strip = true
