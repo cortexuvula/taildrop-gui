@@ -21,8 +21,28 @@
 #    in manifest.json (0 bytes in the artifact) while the log still claimed
 #    success. The path is now $script:ManifestPath and the data is
 #    $manifestData; the exact artifact file is read back and verified
-#    (schema, identity fields, wrapper-exit binding) BEFORE any success is
-#    logged, and a failed write/readback fails the wrapper truthfully.
+#    BEFORE any success is logged, and a failed write/readback fails the
+#    wrapper truthfully.
+#
+# R4 repairs (Codie R3-F1/R3-F2):
+#  - Invoke-BoundedProcess now RETURNS the actual bounded reap result, kill
+#    and reap errors, the wait failure, and the confirmed-termination state
+#    (stopped). A true bounded wait confirms termination even when the exit
+#    code cannot be read; a false/exception reap after kill does NOT. Both
+#    callers log and serialize that record - "killed and reaped" is never
+#    claimed unconditionally. When the child's termination is unconfirmed,
+#    destructive GUID-sandbox cleanup is DEFERRED (sandbox_absent stays
+#    unknown, exact path + process identity retained, verdict gains
+#    +CLEANUP_DEFERRED); the normal completed-control cleanup path is
+#    unchanged. All waits remain bounded; no retries, sleeps, unbounded
+#    reaps, or unrelated process kills.
+#  - Manifest readback verifies expected identity AND content: exact JSON
+#    text equality plus parsed comparison of runId, repository,
+#    generatedUtc and verdict against this invocation's manifestData
+#    (GitHub identity must be nonempty when the CI environment provides
+#    it), exit fields bound to the just-serialized values including
+#    legitimate nulls (NOT_RUN/unknown), and process-observation kind/
+#    stopped bindings. Any mismatch fails BEFORE 'manifest written+verified'.
 #
 # Exit codes: 0 completed and internally consistent (diagnostic PASS - this
 # is NOT product-test green); 2 compile failed; 3 child exceeded 60s;
@@ -60,37 +80,73 @@ function Set-StepOutput {
     }
 }
 
+# Renders the full returned observation record for logs. Every field that is
+# unknown is serialized as null - nothing is guessed.
+function Format-Observation {
+    param([hashtable]$R)
+    $parts = @('kind=' + [string]$R.kind)
+    $parts += ('terminated=' + [string]$R.stopped)
+    $parts += ('waitTrue=' + [string]$R.waitTrue)
+    if ($null -ne $R.exitCode) { $parts += ('exit=' + [string]$R.exitCode) }
+    if ($null -ne $R.procId) { $parts += ('procId=' + [string]$R.procId) }
+    if ($null -ne $R.processName) { $parts += ('name=' + [string]$R.processName) }
+    if ($null -ne $R.killError) { $parts += ('killError=' + [string]$R.killError) }
+    if ($null -ne $R.reapError) { $parts += ('reapError=' + [string]$R.reapError) }
+    if ($null -ne $R.waitError) { $parts += ('waitError=' + [string]$R.waitError) }
+    return [string]::Join(' ', $parts)
+}
+
 # Bounded process observation for the in-box WinPS 5.1 path. Keeps a strong
 # script-scope reference to the Process object and pre-caches its native
-# handle so the exit code cannot be lost to early handle close/GC; reads the
-# exit inside a guarded try. stdout/stderr still stream straight into the
-# artifact files via redirect handles - this parent buffers nothing, so the
-# child's own live evidence survives a kill or crash. Returns exactly one of:
-#   EXITED           exitCode is a real [int] read from the native handle
-#   TIMEOUT          bound exceeded; process killed and reaped
-#   EXIT_UNAVAILABLE process exited but its code could not be read
-#                    (observation error - NOT a compiler/child failure)
-#   NO_PROCESS_OBJECT Start-Process returned no process object at all
+# handle so the exit code cannot be lost to early handle close/GC. stdout and
+# stderr still stream straight into the artifact files via redirect handles -
+# this parent buffers nothing, so the child's own live evidence survives a
+# kill or crash. Returns a record with EXACTLY the observed facts:
+#   kind           EXITED | TIMEOUT | WAIT_ERROR | EXIT_UNAVAILABLE | NO_PROCESS_OBJECT
+#   exitCode       [int] when read from the native handle, else $null
+#   waitTrue       the bounded WaitForExit result ($true = termination observed)
+#   stopped        termination CONFIRMED: true only when the bounded wait
+#                  returned true (directly, or as the reap after kill).
+#                  A false/exception reap after kill stays $false: unknown.
+#   killError/reapError/waitError  error text or $null, never swallowed
+#   procId/processName             process identity, $null when unreadable
 function Invoke-BoundedProcess {
     param([string]$FilePath, [string]$Arguments, [string]$StdoutPath, [string]$StderrPath, [int]$BoundMs, [string]$Label)
     $p = Start-Process -FilePath $FilePath -ArgumentList $Arguments -RedirectStandardOutput $StdoutPath -RedirectStandardError $StderrPath -NoNewWindow -PassThru
     if ($null -eq $p) {
-        return @{ kind = 'NO_PROCESS_OBJECT'; exitCode = $null; timedOut = $false }
+        return @{ kind = 'NO_PROCESS_OBJECT'; exitCode = $null; waitTrue = $false; stopped = $false; killError = $null; reapError = $null; waitError = $null; procId = $null; processName = $null }
     }
+    $procId = $null
+    $procName = $null
+    try { $procId = [int]$p.Id } catch { }   # identity is best-effort; null is serialized honestly
+    try { $procName = [string]$p.ProcessName } catch { }
     try { $null = $p.Handle } catch { Write-Log ($Label + ': native handle pre-cache unavailable: ' + $_.Exception.Message) }
     $script:ObservedProcess = $p
-    $timedOut = -not $p.WaitForExit($BoundMs)
-    if ($timedOut) {
-        try { $p.Kill() } catch { Write-Log ($Label + ': kill failed: ' + $_.Exception.Message) }
-        if (-not $p.WaitForExit(15000)) { Write-Log ($Label + ': process not reaped within 15s of kill') }
-        return @{ kind = 'TIMEOUT'; exitCode = $null; timedOut = $true }
+    $waitTrue = $false
+    $waitError = $null
+    try { $waitTrue = $p.WaitForExit($BoundMs) } catch { $waitError = $_.Exception.Message }
+    if ($waitTrue) {
+        # Termination IS confirmed by the bounded wait itself, even when the
+        # exit code cannot be read afterwards.
+        $code = $null
+        try { $code = $p.ExitCode } catch { $code = $null }
+        if ($null -ne $code) {
+            return @{ kind = 'EXITED'; exitCode = [int]$code; waitTrue = $true; stopped = $true; killError = $null; reapError = $null; waitError = $null; procId = $procId; processName = $procName }
+        }
+        return @{ kind = 'EXIT_UNAVAILABLE'; exitCode = $null; waitTrue = $true; stopped = $true; killError = $null; reapError = $null; waitError = $waitError; procId = $procId; processName = $procName }
     }
-    $code = $null
-    try { $code = $p.ExitCode } catch { $code = $null }
-    if ($null -eq $code) {
-        return @{ kind = 'EXIT_UNAVAILABLE'; exitCode = $null; timedOut = $false }
-    }
-    return @{ kind = 'EXITED'; exitCode = [int]$code; timedOut = $false }
+    # Termination NOT confirmed within the bound (timeout, or the wait itself
+    # failed): one bounded kill, one bounded reap. stopped reflects ONLY the
+    # reap result - a false or throwing reap leaves it $false (unknown), and
+    # no caller may claim the process was killed and reaped.
+    $killError = $null
+    try { $p.Kill() } catch { $killError = $_.Exception.Message }
+    $reapTrue = $false
+    $reapError = $null
+    try { $reapTrue = $p.WaitForExit(15000) } catch { $reapError = $_.Exception.Message }
+    $kind = 'TIMEOUT'
+    if ($null -ne $waitError) { $kind = 'WAIT_ERROR' }
+    return @{ kind = $kind; exitCode = $null; waitTrue = $false; stopped = [bool]$reapTrue; killError = $killError; reapError = $reapError; waitError = $waitError; procId = $procId; processName = $procName }
 }
 
 $wrapperExit   = 6
@@ -142,13 +198,14 @@ try {
     $compileArgvLine = ('/nologo /warn:4 /target:exe /out:"' + $exe + '" "' + $cs + '"')
     Write-Log ("compile argv: csc " + $compileArgvLine)
     $compileResult = Invoke-BoundedProcess -FilePath $cscPath -Arguments $compileArgvLine -StdoutPath $script:CompileOut -StderrPath $script:CompileErr -BoundMs 120000 -Label 'csc'
+    $compileObsText = Format-Observation $compileResult
     if ($compileResult.kind -eq 'EXITED') {
         $compileExitCode = $compileResult.exitCode
-        Write-Log ("compile exit=" + $compileExitCode)
-    } elseif ($compileResult.kind -eq 'TIMEOUT') {
-        Write-Log 'compile observation: TIMEOUT - killed and reaped, raw streams preserved'
+        Write-Log ("compile exit=" + $compileExitCode + " (termination observed) [" + $compileObsText + "]")
+    } elseif ($compileResult.stopped) {
+        Write-Log ("compile observation: " + $compileResult.kind + " - termination confirmed (bounded wait true); exit code unavailable; NOT success and NOT compiler failure [" + $compileObsText + "]")
     } else {
-        Write-Log ("compile observation error: " + $compileResult.kind + " - native exit code unavailable; NOT treated as compiler failure or as success")
+        Write-Log ("compile observation: " + $compileResult.kind + " - termination NOT confirmed - process may still be running; kill/reap errors recorded; no reap claim made [" + $compileObsText + "]")
     }
 
     if ($compileResult.kind -eq 'TIMEOUT') {
@@ -166,16 +223,24 @@ try {
         $executeArgvLine = ('"' + $exe + '" "' + $script:Sandbox + '" "' + $script:EventsFile + '"')
         Write-Log ("execute argv: " + $executeArgvLine + " (bound 60s)")
         $childResult = Invoke-BoundedProcess -FilePath $exe -Arguments ('"' + $script:Sandbox + '" "' + $script:EventsFile + '"') -StdoutPath $script:ChildOut -StderrPath $script:ChildErr -BoundMs 60000 -Label 'child'
+        $childObsText = Format-Observation $childResult
         if ($childResult.kind -eq 'EXITED') {
             $childExitCode = $childResult.exitCode
-            Write-Log ("child exit=" + $childExitCode + " timed_out=False")
+            Write-Log ("child exit=" + $childExitCode + " timed_out=False (termination observed) [" + $childObsText + "]")
             if ($childExitCode -ne 0) { $wrapperExit = 4 } else { $wrapperExit = 0 }
         } elseif ($childResult.kind -eq 'TIMEOUT') {
             $childTimedOut = $true
-            Write-Log 'child observation: TIMEOUT after 60s - killed and reaped, events/stdout/stderr preserved'
+            if ($childResult.stopped) {
+                Write-Log ("child observation: TIMEOUT after 60s - termination confirmed after bounded kill+reap (exit code unknown; NOT child success or failure) [" + $childObsText + "]")
+            } else {
+                Write-Log ("child observation: TIMEOUT after 60s - termination NOT confirmed - child may still be running; events/stdout/stderr preserved as-is [" + $childObsText + "]")
+            }
             $wrapperExit = 3
+        } elseif ($childResult.stopped) {
+            Write-Log ("child observation: " + $childResult.kind + " - termination confirmed (bounded wait true); exit code unavailable; NOT child success or failure [" + $childObsText + "]")
+            $wrapperExit = 8
         } else {
-            Write-Log ("child observation error: " + $childResult.kind + " - native exit code unavailable; NOT treated as child failure or as success")
+            Write-Log ("child observation: " + $childResult.kind + " - termination NOT confirmed - child may still be running; no reap claim made [" + $childObsText + "]")
             $wrapperExit = 8
         }
     }
@@ -188,19 +253,41 @@ finally {
     # Sandbox readback and cleanup failures never erase the evidence logs.
     $cleanupErrors = @()
     $sandboxAbsent = $true
+    # R3-F1: while our own child may still be running inside the GUID
+    # sandbox, destructive cleanup is DEFERRED - never raced. Deferral keeps
+    # the exact path and process identity, marks the run incomplete (the
+    # wrapper exit is already 3/8 on these paths), and makes NO absence
+    # claim. Only a confirmed-stopped child (or a child never launched)
+    # reaches the normal bounded cleanup, unchanged from before.
+    $cleanupDeferred = $false
+    $deferredReason = $null
+    $childTerminationConfirmed = ($null -eq $childResult) -or ($childResult.stopped -eq $true)
     try {
+        if ($sandboxCreated -and (-not $childTerminationConfirmed)) {
+            $cleanupDeferred = $true
+            $deferredReason = 'child termination unconfirmed - destructive sandbox cleanup deferred; artifacts possibly unstable'
+            $sandboxAbsent = $null
+            $cleanupErrors += ('destructive cleanup deferred: ' + $script:Sandbox)
+            Write-Log ('CLEANUP_DEFERRED: ' + $deferredReason)
+            Write-Log ('deferred sandbox path: ' + $script:Sandbox)
+            if ($null -ne $childResult -and $null -ne $childResult.procId) { Write-Log ('unreaped child procId=' + $childResult.procId + ' name=' + [string]$childResult.processName) }
+        }
         if ($sandboxCreated) {
-            $sandboxAbsent = -not (Test-Path -LiteralPath $script:Sandbox)
-            if (-not $sandboxAbsent) {
-                Write-Log 'sandbox still present after child - removing leftovers'
-                try { Remove-Item -LiteralPath $script:Sandbox -Recurse -Force -ErrorAction Stop }
-                catch { $cleanupErrors += ("remove sandbox: " + $_.Exception.Message) }
+            if ($cleanupDeferred) {
+                Write-Log 'sandbox_absent=unknown (destructive cleanup deferred: child termination unconfirmed)'
+            } else {
                 $sandboxAbsent = -not (Test-Path -LiteralPath $script:Sandbox)
-            }
-            Write-Log ("sandbox_absent=" + $sandboxAbsent)
-            if (-not $sandboxAbsent) {
-                $cleanupErrors += ('sandbox present after forced cleanup: ' + $script:Sandbox)
-                if ($wrapperExit -lt 5) { $wrapperExit = 5 }
+                if (-not $sandboxAbsent) {
+                    Write-Log 'sandbox still present after child - removing leftovers'
+                    try { Remove-Item -LiteralPath $script:Sandbox -Recurse -Force -ErrorAction Stop }
+                    catch { $cleanupErrors += ("remove sandbox: " + $_.Exception.Message) }
+                    $sandboxAbsent = -not (Test-Path -LiteralPath $script:Sandbox)
+                }
+                Write-Log ("sandbox_absent=" + $sandboxAbsent)
+                if (-not $sandboxAbsent) {
+                    $cleanupErrors += ('sandbox present after forced cleanup: ' + $script:Sandbox)
+                    if ($wrapperExit -lt 5) { $wrapperExit = 5 }
+                }
             }
         } else {
             Write-Log 'sandbox was never created'
@@ -239,16 +326,22 @@ finally {
         8 { $verdict = 'EXIT_UNAVAILABLE' }
         9 { $verdict = 'MANIFEST_UNVERIFIED' }
     }
+    # Safety cleanup deferral is distinguished from the base verdict rather
+    # than replacing it (a helper failure stays its own verdict).
+    if ($cleanupDeferred) { $verdict = $verdict + '+CLEANUP_DEFERRED' }
 
     # Manifest: distinct data variable ($manifestData) vs the exact artifact
     # path ($script:ManifestPath). The same file is read back and verified
-    # before any success is logged; failure here fails the wrapper (exit 9)
-    # instead of claiming a write that never landed.
+    # for expected identity AND content before any success is logged; failure
+    # here fails the wrapper (exit 9) instead of claiming a write that never
+    # landed. Process observations serialize the full observed record,
+    # including legitimate nulls for NOT_RUN/unknown.
     try {
         $volumeInfo = $null
         if ($null -ne $drive) {
             $volumeInfo = @{ root = $drive.Name; filesystem = $drive.DriveFormat; type = ("{0}" -f $drive.DriveType) }
         }
+        $notRun = @{ kind = 'NOT_RUN'; exitCode = $null; waitTrue = $null; stopped = $null; killError = $null; reapError = $null; waitError = $null; procId = $null; processName = $null }
         $manifestData = [ordered]@{
             schema                = 'm3-native-rename-proof/1'
             note                  = 'Diagnostic measurement of the vendored legacy rename only; PASS here is NOT product-test green.'
@@ -266,10 +359,12 @@ finally {
             boundsMs              = @{ compile = 120000; child = 60000 }
             digests               = @{ cs = $csDigest; exe = $exeDigest }
             exitCodes             = @{ compile = $compileExitCode; child = $childExitCode; wrapper = $wrapperExit }
-            compileObservation    = $(if ($null -ne $compileResult) { $compileResult.kind } else { 'NOT_RUN' })
-            childObservation      = $(if ($null -ne $childResult) { $childResult.kind } else { 'NOT_RUN' })
+            processObservation    = @{
+                compile = $(if ($null -ne $compileResult) { $compileResult } else { $notRun })
+                child   = $(if ($null -ne $childResult) { $childResult } else { $notRun })
+            }
             childTimedOut         = $childTimedOut
-            sandbox               = @{ path = $script:Sandbox; created = $sandboxCreated; absentAfterCleanup = $sandboxAbsent }
+            sandbox               = @{ path = $script:Sandbox; created = $sandboxCreated; absentAfterCleanup = $sandboxAbsent; destructiveCleanupDeferred = $cleanupDeferred; deferredReason = $deferredReason; childProcId = $(if ($null -ne $childResult) { $childResult.procId } else { $null }) }
             cleanupErrors         = $cleanupErrors
             renameReturns         = $renameLines
             caseResults           = $caseLines
@@ -279,18 +374,49 @@ finally {
             verdict               = $verdict
         }
         $manifestJson = $manifestData | ConvertTo-Json -Depth 5
-        [System.IO.File]::WriteAllText($script:ManifestPath, $manifestJson + "`n", (New-Object System.Text.UTF8Encoding($false)))
-        # Read back THE SAME artifact file and verify identity before any
-        # success claim. A parse failure or mismatch throws into the catch
-        # below: the wrapper then exits 9 and never logs success.
-        $readBack = Get-Content -LiteralPath $script:ManifestPath -Raw -Encoding UTF8 | ConvertFrom-Json
+        $manifestText = $manifestJson + "`n"
+        [System.IO.File]::WriteAllText($script:ManifestPath, $manifestText, (New-Object System.Text.UTF8Encoding($false)))
+        # R3-F2: read back the exact artifact file and verify expected
+        # identity AND content BEFORE any success claim. First the written
+        # text must equal the intended serialization byte-for-byte, then the
+        # parsed file must match THIS invocation's identity (runId,
+        # repository, generatedUtc, verdict - GitHub identity nonempty when
+        # the environment provides it), bind the exit fields to the
+        # just-serialized values (null included), and bind the process
+        # observation records (kind + stopped). A parse failure, mismatch or
+        # contradiction throws into the catch below: exit 9, never success.
+        $readText = [System.IO.File]::ReadAllText($script:ManifestPath, [System.Text.Encoding]::UTF8)
+        if ($readText -ne $manifestText) { throw 'manifest readback text mismatch: artifact differs from intended serialization' }
+        $readBack = $readText | ConvertFrom-Json
         if ($null -eq $readBack) { throw 'manifest readback parsed to null' }
         if ([string]$readBack.schema -ne 'm3-native-rename-proof/1') { throw ('manifest readback schema mismatch: ' + [string]$readBack.schema) }
-        if ([string]::IsNullOrWhiteSpace([string]$readBack.generatedUtc)) { throw 'manifest readback missing generatedUtc' }
-        if ($null -eq $readBack.verdict) { throw 'manifest readback missing verdict' }
+        if ($env:GITHUB_RUN_ID -and [string]::IsNullOrWhiteSpace([string]$manifestData.runId)) { throw 'GitHub run identity missing from manifest' }
+        if ($env:GITHUB_REPOSITORY -and [string]::IsNullOrWhiteSpace([string]$manifestData.repository)) { throw 'GitHub repository identity missing from manifest' }
+        foreach ($field in @('runId', 'repository', 'generatedUtc', 'verdict')) {
+            $expectedValue = [string]$manifestData[$field]
+            $actualValue = [string]$readBack.$field
+            if ($actualValue -ne $expectedValue) { throw ('manifest readback ' + $field + ' mismatch: expected=[' + $expectedValue + '] actual=[' + $actualValue + ']') }
+        }
+        if ([string]::IsNullOrWhiteSpace([string]$readBack.generatedUtc)) { throw 'manifest readback generatedUtc empty' }
+        if ([string]::IsNullOrWhiteSpace([string]$readBack.verdict)) { throw 'manifest readback verdict empty' }
         if ($null -eq $readBack.exitCodes) { throw 'manifest readback missing exitCodes' }
         if ($null -eq $readBack.exitCodes.wrapper) { throw 'manifest readback missing exitCodes.wrapper' }
         if ([int]$readBack.exitCodes.wrapper -ne $wrapperExit) { throw ('manifest readback wrapper-exit mismatch: file=' + [string]$readBack.exitCodes.wrapper + ' actual=' + $wrapperExit) }
+        if ($null -eq $compileExitCode) {
+            if ($null -ne $readBack.exitCodes.compile) { throw 'manifest readback compile exit not null as serialized' }
+        } elseif ([int]$readBack.exitCodes.compile -ne [int]$compileExitCode) { throw 'manifest readback compile exit mismatch' }
+        if ($null -eq $childExitCode) {
+            if ($null -ne $readBack.exitCodes.child) { throw 'manifest readback child exit not null as serialized' }
+        } elseif ([int]$readBack.exitCodes.child -ne [int]$childExitCode) { throw 'manifest readback child exit mismatch' }
+        if ($null -eq $readBack.processObservation) { throw 'manifest readback missing processObservation' }
+        if ($null -ne $compileResult) {
+            if ([string]$readBack.processObservation.compile.kind -ne [string]$compileResult.kind) { throw 'manifest readback compile observation kind mismatch' }
+            if ([bool]$readBack.processObservation.compile.stopped -ne [bool]$compileResult.stopped) { throw 'manifest readback compile stopped mismatch' }
+        } elseif ([string]$readBack.processObservation.compile.kind -ne 'NOT_RUN') { throw 'manifest readback compile observation must be NOT_RUN' }
+        if ($null -ne $childResult) {
+            if ([string]$readBack.processObservation.child.kind -ne [string]$childResult.kind) { throw 'manifest readback child observation kind mismatch' }
+            if ([bool]$readBack.processObservation.child.stopped -ne [bool]$childResult.stopped) { throw 'manifest readback child stopped mismatch' }
+        } elseif ([string]$readBack.processObservation.child.kind -ne 'NOT_RUN') { throw 'manifest readback child observation must be NOT_RUN' }
         Write-Log ("manifest written+verified: " + $script:ManifestPath + " verdict=" + $verdict)
     }
     catch {
