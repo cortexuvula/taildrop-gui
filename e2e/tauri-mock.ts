@@ -16,6 +16,8 @@
  *   ?lastHost=H                   browser config seed: persisted last-remote H
  *   ?savedUser=host:user          browser config seed: persisted per-host account
  *   ?pins=0                       start with an empty known-hosts pin list
+ *   ?winAgent=1|string|fail        Windows proof: true, malformed, or rejected
+ *   ?winOsUnknown=1               Windows endpoint without a peer OS hint
  */
 
 type InvokeArgs = Record<string, unknown> | undefined;
@@ -250,7 +252,7 @@ const browserPeers = [
   },
   {
     host: "winbox", name: "winbox", dns: "winbox.tail.ps.net.",
-    ip: "100.44.55.66", os: "windows", online: true, user: "",
+    ip: "100.44.55.66", os: params.get("winOsUnknown") === "1" ? "" : "windows", online: true, user: "",
     tailscaleSsh: false, browsable: true, isSelf: false,
   },
   {
@@ -343,7 +345,7 @@ function nodeAt(target: string, path: string): MockNode | null {
   return cur;
 }
 
-function listingFor(target: string, path: string) {
+function listingFor(target: string, path: string, asUser?: string | null) {
   const node = nodeAt(target, path);
   if (!node || node.type !== "dir") {
     throw { message: `${path} not found on ${target}`, kind: "notfound" };
@@ -362,7 +364,7 @@ function listingFor(target: string, path: string) {
     path: clean,
     entries,
     skipped: 0,
-    user: target === "local" ? "" : "peeruser",
+    user: target === "local" ? "" : asUser ?? browserState.config.hosts[target]?.user ?? "peeruser",
     home: "/",
   };
 }
@@ -522,20 +524,25 @@ async function handle(cmd: string, args: InvokeArgs): Promise<unknown> {
     case "browser_config":
       return browserState.config;
     case "browser_probe":
+      if (args?.host === "winbox" && params.get("winAgent") === "fail") {
+        throw { message: "Windows agent compilation unavailable", kind: "unsupported" };
+      }
       return {
         system: args?.host === "winbox" ? "Windows 11" : "macOS 15",
         posix: args?.host !== "winbox",
         home: "/",
-        flavor: "tailscale-ssh",
-        user: "peeruser",
+        flavor: args?.host === "winbox" ? "openssh-windows" : "tailscale-ssh",
+        user: args?.asUser ?? "peeruser",
         extensions: { "hardlink@openssh.com": "1" },
+        winAgent: args?.host === "winbox" && params.get("winAgent") === "1"
+          ? true : params.get("winAgent") === "string" ? "true" : false,
       };
     case "browser_ls": {
       const target = String(args?.target);
       if (target !== "local" && browserFlags.failAuth) {
         throw { message: `denied: no tailnet identity for ${target}`, kind: "auth" };
       }
-      return listingFor(target, String(args?.path ?? ""));
+      return listingFor(target, String(args?.path ?? ""), args?.asUser as string | null);
     }
     case "browser_mkdir": {
       const path = String(args?.path);
