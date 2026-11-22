@@ -13,7 +13,7 @@
  * (report §4.7; the server enforces the same pin).
  */
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import type { BrowserEntry, BrowserError } from "../types/browser";
+import type { BrowserEntry, BrowserError, ProbeInfo } from "../types/browser";
 import { LOCAL_TARGET } from "../types/browser";
 import * as api from "../lib/browser/api";
 import { toBrowserError } from "../lib/browser/guards";
@@ -46,8 +46,13 @@ export function useBrowserPane(opts: UseBrowserPaneOptions) {
   const [path, setPath] = useState(initialPath);
   // What the CURRENT listing was loaded from (the pin for later actions):
   const [loadedTarget, setLoadedTarget] = useState("");
+  const [listingGeneration, setListingGeneration] = useState(0);
   const [loadedPath, setLoadedPath] = useState("");
   const [loadedUser, setLoadedUser] = useState<string | null>(null);
+  // Proof is never a peer-global boolean: bind it to the displayed account.
+  const [capability, setCapability] = useState<{
+    target: string; user: string | null; generation: number; info: ProbeInfo;
+  } | null>(null);
   const [home, setHome] = useState("");
   const [entries, setEntries] = useState<BrowserEntry[]>([]);
   const [skipped, setSkipped] = useState(0);
@@ -100,6 +105,7 @@ export function useBrowserPane(opts: UseBrowserPaneOptions) {
         setTarget(t);
         setPath(listing.path);
         setLoadedTarget(t);
+        setListingGeneration(seq);
         setLoadedPath(listing.path);
         setLoadedUser(listing.user === "" ? null : listing.user);
         setHome(listing.home);
@@ -129,6 +135,30 @@ export function useBrowserPane(opts: UseBrowserPaneOptions) {
     if (autoLoad) void load(initialTarget, initialPath);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  // Probe only after a successful, stable listing resolved the account. A
+  // new load invalidates pending replies immediately (before effect cleanup).
+  useEffect(() => {
+    if (loading || error || !loadedTarget || target !== loadedTarget || target === LOCAL_TARGET) return;
+    const seq = reqSeq.current;
+    let cancelled = false;
+    void api.browserProbe(loadedTarget, loadedUser).then((info) => {
+      if (cancelled || !mounted.current || seq !== reqSeq.current) return;
+      if (!info || (info.user || null) !== loadedUser) return;
+      setCapability({ target: loadedTarget, user: loadedUser, generation: seq, info });
+    }).catch((e) => {
+      // Probe/compile failures must not turn a readable pane into an error.
+      logger.debug("useBrowserPane", "write capability unavailable:", toBrowserError(e).message);
+    });
+    return () => { cancelled = true; };
+  }, [loading, error, target, loadedTarget, loadedUser, listingGeneration]);
+
+  const probe = !loading && !error && capability?.target === target &&
+    target === loadedTarget && capability.user === loadedUser &&
+    capability.generation === reqSeq.current ? capability.info : null;
+  // Classification can stay fail-closed during a same-host reload/account
+  // switch; unlike proof, a known Windows endpoint never grants write access.
+  const probeFlavor = capability?.target === target ? capability.info.flavor : undefined;
 
   const refresh = useCallback(() => {
     const { loadedTarget, loadedPath } = stateRef.current;
@@ -303,6 +333,8 @@ export function useBrowserPane(opts: UseBrowserPaneOptions) {
     loadedPath,
     loadedTarget,
     loadedUser,
+    probe,
+    probeFlavor,
     home,
     rows,
     skipped,

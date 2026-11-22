@@ -250,7 +250,13 @@ describe("sanitizeKnownHosts (M2a pin-management boundary)", () => {
   });
 });
 
-describe("Windows write-disable heuristic (M1: browse + pull only)", () => {
+describe("Windows capability write gate", () => {
+  it("allows proven Windows writes, but never infers proof from OS or flavor", () => {
+    expect(canWriteTo("peer", { os: "windows" }, true)).toBe(true);
+    expect(canWriteTo("peer", undefined, false, "openssh-windows")).toBe(false);
+    expect(canWriteTo("peer", { os: "linux" }, false, "openssh-windows")).toBe(false);
+    expect(canWriteTo("peer", undefined, true, "openssh-windows")).toBe(true);
+  });
   it("detects windows by os string, case-insensitively", () => {
     expect(isWindowsPeer({ os: "windows" })).toBe(true);
     expect(isWindowsPeer({ os: "Windows" })).toBe(true);

@@ -138,6 +138,47 @@ describe("useBrowserPane loading", () => {
   });
 });
 
+describe("useBrowserPane Windows proof account races", () => {
+  const proof = (user: string) => ({
+    system: "Windows", posix: false, home: "/", flavor: "openssh-windows",
+    user, extensions: {}, winAgent: true,
+  });
+
+  it("invalidates accepted proof on reload and ignores a late previous-account reply", async () => {
+    let account = "alice";
+    const oldAlice = deferred<unknown>();
+    const bob = deferred<unknown>();
+    let aliceProbes = 0;
+    mockInvoke.mockImplementation((async (cmd: string, args?: Record<string, unknown>) => {
+      if (cmd === "browser_ls") return listing("/", ["a.txt"], String(args?.asUser));
+      if (cmd === "browser_probe") {
+        if (args?.asUser === "bob") return bob.promise;
+        return ++aliceProbes === 1 ? proof("alice") : oldAlice.promise;
+      }
+      return null;
+    }) as typeof invoke);
+    const { result, rerender, unmount } = renderHook(() => useBrowserPane({
+      initialTarget: "win", userFor: () => account,
+    }));
+    await waitFor(() => expect(result.current.probe?.winAgent).toBe(true));
+    // A second Alice probe is held across the subsequent account switch.
+    await act(async () => { await result.current.refresh(); });
+    expect(result.current.probe).toBeNull();
+    await waitFor(() => expect(aliceProbes).toBe(2));
+    account = "bob";
+    rerender();
+    await act(async () => { await result.current.refresh(); });
+    expect(result.current.loadedUser).toBe("bob");
+    expect(result.current.probe).toBeNull();
+    await act(async () => oldAlice.resolve(proof("alice")));
+    expect(result.current.probe).toBeNull();
+    await act(async () => bob.resolve(proof("bob")));
+    await waitFor(() => expect(result.current.probe?.winAgent).toBe(true));
+    expect(mockInvoke.mock.calls).toContainEqual(["browser_probe", { host: "win", asUser: "bob" }]);
+    unmount();
+  });
+});
+
 describe("useBrowserPane selection (marks-else-cursor)", () => {
   async function loaded() {
     mockInvoke.mockResolvedValue(listing("/", ["a.txt", "b.txt", "c.txt"]));

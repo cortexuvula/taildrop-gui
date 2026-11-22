@@ -7,15 +7,13 @@
  * Remote-supplied names render ONLY as React text children — the plugin's
  * PlainText rule (no rich-text interpretation of file names).
  *
- * Windows peers in M1: browse + pull only. Write actions are disabled in
- * the UI with an explicit note; the server independently refuses (the UI
- * hint is os-string based, the server's decision is probe-flavor based).
+ * Windows peers remain browse + pull only until this pane's host/account
+ * has proven agent capability. The server independently revalidates writes.
  */
 import { useEffect, useRef, useState } from "react";
 import type { BrowserPeer, BrowserError } from "../../types/browser";
 import type { BrowserPane, PaneRow } from "../../hooks/useBrowserPane";
 import { MachinePicker } from "./MachinePicker";
-import { canWriteTo } from "../../lib/browser/guards";
 import { expandHome } from "../../lib/browser/paths";
 import { formatSize } from "../../lib/format";
 
@@ -24,6 +22,8 @@ export interface FilePaneProps {
   pane: BrowserPane;
   machines: BrowserPeer[];
   active: boolean;
+  /** Shared with keyboard, copy, and confirmation gates in TwoPaneView. */
+  writable: boolean;
   userFor: (host: string) => string | null;
   onFocusPane: () => void;
   onPickMachine: (host: string) => void;
@@ -59,6 +59,7 @@ export function FilePane({
   pane,
   machines,
   active,
+  writable,
   userFor,
   onFocusPane,
   onPickMachine,
@@ -73,9 +74,7 @@ export function FilePane({
   const pathInputRef = useRef<HTMLInputElement>(null);
   const [pathDraft, setPathDraft] = useState("");
 
-  const writable = canWriteTo(pane.loadedTarget || pane.target, 
-    machines.find((m) => m.host === (pane.loadedTarget || pane.target)));
-  const windowsBlocked = !writable && pane.target !== "local";
+  const writesBlocked = !writable && pane.target !== "local" && !pane.loading;
 
   // Keep the cursor row visible.
   useEffect(() => {
@@ -189,9 +188,9 @@ export function FilePane({
         </div>
       )}
 
-      {windowsBlocked && (
+      {writesBlocked && (
         <div className="pane-notice" role="status">
-          Windows peers: browse and pull only (writes return in M3).
+          Remote writes unavailable: browse and pull only until this host/account's safety capability is proven.
         </div>
       )}
 
@@ -282,7 +281,7 @@ export function FilePane({
           <button type="button" className="pane-action" onClick={() => { onFocusPane(); onRename(); }} disabled={!writable || pane.selection.length !== 1} title="Rename (R)">
             Rename
           </button>
-          <button type="button" className="pane-action danger" onClick={() => { onFocusPane(); onDelete(); }} disabled={pane.selection.length === 0 || (pane.target !== "local" && !writable)} title="Delete (D)">
+          <button type="button" className="pane-action danger" onClick={() => { onFocusPane(); onDelete(); }} disabled={!writable || pane.selection.length === 0} title="Delete (D)">
             Delete
           </button>
         </span>

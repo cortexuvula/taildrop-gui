@@ -273,10 +273,8 @@ export function newNameProblem(name: string): string | null {
 }
 
 /**
- * Windows write-disable heuristic for the UI (M1: Windows peers are
- * browse + pull only until the M3 gate). The server refuses authoritatively
- * by PROBED FLAVOR; the client only has the status `os` string before a
- * probe, so this is intentionally a hint, not a guarantee.
+ * Peer OS is only an early hint. canWriteTo also checks the probed flavor;
+ * Windows writes require agent proof, and the server remains authoritative.
  */
 export function isWindowsPeer(peer: Pick<BrowserPeer, "os"> | null): boolean {
   return (peer?.os ?? "").toLowerCase() === "windows";
@@ -306,12 +304,15 @@ export function sanitizeKnownHosts(v: unknown): KnownHostPin[] {
   return out;
 }
 
-/** Can the UI offer write actions (New folder / Rename / Delete / copy-INTO)
- *  for this pane target? Local always; Windows peers never in M1. */
+/** UI mirror only: Windows writes require exact host/account agent proof.
+ * Local behavior is unchanged; the server still enforces local Windows refusal.
+ * Probed Windows flavor overrides an absent or incorrect peer OS hint. */
 export function canWriteTo(
   target: string,
   peer: Pick<BrowserPeer, "os"> | null | undefined,
+  winAgent = false,
+  flavor?: ServerFlavor,
 ): boolean {
   if (target === "local") return true;
-  return !isWindowsPeer(peer ?? null);
+  return (!isWindowsPeer(peer ?? null) && flavor !== "openssh-windows") || winAgent === true;
 }

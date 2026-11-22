@@ -6,8 +6,8 @@
  *
  * Copy direction: the ACTIVE pane is the source, the other is the
  * destination (plugin "c" behavior); toolbar buttons make both directions
- * explicit. Windows destinations refuse writes in the UI (M1: browse+pull)
- * and the server refuses independently.
+ * explicit. Windows writes require host/account-scoped agent proof; the
+ * server independently revalidates every write.
  */
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { CopyJobSnapshot, CopyRequest } from "../../types/browser";
@@ -139,6 +139,20 @@ export function TwoPaneView({ seedPeer }: TwoPaneViewProps) {
     [machines],
   );
 
+  const writableFor = useCallback((p: BrowserPane): boolean => {
+    if (p.loading || p.error || p.blocked || !p.loadedTarget || p.target !== p.loadedTarget) return false;
+    const peer = machines.find((m) => m.host === p.loadedTarget);
+    // Unknown peer OS must not briefly enable Windows writes before probing.
+    if (p.loadedTarget !== LOCAL_TARGET && !peer?.os && !p.probe) return false;
+    return canWriteTo(p.loadedTarget, peer, p.probe?.winAgent === true, p.probeFlavor);
+  }, [machines]);
+
+  const requireWritable = useCallback((p: BrowserPane): boolean => {
+    if (writableFor(p)) return true;
+    notice(`Writes to ${nameFor(p.target)} are unavailable for this account — browse and pull only until safety capability is proven`, true);
+    return false;
+  }, [writableFor, nameFor, notice]);
+
   // ---- dialog openers (capture scope NOW) ----
   const scopeOf = (p: BrowserPane): DialogScope => ({
     target: p.loadedTarget,
@@ -149,36 +163,36 @@ export function TwoPaneView({ seedPeer }: TwoPaneViewProps) {
   const openMkdir = useCallback(
     (paneId: PaneId) => {
       const p = paneById(paneId);
-      if (p.blocked || p.error) return;
+      if (p.blocked || p.error || !requireWritable(p)) return;
       setDialog({ kind: "mkdir", paneId, scope: scopeOf(p) });
     },
-    [paneById],
+    [paneById, requireWritable],
   );
 
   const openRename = useCallback(
     (paneId: PaneId) => {
       const p = paneById(paneId);
-      if (p.blocked || p.error) return;
+      if (p.blocked || p.error || !requireWritable(p)) return;
       if (p.selection.length !== 1) {
         notice("Select exactly one item to rename", true);
         return;
       }
       setDialog({ kind: "rename", paneId, scope: scopeOf(p), name: p.selection[0] });
     },
-    [paneById, notice],
+    [paneById, notice, requireWritable],
   );
 
   const openDelete = useCallback(
     (paneId: PaneId) => {
       const p = paneById(paneId);
-      if (p.blocked || p.error) return;
+      if (p.blocked || p.error || !requireWritable(p)) return;
       if (p.selection.length === 0) {
         notice("Nothing selected", true);
         return;
       }
       setDialog({ kind: "delete", paneId, scope: scopeOf(p), names: [...p.selection] });
     },
-    [paneById, notice],
+    [paneById, notice, requireWritable],
   );
 
   const openChangeUser = useCallback(
@@ -270,6 +284,7 @@ export function TwoPaneView({ seedPeer }: TwoPaneViewProps) {
         notice("That dialog no longer applies — a folder moved", true);
         return;
       }
+      if (!requireWritable(paneById(d.dstPaneId))) return;
       void transfers
         .replaceJob(d.job)
         .then(() => {
@@ -288,6 +303,7 @@ export function TwoPaneView({ seedPeer }: TwoPaneViewProps) {
       return;
     }
     const p = paneById(d.paneId);
+    if (!requireWritable(p)) return;
     const asUser = d.scope.user;
     if (d.kind === "mkdir") {
       const name = (value ?? "").trim();
@@ -370,15 +386,8 @@ export function TwoPaneView({ seedPeer }: TwoPaneViewProps) {
       // M2a: remote→remote is ALLOWED — the engine streams it through the
       // app on two independent sessions (the M1 B5 mirror refusal is gone;
       // the server preflight still enforces same-host-two-account and
-      // Windows-destination refusals authoritatively).
-      const dstPeer = machines.find((m) => m.host === dstTarget);
-      if (!canWriteTo(dstTarget, dstPeer)) {
-        notice(
-          `Copying INTO ${nameFor(dstTarget)} is disabled until the M3 safety gate — browse and pull only`,
-          true,
-        );
-        return;
-      }
+      // Windows capability checks authoritatively).
+      if (!requireWritable(dst)) return;
       if (
         src.loadedTarget === dstTarget &&
         src.loadedPath === (dst.loadedPath || dst.path)
@@ -406,7 +415,7 @@ export function TwoPaneView({ seedPeer }: TwoPaneViewProps) {
         })
         .catch((e) => notice(toBrowserError(e).message, true));
     },
-    [paneById, machines, nameFor, notice, transfers],
+    [paneById, requireWritable, nameFor, notice, transfers],
   );
 
   // ---- keyboard router (App.qml:435-490 port) ----
@@ -585,6 +594,7 @@ export function TwoPaneView({ seedPeer }: TwoPaneViewProps) {
       pane: p,
       machines,
       active: activePane === id,
+      writable: writableFor(p),
       userFor,
       onFocusPane: () => setActivePane(id),
       onPickMachine: (host: string) => {
@@ -609,6 +619,7 @@ export function TwoPaneView({ seedPeer }: TwoPaneViewProps) {
             type="button"
             className="toolbar-btn"
             title="Copy from left to right (c with left active)"
+            disabled={!writableFor(right)}
             onClick={() => copyFrom("left")}
           >
             Copy →
@@ -617,6 +628,7 @@ export function TwoPaneView({ seedPeer }: TwoPaneViewProps) {
             type="button"
             className="toolbar-btn"
             title="Copy from right to left"
+            disabled={!writableFor(left)}
             onClick={() => copyFrom("right")}
           >
             ← Copy
