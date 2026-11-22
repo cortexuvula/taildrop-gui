@@ -576,7 +576,7 @@ async fn csharp_replace_merge_case_clash_is_client_refused() {
 }
 #[tokio::test]
 async fn csharp_native_mkdir_rename_readonly_delete_and_junction_sentinel() {
-    let f = Fixture::new("m3-delete").await;
+    let f = Fixture::new("m3-delete space").await;
     let before = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
@@ -618,23 +618,33 @@ async fn csharp_native_mkdir_rename_readonly_delete_and_junction_sentinel() {
     let tree = f.dst.join("recursive");
     std::fs::create_dir_all(tree.join("nested")).unwrap();
     std::fs::write(tree.join("nested/ordinary"), b"delete inside tree").unwrap();
-    for link in [&junction, &tree.join("nested/junction")] {
+    let nested_junction = tree.join("nested").join("junction");
+    for link in [&junction, &nested_junction] {
+        // Pass paths as individual args. An already-quoted command passed
+        // through arg() gets CRT backslash-escaped quotes, which cmd /c does
+        // not decode. Component joins also avoid mklink's mixed-separator path.
         let status = Command::new("cmd.exe")
-            .arg("/c")
-            .arg(format!(
-                "mklink /J \"{}\" \"{}\"",
-                link.display(),
-                sentinel.display()
-            ))
+            .args(["/d", "/c", "mklink", "/J"])
+            .arg(link)
+            .arg(&sentinel)
             .stdin(Stdio::null())
             .output()
             .await
             .unwrap();
         assert!(
             status.status.success(),
-            "junction fixture creation: {}",
+            "junction fixture creation for {}: {}\n{}",
+            link.display(),
+            String::from_utf8_lossy(&status.stdout),
             String::from_utf8_lossy(&status.stderr)
         );
+        use std::os::windows::fs::MetadataExt;
+        assert_ne!(
+            std::fs::symlink_metadata(link).unwrap().file_attributes() & 0x400,
+            0,
+            "fixture must be an actual reparse point"
+        );
+        assert_eq!(std::fs::read(link.join("keep")).unwrap(), b"sentinel");
     }
     delete(
         &f.t,
