@@ -44,6 +44,19 @@
 #    legitimate nulls (NOT_RUN/unknown), and process-observation kind/
 #    stopped bindings. Any mismatch fails BEFORE 'manifest written+verified'.
 #
+# R5 repairs (Codie R4-F1/R4-F2):
+#  - PowerShell -eq/-ne are case-insensitive, so every readback equality
+#    that must be EXACT (JSON text, schema, identity fields, verdict,
+#    observation kinds, NOT_RUN) now uses [String]::Equals with
+#    StringComparison.Ordinal. Bool/int/null checks and legitimate
+#    null/NOT_RUN acceptance are unchanged; this wrapper performs no
+#    filesystem-path string comparisons (the C# child owns those,
+#    intentionally case-insensitive).
+#  - Write-Log writes via [Console]::Out.WriteLine (file log retained), so
+#    it never emits a pipeline object: Invoke-BoundedProcess returns
+#    exactly one observation hashtable on every supported branch, including
+#    the Handle-precache-error path, and the typed formatter always binds.
+#
 # Exit codes: 0 completed and internally consistent (diagnostic PASS - this
 # is NOT product-test green); 2 compile failed; 3 child exceeded 60s;
 # 4 child exit nonzero; 5 sandbox not absent after cleanup; 6 wrapper error;
@@ -68,7 +81,12 @@ function Write-Log {
     param([string]$Message)
     $line = ('{0:O} wrapper {1}' -f [DateTime]::UtcNow, $Message)
     Add-Content -LiteralPath $script:WrapperLog -Value $line -Encoding Ascii
-    Write-Output $line
+    # R4-F2: console, NOT the success stream. Write-Output here would join
+    # the caller's function result (Invoke-BoundedProcess would hand back a
+    # mixed string+hashtable Object[] that cannot bind to the typed
+    # formatter). [Console]::Out.WriteLine still surfaces in the CI job log
+    # but emits no pipeline object.
+    [Console]::Out.WriteLine($line)
 }
 
 # Publish the artifact dir as a step output before anything can fail, so the
@@ -386,16 +404,21 @@ finally {
         # observation records (kind + stopped). A parse failure, mismatch or
         # contradiction throws into the catch below: exit 9, never success.
         $readText = [System.IO.File]::ReadAllText($script:ManifestPath, [System.Text.Encoding]::UTF8)
-        if ($readText -ne $manifestText) { throw 'manifest readback text mismatch: artifact differs from intended serialization' }
+        # R4-F1: ORDINAL text equality. PowerShell -eq/-ne are case-insensitive,
+        # so a case-only corruption of the written text would compare equal;
+        # [String]::Equals with StringComparison.Ordinal is exact.
+        if (-not [String]::Equals($readText, $manifestText, [StringComparison]::Ordinal)) { throw 'manifest readback text mismatch: artifact differs from intended serialization' }
         $readBack = $readText | ConvertFrom-Json
         if ($null -eq $readBack) { throw 'manifest readback parsed to null' }
-        if ([string]$readBack.schema -ne 'm3-native-rename-proof/1') { throw ('manifest readback schema mismatch: ' + [string]$readBack.schema) }
+        if (-not [String]::Equals([string]$readBack.schema, 'm3-native-rename-proof/1', [StringComparison]::Ordinal)) { throw ('manifest readback schema mismatch: ' + [string]$readBack.schema) }
         if ($env:GITHUB_RUN_ID -and [string]::IsNullOrWhiteSpace([string]$manifestData.runId)) { throw 'GitHub run identity missing from manifest' }
         if ($env:GITHUB_REPOSITORY -and [string]::IsNullOrWhiteSpace([string]$manifestData.repository)) { throw 'GitHub repository identity missing from manifest' }
         foreach ($field in @('runId', 'repository', 'generatedUtc', 'verdict')) {
             $expectedValue = [string]$manifestData[$field]
             $actualValue = [string]$readBack.$field
-            if ($actualValue -ne $expectedValue) { throw ('manifest readback ' + $field + ' mismatch: expected=[' + $expectedValue + '] actual=[' + $actualValue + ']') }
+            # R4-F1: ordinal comparison - serialized identity/verdict strings
+            # must match exactly, not case-insensitively.
+            if (-not [String]::Equals($actualValue, $expectedValue, [StringComparison]::Ordinal)) { throw ('manifest readback ' + $field + ' mismatch: expected=[' + $expectedValue + '] actual=[' + $actualValue + ']') }
         }
         if ([string]::IsNullOrWhiteSpace([string]$readBack.generatedUtc)) { throw 'manifest readback generatedUtc empty' }
         if ([string]::IsNullOrWhiteSpace([string]$readBack.verdict)) { throw 'manifest readback verdict empty' }
@@ -410,13 +433,13 @@ finally {
         } elseif ([int]$readBack.exitCodes.child -ne [int]$childExitCode) { throw 'manifest readback child exit mismatch' }
         if ($null -eq $readBack.processObservation) { throw 'manifest readback missing processObservation' }
         if ($null -ne $compileResult) {
-            if ([string]$readBack.processObservation.compile.kind -ne [string]$compileResult.kind) { throw 'manifest readback compile observation kind mismatch' }
+            if (-not [String]::Equals([string]$readBack.processObservation.compile.kind, [string]$compileResult.kind, [StringComparison]::Ordinal)) { throw 'manifest readback compile observation kind mismatch' }
             if ([bool]$readBack.processObservation.compile.stopped -ne [bool]$compileResult.stopped) { throw 'manifest readback compile stopped mismatch' }
-        } elseif ([string]$readBack.processObservation.compile.kind -ne 'NOT_RUN') { throw 'manifest readback compile observation must be NOT_RUN' }
+        } elseif (-not [String]::Equals([string]$readBack.processObservation.compile.kind, 'NOT_RUN', [StringComparison]::Ordinal)) { throw 'manifest readback compile observation must be NOT_RUN' }
         if ($null -ne $childResult) {
-            if ([string]$readBack.processObservation.child.kind -ne [string]$childResult.kind) { throw 'manifest readback child observation kind mismatch' }
+            if (-not [String]::Equals([string]$readBack.processObservation.child.kind, [string]$childResult.kind, [StringComparison]::Ordinal)) { throw 'manifest readback child observation kind mismatch' }
             if ([bool]$readBack.processObservation.child.stopped -ne [bool]$childResult.stopped) { throw 'manifest readback child stopped mismatch' }
-        } elseif ([string]$readBack.processObservation.child.kind -ne 'NOT_RUN') { throw 'manifest readback child observation must be NOT_RUN' }
+        } elseif (-not [String]::Equals([string]$readBack.processObservation.child.kind, 'NOT_RUN', [StringComparison]::Ordinal)) { throw 'manifest readback child observation must be NOT_RUN' }
         Write-Log ("manifest written+verified: " + $script:ManifestPath + " verdict=" + $verdict)
     }
     catch {
