@@ -1,0 +1,51 @@
+name: m3-native-rename-proof
+
+# Diagnostic-only workflow: measures the vendored TailFiles agent's legacy
+# rename (NtSetInformationFile class 10, ReplaceIfExists=1) on a hosted
+# Windows runner. Runs ONLY on pushes to this exact diagnostic branch -
+# never master, never via dispatch. A green run is a diagnostic observation,
+# NOT a product CI acceptance result and NOT product-test green.
+on:
+  push:
+    branches: [diag/m3-native-rename-proof]
+
+# Least privilege, matching ci.yml. No secrets are referenced anywhere.
+permissions:
+  contents: read
+
+concurrency:
+  group: m3-native-rename-proof-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  native-rename-proof:
+    runs-on: windows-latest
+    timeout-minutes: 10
+    steps:
+      # Same SHA pin as ci.yml/release.yml. Verified: tag v5 (== v5.1.0)
+      # points at this commit.
+      - name: Checkout diagnostic sources
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
+
+      # PowerShell 5.1 (in-box). The wrapper compiles the C# source with the
+      # runner's .NET Framework csc, runs the bounded child, and publishes
+      # the artifact directory as the 'artifact-dir' step output before
+      # anything else can fail.
+      - name: Compile and run native rename diagnostic
+        id: diag
+        shell: powershell
+        run: '& "$env:GITHUB_WORKSPACE\.github\diagnostics\m3-native-rename.ps1"'
+
+      # Always upload - including compile failures and closed-control
+      # failures, so raw evidence is preserved either way.
+      # Pin verified via git ls-remote + GitHub API readback: tag v4.6.2 is
+      # a lightweight tag on commit ea165f8d65b6e75b540449e92b4886f43607fa02.
+      - name: Upload diagnostic artifacts
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: m3-native-rename-proof
+          path: ${{ steps.diag.outputs.artifact-dir }}
+          if-no-files-found: error
