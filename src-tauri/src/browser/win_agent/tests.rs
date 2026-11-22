@@ -615,6 +615,70 @@ async fn replace_merge_rejects_case_variants_before_second_header() {
     }
 }
 #[tokio::test]
+async fn w3_overflow_remote_child_is_refused_before_any_offending_header() {
+    let child = "a".repeat(32_769);
+    // Source-side names may be legal on a non-Windows server; destination
+    // admission must independently reject before C#'s ushort length conversion.
+    assert!(super::super::listing::safe_remote_name(&child));
+    let rel = format!("tree/{child}");
+    for directory in [false, true] {
+        let (ch, wire) = MockChannel::boxed(b"Z", Some(0));
+        let mut sink = WinAgentSink::start(ch, proven(), "C:/data", "0123456789abcdef", false)
+            .await
+            .unwrap();
+        sink.dir_begin("tree", 0o755, 123).await.unwrap();
+        let before = wire.lock().unwrap().input.clone();
+        let result = if directory {
+            sink.dir_begin(&rel, 0o755, 123).await
+        } else {
+            sink.file_begin(
+                &rel,
+                &FileMeta {
+                    size: 0,
+                    mode: 0o644,
+                    mtime: 123,
+                },
+            )
+            .await
+        };
+        assert_eq!(result.unwrap_err().kind, ErrorKind::Denied);
+        assert_eq!(
+            wire.lock().unwrap().input,
+            before,
+            "offending header emitted"
+        );
+        assert!(sink.symlink(&rel, "target").await.is_err());
+        sink.remove().await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn w3_overlong_components_are_refused_by_absolute_paths_and_every_verb() {
+    for name in ["a".repeat(256), "😀".repeat(128), "a".repeat(32_769)] {
+        let t = TestTransport::agent();
+        let path = format!("C:/data/{name}");
+        assert!(validate_absolute(&path).is_err());
+        assert!(WinAgentSink::open(&t, &path, "0123456789abcdef", false)
+            .await
+            .is_err());
+        assert!(exists(&t, "C:/data", std::slice::from_ref(&name))
+            .await
+            .is_err());
+        assert!(rename(&t, "C:/data", &name, "ok").await.is_err());
+        assert!(rename(&t, "C:/data", "ok", &name).await.is_err());
+        assert!(delete(&t, &[path]).await.is_err());
+        assert!(mkdir(&t, "C:/data", &name).await.is_err());
+        assert_eq!(t.opens.load(Ordering::SeqCst), 0);
+        assert!(t.wires.lock().unwrap().is_empty());
+        assert_eq!(t.mutations.load(Ordering::SeqCst), 0);
+    }
+    for name in ["a".repeat(255), format!("{}a", "😀".repeat(127))] {
+        validate_absolute(&format!("C:/{name}")).unwrap();
+        validate_relative(&format!("tree/{name}")).unwrap();
+    }
+}
+
+#[tokio::test]
 async fn short_and_oversize_payloads_fail_and_cleanup_is_eof_only() {
     let (ch, w) = MockChannel::boxed(b"", Some(2));
     let mut s = WinAgentSink::start(ch, proven(), "C:/data", "0123456789abcdef", false)

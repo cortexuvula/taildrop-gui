@@ -1,0 +1,36 @@
+   Compiling taildrop-gui v0.17.0 (/Users/cortexuvula/Development/taildrop-gui/src-tauri)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 15.05s
+     Running unittests src/lib.rs (src-tauri/target/debug/deps/taildrop_gui_lib-ecfdd47c2e9dce6b)
+
+running 3 tests
+test browser::winnames::tests::w3_component_length_counts_utf16_units ... FAILED
+test browser::win_agent::tests::w3_overlong_components_are_refused_by_absolute_paths_and_every_verb ... FAILED
+test browser::win_agent::tests::w3_overflow_remote_child_is_refused_before_any_offending_header ... FAILED
+
+failures:
+
+---- browser::winnames::tests::w3_component_length_counts_utf16_units stdout ----
+
+thread 'browser::winnames::tests::w3_component_length_counts_utf16_units' (26367077) panicked at src/browser/winnames.rs:172:13:
+admitted 256 UTF-16 units
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+---- browser::win_agent::tests::w3_overlong_components_are_refused_by_absolute_paths_and_every_verb stdout ----
+
+thread 'browser::win_agent::tests::w3_overlong_components_are_refused_by_absolute_paths_and_every_verb' (26367076) panicked at src/browser/win_agent/tests.rs:646:9:
+assertion failed: validate_absolute(&path).is_err()
+
+---- browser::win_agent::tests::w3_overflow_remote_child_is_refused_before_any_offending_header stdout ----
+
+thread 'browser::win_agent::tests::w3_overflow_remote_child_is_refused_before_any_offending_header' (26367075) panicked at src/browser/win_agent/tests.rs:634:27:
+called `Result::unwrap_err()` on an `Ok` value: ()
+
+
+failures:
+    browser::win_agent::tests::w3_overflow_remote_child_is_refused_before_any_offending_header
+    browser::win_agent::tests::w3_overlong_components_are_refused_by_absolute_paths_and_every_verb
+    browser::winnames::tests::w3_component_length_counts_utf16_units
+
+test result: FAILED. 0 passed; 3 failed; 0 ignored; 0 measured; 315 filtered out; finished in 0.00s
+
+error: test failed, to rerun pass `--lib`

@@ -458,6 +458,7 @@ pub async fn delete(t: &dyn SftpTransport, paths: &[String]) -> Result<(), Brows
     verb(t, "delete", &args, PLACE_WAIT).await.map(|_| ())
 }
 pub async fn mkdir(t: &dyn SftpTransport, dir: &str, name: &str) -> Result<(), BrowserError> {
+    check_name(name)?;
     let mtime = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .ok()

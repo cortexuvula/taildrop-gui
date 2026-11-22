@@ -1,0 +1,11 @@
+   Compiling taildrop-gui v0.17.0 (/Users/cortexuvula/Development/taildrop-gui/src-tauri)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 15.34s
+     Running unittests src/lib.rs (src-tauri/target/debug/deps/taildrop_gui_lib-ecfdd47c2e9dce6b)
+
+running 3 tests
+test browser::winnames::tests::w3_component_length_counts_utf16_units ... ok
+test browser::win_agent::tests::w3_overflow_remote_child_is_refused_before_any_offending_header ... ok
+test browser::win_agent::tests::w3_overlong_components_are_refused_by_absolute_paths_and_every_verb ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 315 filtered out; finished in 0.01s
+

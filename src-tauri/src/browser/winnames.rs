@@ -55,6 +55,12 @@ pub fn windows_name_problem(name: &str) -> Option<&'static str> {
     if name.is_empty() {
         return Some("the name is empty");
     }
+    // NTFS components are at most 255 UTF-16 code units, not Unicode
+    // scalars or UTF-8 bytes. Also keeps the vendored native UNICODE_STRING
+    // ushort byte length from ever narrowing an oversized component.
+    if name.encode_utf16().count() > 255 {
+        return Some("Windows names cannot exceed 255 UTF-16 code units");
+    }
     if has_bad_char(name) {
         return Some("Windows doesn't allow these characters in names: \\ / : * ? \" < > |");
     }
@@ -158,6 +164,21 @@ mod tests {
                 windows_name_problem(n),
                 None,
                 "should accept non-reserved {n:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn w3_component_length_counts_utf16_units() {
+        for name in ["a".repeat(255), format!("{}a", "😀".repeat(127))] {
+            assert_eq!(name.encode_utf16().count(), 255);
+            assert_eq!(windows_name_problem(&name), None);
+        }
+        for name in ["a".repeat(256), "😀".repeat(128), "a".repeat(32_769)] {
+            assert!(
+                windows_name_problem(&name).is_some(),
+                "admitted {} UTF-16 units",
+                name.encode_utf16().count()
             );
         }
     }
