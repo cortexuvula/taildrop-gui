@@ -8,9 +8,27 @@
 # interrupted run. No secrets, no network calls, no product code, and no
 # shell command is built from user input.
 #
+# R3 repairs (evidence: hosted run 45078764946):
+#  - Start-Process -PassThru + WaitForExit returned a NULL ExitCode on the
+#    hosted WinPS 5.1 path (wrapper.log line "compile exit=" logged blank)
+#    even though csc had produced the exe. All process observation now goes
+#    through Invoke-BoundedProcess: strong script-scope reference, cached
+#    native handle, exit read inside a guarded try. An unreadable exit is
+#    classified as an OBSERVATION ERROR - never as success, never as a
+#    compiler/child failure, never silently blank.
+#  - $script:Manifest (path) collided case-insensitively with the $manifest
+#    data object (one script variable), so the manifest write did not land
+#    in manifest.json (0 bytes in the artifact) while the log still claimed
+#    success. The path is now $script:ManifestPath and the data is
+#    $manifestData; the exact artifact file is read back and verified
+#    (schema, identity fields, wrapper-exit binding) BEFORE any success is
+#    logged, and a failed write/readback fails the wrapper truthfully.
+#
 # Exit codes: 0 completed and internally consistent (diagnostic PASS - this
 # is NOT product-test green); 2 compile failed; 3 child exceeded 60s;
-# 4 child exit nonzero; 5 sandbox not absent after cleanup; 6 wrapper error.
+# 4 child exit nonzero; 5 sandbox not absent after cleanup; 6 wrapper error;
+# 7 compile exceeded its bound; 8 process exit unobservable (compile or
+# child); 9 manifest not written/verified.
 
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
@@ -23,7 +41,8 @@ $script:CompileErr  = Join-Path $script:ArtifactDir 'compile-stderr.txt'
 $script:ChildOut    = Join-Path $script:ArtifactDir 'child-stdout.txt'
 $script:ChildErr    = Join-Path $script:ArtifactDir 'child-stderr.txt'
 $script:EventsFile  = Join-Path $script:ArtifactDir 'child-events.log'
-$script:Manifest    = Join-Path $script:ArtifactDir 'manifest.json'
+$script:ManifestPath = Join-Path $script:ArtifactDir 'manifest.json'
+$script:ObservedProcess = $null
 
 function Write-Log {
     param([string]$Message)
@@ -41,6 +60,39 @@ function Set-StepOutput {
     }
 }
 
+# Bounded process observation for the in-box WinPS 5.1 path. Keeps a strong
+# script-scope reference to the Process object and pre-caches its native
+# handle so the exit code cannot be lost to early handle close/GC; reads the
+# exit inside a guarded try. stdout/stderr still stream straight into the
+# artifact files via redirect handles - this parent buffers nothing, so the
+# child's own live evidence survives a kill or crash. Returns exactly one of:
+#   EXITED           exitCode is a real [int] read from the native handle
+#   TIMEOUT          bound exceeded; process killed and reaped
+#   EXIT_UNAVAILABLE process exited but its code could not be read
+#                    (observation error - NOT a compiler/child failure)
+#   NO_PROCESS_OBJECT Start-Process returned no process object at all
+function Invoke-BoundedProcess {
+    param([string]$FilePath, [string]$Arguments, [string]$StdoutPath, [string]$StderrPath, [int]$BoundMs, [string]$Label)
+    $p = Start-Process -FilePath $FilePath -ArgumentList $Arguments -RedirectStandardOutput $StdoutPath -RedirectStandardError $StderrPath -NoNewWindow -PassThru
+    if ($null -eq $p) {
+        return @{ kind = 'NO_PROCESS_OBJECT'; exitCode = $null; timedOut = $false }
+    }
+    try { $null = $p.Handle } catch { Write-Log ($Label + ': native handle pre-cache unavailable: ' + $_.Exception.Message) }
+    $script:ObservedProcess = $p
+    $timedOut = -not $p.WaitForExit($BoundMs)
+    if ($timedOut) {
+        try { $p.Kill() } catch { Write-Log ($Label + ': kill failed: ' + $_.Exception.Message) }
+        if (-not $p.WaitForExit(15000)) { Write-Log ($Label + ': process not reaped within 15s of kill') }
+        return @{ kind = 'TIMEOUT'; exitCode = $null; timedOut = $true }
+    }
+    $code = $null
+    try { $code = $p.ExitCode } catch { $code = $null }
+    if ($null -eq $code) {
+        return @{ kind = 'EXIT_UNAVAILABLE'; exitCode = $null; timedOut = $false }
+    }
+    return @{ kind = 'EXITED'; exitCode = [int]$code; timedOut = $false }
+}
+
 $wrapperExit   = 6
 $compileArgvLine = $null
 $executeArgvLine = $null
@@ -52,14 +104,15 @@ $exeDigest = $null
 $cscPath   = $null
 $cscVersion = $null
 $drive     = $null
-$script:Sandbox = $null
 $sandboxCreated = $false
+$compileResult = $null
+$childResult = $null
 
 try {
     New-Item -ItemType Directory -Force -Path $script:ArtifactDir | Out-Null
     # Truncate every evidence file so a local rerun cannot append stale events.
     foreach ($f in @($script:WrapperLog, $script:CompileOut, $script:CompileErr,
-                     $script:ChildOut, $script:ChildErr, $script:EventsFile, $script:Manifest)) {
+                     $script:ChildOut, $script:ChildErr, $script:EventsFile, $script:ManifestPath)) {
         [System.IO.File]::WriteAllText($f, '', [System.Text.Encoding]::ASCII)
     }
     Set-StepOutput 'artifact-dir' $script:ArtifactDir
@@ -88,12 +141,21 @@ try {
 
     $compileArgvLine = ('/nologo /warn:4 /target:exe /out:"' + $exe + '" "' + $cs + '"')
     Write-Log ("compile argv: csc " + $compileArgvLine)
-    $cp = Start-Process -FilePath $cscPath -ArgumentList $compileArgvLine -RedirectStandardOutput $script:CompileOut -RedirectStandardError $script:CompileErr -NoNewWindow -PassThru
-    if (-not $cp.WaitForExit(120000)) { $cp.Kill(); $cp.WaitForExit(); throw 'csc exceeded its 120s bound' }
-    $compileExitCode = $cp.ExitCode
-    Write-Log ("compile exit=" + $compileExitCode)
+    $compileResult = Invoke-BoundedProcess -FilePath $cscPath -Arguments $compileArgvLine -StdoutPath $script:CompileOut -StderrPath $script:CompileErr -BoundMs 120000 -Label 'csc'
+    if ($compileResult.kind -eq 'EXITED') {
+        $compileExitCode = $compileResult.exitCode
+        Write-Log ("compile exit=" + $compileExitCode)
+    } elseif ($compileResult.kind -eq 'TIMEOUT') {
+        Write-Log 'compile observation: TIMEOUT - killed and reaped, raw streams preserved'
+    } else {
+        Write-Log ("compile observation error: " + $compileResult.kind + " - native exit code unavailable; NOT treated as compiler failure or as success")
+    }
 
-    if ($compileExitCode -ne 0) {
+    if ($compileResult.kind -eq 'TIMEOUT') {
+        $wrapperExit = 7
+    } elseif ($compileResult.kind -ne 'EXITED') {
+        $wrapperExit = 8
+    } elseif ($compileExitCode -ne 0) {
         # Raw compiler output is already persisted; never run a stale exe.
         $wrapperExit = 2
     } else {
@@ -103,18 +165,19 @@ try {
 
         $executeArgvLine = ('"' + $exe + '" "' + $script:Sandbox + '" "' + $script:EventsFile + '"')
         Write-Log ("execute argv: " + $executeArgvLine + " (bound 60s)")
-        $rp = Start-Process -FilePath $exe -ArgumentList ('"' + $script:Sandbox + '" "' + $script:EventsFile + '"') -RedirectStandardOutput $script:ChildOut -RedirectStandardError $script:ChildErr -NoNewWindow -PassThru
-        if (-not $rp.WaitForExit(60000)) {
+        $childResult = Invoke-BoundedProcess -FilePath $exe -Arguments ('"' + $script:Sandbox + '" "' + $script:EventsFile + '"') -StdoutPath $script:ChildOut -StderrPath $script:ChildErr -BoundMs 60000 -Label 'child'
+        if ($childResult.kind -eq 'EXITED') {
+            $childExitCode = $childResult.exitCode
+            Write-Log ("child exit=" + $childExitCode + " timed_out=False")
+            if ($childExitCode -ne 0) { $wrapperExit = 4 } else { $wrapperExit = 0 }
+        } elseif ($childResult.kind -eq 'TIMEOUT') {
             $childTimedOut = $true
-            Write-Log 'child exceeded 60s bound - killing'
-            $rp.Kill()
-            $rp.WaitForExit()
+            Write-Log 'child observation: TIMEOUT after 60s - killed and reaped, events/stdout/stderr preserved'
+            $wrapperExit = 3
+        } else {
+            Write-Log ("child observation error: " + $childResult.kind + " - native exit code unavailable; NOT treated as child failure or as success")
+            $wrapperExit = 8
         }
-        $childExitCode = $rp.ExitCode
-        Write-Log ("child exit=" + $childExitCode + " timed_out=" + $childTimedOut)
-        if ($childTimedOut) { $wrapperExit = 3 }
-        elseif ($childExitCode -ne 0) { $wrapperExit = 4 }
-        else { $wrapperExit = 0 }
     }
 }
 catch {
@@ -172,14 +235,21 @@ finally {
         4 { $verdict = 'CHILD_NONZERO' }
         5 { $verdict = 'SANDBOX_PRESENT' }
         6 { $verdict = 'WRAPPER_ERROR' }
+        7 { $verdict = 'COMPILE_TIMEOUT' }
+        8 { $verdict = 'EXIT_UNAVAILABLE' }
+        9 { $verdict = 'MANIFEST_UNVERIFIED' }
     }
 
+    # Manifest: distinct data variable ($manifestData) vs the exact artifact
+    # path ($script:ManifestPath). The same file is read back and verified
+    # before any success is logged; failure here fails the wrapper (exit 9)
+    # instead of claiming a write that never landed.
     try {
         $volumeInfo = $null
         if ($null -ne $drive) {
             $volumeInfo = @{ root = $drive.Name; filesystem = $drive.DriveFormat; type = ("{0}" -f $drive.DriveType) }
         }
-        $manifest = [ordered]@{
+        $manifestData = [ordered]@{
             schema                = 'm3-native-rename-proof/1'
             note                  = 'Diagnostic measurement of the vendored legacy rename only; PASS here is NOT product-test green.'
             generatedUtc          = ([DateTime]::UtcNow.ToString('o'))
@@ -196,6 +266,8 @@ finally {
             boundsMs              = @{ compile = 120000; child = 60000 }
             digests               = @{ cs = $csDigest; exe = $exeDigest }
             exitCodes             = @{ compile = $compileExitCode; child = $childExitCode; wrapper = $wrapperExit }
+            compileObservation    = $(if ($null -ne $compileResult) { $compileResult.kind } else { 'NOT_RUN' })
+            childObservation      = $(if ($null -ne $childResult) { $childResult.kind } else { 'NOT_RUN' })
             childTimedOut         = $childTimedOut
             sandbox               = @{ path = $script:Sandbox; created = $sandboxCreated; absentAfterCleanup = $sandboxAbsent }
             cleanupErrors         = $cleanupErrors
@@ -206,13 +278,25 @@ finally {
             streams               = @{ stdout = $script:ChildOut; stderr = $script:ChildErr; compileStdout = $script:CompileOut; compileStderr = $script:CompileErr }
             verdict               = $verdict
         }
-        $json = $manifest | ConvertTo-Json -Depth 5
-        [System.IO.File]::WriteAllText($script:Manifest, $json + "`n", (New-Object System.Text.UTF8Encoding($false)))
-        Write-Log ("manifest written, verdict=" + $verdict)
+        $manifestJson = $manifestData | ConvertTo-Json -Depth 5
+        [System.IO.File]::WriteAllText($script:ManifestPath, $manifestJson + "`n", (New-Object System.Text.UTF8Encoding($false)))
+        # Read back THE SAME artifact file and verify identity before any
+        # success claim. A parse failure or mismatch throws into the catch
+        # below: the wrapper then exits 9 and never logs success.
+        $readBack = Get-Content -LiteralPath $script:ManifestPath -Raw -Encoding UTF8 | ConvertFrom-Json
+        if ($null -eq $readBack) { throw 'manifest readback parsed to null' }
+        if ([string]$readBack.schema -ne 'm3-native-rename-proof/1') { throw ('manifest readback schema mismatch: ' + [string]$readBack.schema) }
+        if ([string]::IsNullOrWhiteSpace([string]$readBack.generatedUtc)) { throw 'manifest readback missing generatedUtc' }
+        if ($null -eq $readBack.verdict) { throw 'manifest readback missing verdict' }
+        if ($null -eq $readBack.exitCodes) { throw 'manifest readback missing exitCodes' }
+        if ($null -eq $readBack.exitCodes.wrapper) { throw 'manifest readback missing exitCodes.wrapper' }
+        if ([int]$readBack.exitCodes.wrapper -ne $wrapperExit) { throw ('manifest readback wrapper-exit mismatch: file=' + [string]$readBack.exitCodes.wrapper + ' actual=' + $wrapperExit) }
+        Write-Log ("manifest written+verified: " + $script:ManifestPath + " verdict=" + $verdict)
     }
     catch {
         Write-Log ("MANIFEST_ERROR " + $_.Exception.GetType().Name + ": " + $_.Exception.Message)
-        if ($wrapperExit -eq 0) { $wrapperExit = 6 }
+        $wrapperExit = 9
+        $verdict = 'MANIFEST_UNVERIFIED'
     }
 }
 exit $wrapperExit
