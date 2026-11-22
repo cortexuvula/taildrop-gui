@@ -1,5 +1,10 @@
 # M3 backend verification and handoff
 
+> Historical isolated-lane receipt at `84c1f10`. Parent `SUMMARY.md` supersedes
+> this receipt for final SHAs, gate results and recovery/harness repairs.
+> In particular, the deterministic-source retry limitation below was repaired
+> with attempt-unique source names; do not treat it as a current limitation.
+
 ## Outcome and scope
 
 Backend implementation complete; **Windows runtime gate remains HOLD / not observed**.
