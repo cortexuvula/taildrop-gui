@@ -1,0 +1,29 @@
+   Compiling taildrop-gui v0.17.0 (/Users/cortexuvula/Development/taildrop-gui/src-tauri)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 14.51s
+     Running unittests src/lib.rs (src-tauri/target/debug/deps/taildrop_gui_lib-ecfdd47c2e9dce6b)
+
+running 2 tests
+test browser::win_agent::tests::w1_rename_command_adapter_keeps_drive_root_absolute ... FAILED
+test browser::win_agent::tests::w1_mkdir_command_adapter_keeps_drive_root_absolute ... FAILED
+
+failures:
+
+---- browser::win_agent::tests::w1_rename_command_adapter_keeps_drive_root_absolute stdout ----
+
+thread 'browser::win_agent::tests::w1_rename_command_adapter_keeps_drive_root_absolute' (26340251) panicked at src/browser/win_agent/tests.rs:675:39:
+rename /C:/old: Windows helper requires an absolute drive path
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+---- browser::win_agent::tests::w1_mkdir_command_adapter_keeps_drive_root_absolute stdout ----
+
+thread 'browser::win_agent::tests::w1_mkdir_command_adapter_keeps_drive_root_absolute' (26340250) panicked at src/browser/win_agent/tests.rs:660:39:
+mkdir /C:/folder: Windows helper requires an absolute drive path
+
+
+failures:
+    browser::win_agent::tests::w1_mkdir_command_adapter_keeps_drive_root_absolute
+    browser::win_agent::tests::w1_rename_command_adapter_keeps_drive_root_absolute
+
+test result: FAILED. 0 passed; 2 failed; 0 ignored; 0 measured; 313 filtered out; finished in 0.00s
+
+error: test failed, to rerun pass `--lib`

@@ -652,6 +652,53 @@ async fn unproven_windows_writes_never_open_exec_or_mutate_sftp() {
     assert_eq!(t.mutations.load(Ordering::SeqCst), 0);
 }
 #[tokio::test]
+async fn w1_mkdir_command_adapter_keeps_drive_root_absolute() {
+    for parent in ["/C:/", "C:/", "/C:/nested/", "C:/nested/"] {
+        let t = TestTransport {
+            proof: b"Z".to_vec(),
+            ..TestTransport::agent()
+        };
+        let path = format!("{parent}folder");
+        super::super::commands::mkdir_windows_remote(&t, &path, "folder")
+            .await
+            .unwrap_or_else(|e| panic!("mkdir {path}: {e}"));
+        let wire = t.wires.lock().unwrap()[0].lock().unwrap().input.clone();
+        let expected_parent = if parent.ends_with("nested/") {
+            parent.trim_end_matches('/')
+        } else {
+            parent
+        };
+        assert!(wire.starts_with(format!("recv\0{expected_parent}\0").as_bytes()));
+        assert_eq!(t.mutations.load(Ordering::SeqCst), 0);
+    }
+}
+
+#[tokio::test]
+async fn w1_rename_command_adapter_keeps_drive_root_absolute() {
+    for parent in ["/C:/", "C:/", "/C:/nested/", "C:/nested/"] {
+        let t = TestTransport::agent();
+        let old = format!("{parent}old");
+        let new = format!("{parent}new");
+        super::super::commands::rename_windows_remote(&t, &old, &new, "old", "new")
+            .await
+            .unwrap_or_else(|e| panic!("rename {old}: {e}"));
+        let wire = t.wires.lock().unwrap()[0].lock().unwrap().input.clone();
+        let expected_parent = if parent.ends_with("nested/") {
+            parent.trim_end_matches('/')
+        } else {
+            parent
+        };
+        assert_eq!(
+            wire,
+            format!("rename\0{expected_parent}\0old\0new\0").as_bytes()
+        );
+        assert_eq!(t.mutations.load(Ordering::SeqCst), 0);
+    }
+    assert!(validate_absolute("/C:").is_err());
+    assert!(validate_absolute("C:").is_err());
+}
+
+#[tokio::test]
 async fn proven_windows_mutations_use_only_native_verbs_and_mkdir_d_z() {
     let t = TestTransport {
         proof: b"Z".to_vec(),

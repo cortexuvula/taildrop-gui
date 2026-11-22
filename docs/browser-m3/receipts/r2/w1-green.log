@@ -1,0 +1,10 @@
+   Compiling taildrop-gui v0.17.0 (/Users/cortexuvula/Development/taildrop-gui/src-tauri)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 13.76s
+     Running unittests src/lib.rs (src-tauri/target/debug/deps/taildrop_gui_lib-ecfdd47c2e9dce6b)
+
+running 2 tests
+test browser::win_agent::tests::w1_rename_command_adapter_keeps_drive_root_absolute ... ok
+test browser::win_agent::tests::w1_mkdir_command_adapter_keeps_drive_root_absolute ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 313 filtered out; finished in 0.01s
+

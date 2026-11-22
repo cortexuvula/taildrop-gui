@@ -27,7 +27,7 @@ use crate::browser::listing;
 use crate::browser::probe::{build_probe_info, is_posix, ProbeCache};
 use crate::browser::session::{RusshTransport, SessionCtx};
 use crate::browser::transfer::{self, Side};
-use crate::browser::transport::SftpTransport as _;
+use crate::browser::transport::SftpTransport;
 use crate::browser::win_agent::{self, WinAgentCache};
 use crate::browser::{
     valid_host, valid_user, BrowserConfig, BrowserError, BrowserPeer, CopyEvent, CopyJobSnapshot,
@@ -1003,8 +1003,7 @@ async fn mkdir_remote(
     name: &str,
 ) -> Result<(), BrowserError> {
     if t.flavor().is_windows() {
-        win_agent::validate_absolute(path)?;
-        return win_agent::mkdir(t, &parent_of(path), name).await;
+        return mkdir_windows_remote(t, path, name).await;
     }
     // Note: for non-Windows targets the plugin validates names only on the
     // Windows destination itself; this branch intentionally does not refuse
@@ -1051,9 +1050,7 @@ pub async fn browser_rename(
     let r = async {
         if transport.flavor().is_windows() {
             attach_windows_agent(&state, &target, &transport).await;
-            win_agent::validate_absolute(&old)?;
-            win_agent::validate_absolute(&new)?;
-            return win_agent::rename(&transport, &parent_of(&old), &old_name, &new_name).await;
+            return rename_windows_remote(&transport, &old, &new, &old_name, &new_name).await;
         }
         // Never replace: ask the filesystem (case-insensitive volumes answer
         // for case-variant clashes too).
@@ -1074,6 +1071,38 @@ pub async fn browser_rename(
     .await;
     let _ = Box::new(transport).close().await;
     r
+}
+
+pub(super) async fn mkdir_windows_remote(
+    t: &dyn SftpTransport,
+    path: &str,
+    name: &str,
+) -> Result<(), BrowserError> {
+    win_agent::validate_absolute(path)?;
+    win_agent::mkdir(t, &windows_parent_of(path), name).await
+}
+
+pub(super) async fn rename_windows_remote(
+    t: &dyn SftpTransport,
+    old: &str,
+    new: &str,
+    old_name: &str,
+    new_name: &str,
+) -> Result<(), BrowserError> {
+    win_agent::validate_absolute(old)?;
+    win_agent::validate_absolute(new)?;
+    win_agent::rename(t, &windows_parent_of(old), old_name, new_name).await
+}
+
+/// Preserve the drive-root separator only for Windows helper adapters.
+/// POSIX parent resolution (including colon-containing folder names) is unchanged.
+fn windows_parent_of(path: &str) -> String {
+    let mut parent = parent_of(path);
+    let drive = parent.strip_prefix('/').unwrap_or(&parent).as_bytes();
+    if drive.len() == 2 && drive[0].is_ascii_alphabetic() && drive[1] == b':' {
+        parent.push('/');
+    }
+    parent
 }
 
 /// Local atomic no-replace rename through dir fds (Unix). Non-Unix local
