@@ -222,6 +222,7 @@ export function sanitizeProbe(v: unknown): ProbeInfo | null {
     flavor: v.flavor as ServerFlavor,
     user: v.user,
     extensions,
+    winAgent: v.winAgent === true,
   };
 }
 

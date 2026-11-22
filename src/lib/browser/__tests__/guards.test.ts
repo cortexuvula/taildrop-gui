@@ -141,6 +141,18 @@ describe("sanitizeBrowserConfig", () => {
 });
 
 describe("sanitizeProbe", () => {
+  it.each([undefined, null, false, "true", 1, {}, []])("defaults malformed/missing winAgent %j to false", (winAgent) => {
+    expect(sanitizeProbe({
+      system: "Windows", posix: false, home: "C:/Users/u",
+      flavor: "openssh-windows", user: "u", extensions: {}, winAgent,
+    })).toHaveProperty("winAgent", false);
+  });
+  it("accepts only literal true as Windows agent proof", () => {
+    expect(sanitizeProbe({
+      system: "Windows", posix: false, home: "C:/Users/u",
+      flavor: "openssh-windows", user: "u", extensions: {}, winAgent: true,
+    })).toHaveProperty("winAgent", true);
+  });
   it("accepts a full probe", () => {
     const p = sanitizeProbe({
       system: "Linux",

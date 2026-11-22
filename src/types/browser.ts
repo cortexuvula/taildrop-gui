@@ -65,6 +65,8 @@ export interface ProbeInfo {
   flavor: ServerFlavor;
   user: string;
   extensions: Record<string, string>;
+  /** Exact host + account agent proof; absent/older servers mean false. */
+  winAgent?: boolean;
 }
 
 export interface BrowserPeer {
