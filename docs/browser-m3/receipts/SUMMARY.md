@@ -1,4 +1,10 @@
-# M3 Windows parity — implementation handoff
+# M3 Windows parity — original R1 handoff (historical)
+
+> **Superseded by [R2 correction handoff](r2/SUMMARY.md).** Codie requested
+> changes at `8d555e9`; W1/W2/W3 are corrected and freshly gated at `3d4651c`.
+> The results below are preserved as historical R1 evidence, not the current
+> candidate's verification authority. R2 review, Windows CI and fleet smoke
+> remain separate outstanding gates.
 
 ## Status
 

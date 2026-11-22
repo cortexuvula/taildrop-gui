@@ -1,0 +1,15 @@
+
+> taildrop-gui@0.17.0 test
+> vitest run
+
+
+ RUN  v4.1.10 /Users/cortexuvula/Development/taildrop-gui
+
+
+ Test Files  20 passed (20)
+      Tests  211 passed (211)
+   Start at  20:26:35
+   Duration  9.03s (transform 5.05s, setup 0ms, import 8.90s, tests 11.17s, environment 25.34s)
+
+
+-- End raw output --

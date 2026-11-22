@@ -1,0 +1,42 @@
+{
+  "tested_sha": "3d4651cb38644c13c48388d224c11b33515c113c",
+  "vendor_bytes": 35158,
+  "vendor_sha256": "cfa1c1af6b1617180b3297d5e0f69b8c6dc322ce85807aba1ab47099fdaa5133",
+  "upstream_commit": "c95f1b7bf446304b6c8826b149f6d94ca719ac69",
+  "vendor_equal_to_upstream": true,
+  "vendor_unchanged_since_r1": true,
+  "protected_unchanged_since_base": [
+    "src-tauri/src/tailscale.rs",
+    "src-tauri/src/browser/agent.rs",
+    "src-tauri/agents/agent.pl",
+    "src-tauri/agents/posix_delete.sh"
+  ],
+  "source_files_scanned": [
+    "src-tauri/src/browser/commands.rs",
+    "src-tauri/src/browser/win_agent.rs",
+    "src-tauri/src/browser/win_agent/tests.rs",
+    "src-tauri/src/browser/win_agent/tests/windows.rs",
+    "src-tauri/src/browser/winnames.rs"
+  ],
+  "static_hits": [],
+  "positive_controls": [
+    "unlinked_marker",
+    "private_key_literal",
+    "token_literal",
+    "shell_true",
+    "unsafe_deserialization"
+  ],
+  "native_tests": [
+    "csharp_loader_compile_and_known_answer_under_both_login_shells",
+    "csharp_tree_mtime_modes_ignored_and_client_con_refusal",
+    "csharp_toctou_keep_and_atomic_replace_preserve_realname",
+    "csharp_eof_cancel_removes_unfinished_only_and_leaves_lookalike",
+    "csharp_eof_cancel_removes_unfinished_directory_tree",
+    "csharp_planted_exact_next_temp_and_lookalike_untouched",
+    "csharp_replace_merge_case_clash_is_client_refused",
+    "csharp_native_mkdir_rename_readonly_delete_and_junction_sentinel",
+    "csharp_delete_all_target_home_guard_precedes_first_mutation"
+  ],
+  "native_tests_executed": false,
+  "limitation": "Narrow added-line hygiene and static provenance, not an external security audit or native Windows execution"
+}

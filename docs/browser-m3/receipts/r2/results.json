@@ -1,0 +1,225 @@
+{
+  "schema": "observed_check_results/v1",
+  "tested_sha": "3d4651cb38644c13c48388d224c11b33515c113c",
+  "finished": "2026-11-22T03:27:02.512574+00:00",
+  "free_bytes_at_start": 107383443456,
+  "env": {
+    "CARGO_TARGET_DIR": "/Users/cortexuvula/Development/taildrop-gui/src-tauri/target",
+    "CARGO_INCREMENTAL": "0",
+    "CI": "1"
+  },
+  "generated_artifact_provenance": "map_not_declared",
+  "checks": [
+    {
+      "command": [
+        "cargo",
+        "test",
+        "--manifest-path",
+        "src-tauri/Cargo.toml",
+        "--lib"
+      ],
+      "source": "/Users/cortexuvula/Development/taildrop-gui",
+      "tested_sha": "3d4651cb38644c13c48388d224c11b33515c113c",
+      "exit_status": 0,
+      "scope": "all host Rust lib tests; no C# execution",
+      "started": "2026-11-22T03:26:31.775041+00:00",
+      "finished": "2026-11-22T03:26:33.998366+00:00",
+      "seconds": 2.223,
+      "freshness": "source committed at tested_sha; runner/receipts only added while running",
+      "log": "docs/browser-m3/receipts/r2/cargo-lib.log",
+      "sha256": "584084744d7c04de5aabfc0ea6cc03148b35d1e6e890c84be46497ba3fec5b07",
+      "summary": "test tailscale::tests::ra01_isolated_fixtures_invisible_to_recovery_scan ... ok\ntest tailscale::tests::capped_command_survives_pipe_capacity_stderr ... ok\ntest tailscale::tests::capped_command_survives_pipe_capacity_output ... ok\ntest tailscale::tests::capped_command_terminates_and_errors_past_deadline ... ok\ntest tests::a2_owner1526_postload_admission_blocked_until_commit_ends_invalid_a ... ok\ntest tests::a2_owner1526_postload_admission_blocked_until_commit_ends_valid_a ... ok\ntest browser::fake::tests::remote_to_remote_dst_auth_failure_leaves_nothing ... ok\n\ntest result: ok. 318 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.67s\n\n\n-- End raw output --"
+    },
+    {
+      "command": [
+        "cargo",
+        "fmt",
+        "--manifest-path",
+        "src-tauri/Cargo.toml",
+        "--all",
+        "--",
+        "--check"
+      ],
+      "source": "/Users/cortexuvula/Development/taildrop-gui",
+      "tested_sha": "3d4651cb38644c13c48388d224c11b33515c113c",
+      "exit_status": 0,
+      "scope": "Rust formatting",
+      "started": "2026-11-22T03:26:33.999225+00:00",
+      "finished": "2026-11-22T03:26:34.421015+00:00",
+      "seconds": 0.422,
+      "freshness": "source committed at tested_sha; runner/receipts only added while running",
+      "log": "docs/browser-m3/receipts/r2/fmt.log",
+      "sha256": "5845dd7c8449f7985afb0a7a3124b240e9852d3fabf2699045da686c10dd87bc",
+      "summary": "\n-- End raw output --"
+    },
+    {
+      "command": [
+        "cargo",
+        "clippy",
+        "--manifest-path",
+        "src-tauri/Cargo.toml",
+        "--all-targets",
+        "--",
+        "-D",
+        "warnings"
+      ],
+      "source": "/Users/cortexuvula/Development/taildrop-gui",
+      "tested_sha": "3d4651cb38644c13c48388d224c11b33515c113c",
+      "exit_status": 0,
+      "scope": "host Rust code and tests",
+      "started": "2026-11-22T03:26:34.421572+00:00",
+      "finished": "2026-11-22T03:26:35.981363+00:00",
+      "seconds": 1.56,
+      "freshness": "source committed at tested_sha; runner/receipts only added while running",
+      "log": "docs/browser-m3/receipts/r2/clippy-host.log",
+      "sha256": "5e0ff624adc359c53fd6c50a62dcdbe8cd2647fa792900f1692840ff28b3a7b0",
+      "summary": "    Finished `dev` profile [unoptimized + debuginfo] target(s) in 1.28s\n\n-- End raw output --"
+    },
+    {
+      "command": [
+        "cargo",
+        "check",
+        "--manifest-path",
+        "src-tauri/Cargo.toml",
+        "--target",
+        "x86_64-pc-windows-gnu",
+        "--tests"
+      ],
+      "source": "/Users/cortexuvula/Development/taildrop-gui",
+      "tested_sha": "3d4651cb38644c13c48388d224c11b33515c113c",
+      "exit_status": 0,
+      "scope": "Windows Rust/tests compilation only; no C# compilation or execution",
+      "started": "2026-11-22T03:26:35.982121+00:00",
+      "finished": "2026-11-22T03:26:38.469134+00:00",
+      "seconds": 2.487,
+      "freshness": "source committed at tested_sha; runner/receipts only added while running",
+      "log": "docs/browser-m3/receipts/r2/check-windows.log",
+      "sha256": "8ee3840da315541a4688139b6d71d25b1d1d3522cd287bf7a24d90c4927abcea",
+      "summary": "    Finished `dev` profile [unoptimized + debuginfo] target(s) in 2.29s\n\n-- End raw output --"
+    },
+    {
+      "command": [
+        "cargo",
+        "clippy",
+        "--manifest-path",
+        "src-tauri/Cargo.toml",
+        "--target",
+        "x86_64-pc-windows-gnu",
+        "--all-targets",
+        "--",
+        "-D",
+        "warnings"
+      ],
+      "source": "/Users/cortexuvula/Development/taildrop-gui",
+      "tested_sha": "3d4651cb38644c13c48388d224c11b33515c113c",
+      "exit_status": 0,
+      "scope": "Windows Rust/tests lint and compilation only",
+      "started": "2026-11-22T03:26:38.472031+00:00",
+      "finished": "2026-11-22T03:26:39.316676+00:00",
+      "seconds": 0.845,
+      "freshness": "source committed at tested_sha; runner/receipts only added while running",
+      "log": "docs/browser-m3/receipts/r2/clippy-windows.log",
+      "sha256": "13723ac0fed5dc45bfd6ee6f25677f89d914bc56aa5a7564b3e086c383fec859",
+      "summary": "    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.65s\n\n-- End raw output --"
+    },
+    {
+      "command": [
+        "./node_modules/.bin/tsc",
+        "--noEmit"
+      ],
+      "source": "/Users/cortexuvula/Development/taildrop-gui",
+      "tested_sha": "3d4651cb38644c13c48388d224c11b33515c113c",
+      "exit_status": 0,
+      "scope": "TypeScript strict typecheck",
+      "started": "2026-11-22T03:26:31.775322+00:00",
+      "finished": "2026-11-22T03:26:34.379670+00:00",
+      "seconds": 2.604,
+      "freshness": "source committed at tested_sha; runner/receipts only added while running",
+      "log": "docs/browser-m3/receipts/r2/tsc.log",
+      "sha256": "5845dd7c8449f7985afb0a7a3124b240e9852d3fabf2699045da686c10dd87bc",
+      "summary": "\n-- End raw output --"
+    },
+    {
+      "command": [
+        "npm",
+        "test"
+      ],
+      "source": "/Users/cortexuvula/Development/taildrop-gui",
+      "tested_sha": "3d4651cb38644c13c48388d224c11b33515c113c",
+      "exit_status": 0,
+      "scope": "all frontend unit tests",
+      "started": "2026-11-22T03:26:34.380384+00:00",
+      "finished": "2026-11-22T03:26:44.102371+00:00",
+      "seconds": 9.722,
+      "freshness": "source committed at tested_sha; runner/receipts only added while running",
+      "log": "docs/browser-m3/receipts/r2/vitest.log",
+      "sha256": "9351c48f56fe8dd0827b08f6ed3e916ef3917c9d493fef942e1f9b5abd15b1a1",
+      "summary": "\n\n RUN  v4.1.10 /Users/cortexuvula/Development/taildrop-gui\n\n\n Test Files  20 passed (20)\n      Tests  211 passed (211)\n   Start at  20:26:35\n   Duration  9.03s (transform 5.05s, setup 0ms, import 8.90s, tests 11.17s, environment 25.34s)\n\n\n-- End raw output --"
+    },
+    {
+      "command": [
+        "./node_modules/.bin/playwright",
+        "test",
+        "--workers=4",
+        "--retries=0"
+      ],
+      "source": "/Users/cortexuvula/Development/taildrop-gui",
+      "tested_sha": "3d4651cb38644c13c48388d224c11b33515c113c",
+      "exit_status": 0,
+      "scope": "production React app with IPC fakes, fresh Vite, no fleet or native WebView",
+      "started": "2026-11-22T03:26:44.102650+00:00",
+      "finished": "2026-11-22T03:26:59.482999+00:00",
+      "seconds": 15.38,
+      "freshness": "source committed at tested_sha; runner/receipts only added while running",
+      "log": "docs/browser-m3/receipts/r2/playwright.log",
+      "sha256": "d7b8787cc5fa89509902bf5aad2b2172f3bb7623d2975671bbda933f40ab8103",
+      "summary": "  \u2713  58 [chromium] \u203a e2e/settings.test.ts:287:1 \u203a Escape closes, focus returns to the trigger, and the dialog reopens cleanly (629ms)\n  \u2713  61 [chromium] \u203a e2e/settings.test.ts:374:1 \u203a enlarged-text emulation (~150% zoom) keeps controls reachable (493ms)\n  \u2713  59 [chromium] \u203a e2e/settings.test.ts:311:1 \u203a at the 700x500 minimum, header and footer stay reachable and the body scrolls the device list (846ms)\n  \u2713  62 [chromium] \u203a e2e/settings.test.ts:396:1 \u203a DebugPanel retains its scrolling layout over the shared panel CSS (458ms)\n  \u2713  64 [chromium] \u203a e2e/windows-agent.test.ts:65:3 \u203a unproven Windows missing proof: buttons and keyboard refuse writes, pull stays available (1.3s)\n  \u2713  65 [chromium] \u203a e2e/windows-agent.test.ts:65:3 \u203a unproven Windows malformed proof and unknown OS: buttons and keyboard refuse writes, pull stays available (1.1s)\n  \u2713  66 [chromium] \u203a e2e/windows-agent.test.ts:65:3 \u203a unproven Windows failed agent probe: buttons and keyboard refuse writes, pull stays available (1.8s)\n  \u2713  63 [chromium] \u203a e2e/windows-agent.test.ts:18:1 \u203a proven Windows account enables mkdir/rename/delete and copy-INTO through production controls (2.3s)\n\n  66 passed (15.0s)\n\n-- End raw output --"
+    },
+    {
+      "command": [
+        "npm",
+        "run",
+        "build"
+      ],
+      "source": "/Users/cortexuvula/Development/taildrop-gui",
+      "tested_sha": "3d4651cb38644c13c48388d224c11b33515c113c",
+      "exit_status": 0,
+      "scope": "production frontend build",
+      "started": "2026-11-22T03:26:59.483943+00:00",
+      "finished": "2026-11-22T03:27:02.483835+00:00",
+      "seconds": 3.0,
+      "freshness": "source committed at tested_sha; runner/receipts only added while running",
+      "log": "docs/browser-m3/receipts/r2/frontend-build.log",
+      "sha256": "89f41d1a72165a23b0269a404069d905592ef10f6045a00d2a7818f2f9f59c68",
+      "summary": "\n\u001b[36mvite v7.3.6 \u001b[32mbuilding client environment for production...\u001b[36m\u001b[39m\ntransforming...\n\u001b[32m\u2713\u001b[39m 79 modules transformed.\nrendering chunks...\ncomputing gzip size...\n\u001b[2mdist/\u001b[22m\u001b[32mindex.html                 \u001b[39m\u001b[1m\u001b[2m  0.46 kB\u001b[22m\u001b[1m\u001b[22m\u001b[2m \u2502 gzip:  0.29 kB\u001b[22m\n\u001b[2mdist/\u001b[22m\u001b[2massets/\u001b[22m\u001b[35mindex-CqzCLmy_.css  \u001b[39m\u001b[1m\u001b[2m 37.15 kB\u001b[22m\u001b[1m\u001b[22m\u001b[2m \u2502 gzip:  6.73 kB\u001b[22m\n\u001b[2mdist/\u001b[22m\u001b[2massets/\u001b[22m\u001b[36mindex-RkJhpgbn.js   \u001b[39m\u001b[1m\u001b[2m306.85 kB\u001b[22m\u001b[1m\u001b[22m\u001b[2m \u2502 gzip: 93.91 kB\u001b[22m\n\u001b[32m\u2713 built in 710ms\u001b[39m\n\n-- End raw output --"
+    },
+    {
+      "command": [
+        "git",
+        "diff",
+        "--check",
+        "d111578",
+        "HEAD"
+      ],
+      "source": "/Users/cortexuvula/Development/taildrop-gui",
+      "tested_sha": "3d4651cb38644c13c48388d224c11b33515c113c",
+      "exit_status": 0,
+      "scope": "full committed M3 delta whitespace",
+      "started": "2026-11-22T03:27:02.484206+00:00",
+      "finished": "2026-11-22T03:27:02.512225+00:00",
+      "seconds": 0.028,
+      "freshness": "source committed at tested_sha; runner/receipts only added while running",
+      "log": "docs/browser-m3/receipts/r2/diff-hygiene.log",
+      "sha256": "5845dd7c8449f7985afb0a7a3124b240e9852d3fabf2699045da686c10dd87bc",
+      "summary": "\n-- End raw output --"
+    }
+  ],
+  "missing": [
+    "Codie R2 approval",
+    "exact-head windows-latest CI and all nine C# tests",
+    "Frikkie room-6 smoke",
+    "Frikkie accuro-server smoke"
+  ],
+  "release_verdict": "HOLD",
+  "local_checks_passed": true
+}

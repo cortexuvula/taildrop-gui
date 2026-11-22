@@ -34,6 +34,12 @@ New-Item -ItemType Directory -Path $sentinel | Out-Null
 $junction = Join-Path $dest 'junction-to-sentinel'
 cmd /c "mklink /J `"$junction`" `"$sentinel`""
 if ($LASTEXITCODE -ne 0) { throw 'Scratch junction creation failed' }
+$recursive = Join-Path $dest 'recursive-delete'
+New-Item -ItemType Directory -Path (Join-Path $recursive 'nested') | Out-Null
+[IO.File]::WriteAllText((Join-Path $recursive 'nested\ordinary.txt'), 'owned recursive delete fixture')
+$nestedJunction = Join-Path $recursive 'nested\junction-to-sentinel'
+cmd /c "mklink /J `"$nestedJunction`" `"$sentinel`""
+if ($LASTEXITCODE -ne 0) { throw 'Nested scratch junction creation failed' }
 $root
 Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path $source 'tree\payload.bin')
 ```
@@ -109,15 +115,31 @@ Get-Item -LiteralPath (Join-Path $dest 'tree'),(Join-Path $dest 'tree\payload.bi
 
 ## 4. Native mutations and scope safety
 
-1. In app `destination`, New folder `made-by-app`, then Rename it to
-   `renamed-by-app`. Rename to another existing scratch item's name must refuse.
-2. Delete **only `readonly.txt` and `junction-to-sentinel`** using the app.
+1. Before New folder, run `$mkdirBefore = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds()`
+   in the same PowerShell session. In app `destination`, create `made-by-app`.
+   Then run the timestamp assertion below **before adding children or renaming**:
+
+   ```powershell
+   $mkdirAfter = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
+   $folderTime = (Get-Item -LiteralPath (Join-Path $dest 'made-by-app')).LastWriteTimeUtc
+   $mtime = ([DateTimeOffset]$folderTime).ToUnixTimeSeconds()
+   if ($mtime -lt $mkdirBefore -or $mtime -gt $mkdirAfter) { throw 'New folder mtime outside creation window' }
+   ```
+
+   Rename it to `renamed-by-app`. Rename to another existing scratch item's name
+   must refuse. In this same scratch destination, try New folder with a name
+   made from `'a' * 256` (paste as plain text); expect a client-side typed refusal
+   and no directory. Do not attempt to create overlong fixtures using raw Windows
+   filesystem APIs. Drive-root adapters `/C:/` and `C:/` are covered by Rust wire
+   regressions; this smoke does **not** authorize creating fixtures in `C:\`.
+2. Delete **only `readonly.txt`, `junction-to-sentinel`, and `recursive-delete`** using the app.
    Confirm the permanent-delete dialog still names the pinned peer/account/path.
 3. Assert the external-to-selection sentinel survived:
 
 ```powershell
 if (Test-Path -LiteralPath $ro) { throw 'Readonly file was not deleted' }
 if (Test-Path -LiteralPath $junction) { throw 'Junction was not deleted' }
+if (Test-Path -LiteralPath $recursive) { throw 'Recursive tree with nested junction was not deleted' }
 if ([IO.File]::ReadAllText((Join-Path $sentinel 'KEEP.txt')) -ne 'must survive') { throw 'Junction target was traversed' }
 ```
 
