@@ -704,10 +704,29 @@ async fn proven_windows_mutations_use_only_native_verbs_and_mkdir_d_z() {
         proof: b"Z".to_vec(),
         ..TestTransport::agent()
     };
+    let before = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
     mkdir(&t, "C:/data", "folder").await.unwrap();
+    let after = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
     let input = t.wires.lock().unwrap()[0].lock().unwrap().input.clone();
     assert!(input.starts_with(b"recv\0C:/data\0.tailfiles-incoming-"));
-    assert!(input.ends_with(b"Dfolder\x00493\x000\0Z"));
+    let parts: Vec<_> = input.split(|b| *b == 0).collect();
+    assert_eq!(parts.len(), 8);
+    assert_eq!(parts[7], b"Z");
+    assert_eq!(parts[3], b"keep");
+    assert_eq!(parts[4], b"Dfolder");
+    assert_eq!(parts[5], b"493");
+    let tail = std::str::from_utf8(parts[6]).unwrap();
+    let mtime: u64 = tail.parse().unwrap();
+    assert!(
+        (before..=after).contains(&mtime),
+        "mkdir mtime {mtime} outside [{before}, {after}]"
+    );
     rename(&t, "C:/data", "a", "b").await.unwrap();
     delete(&t, &["C:/data/x".into()]).await.unwrap();
     {

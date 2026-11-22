@@ -518,8 +518,27 @@ async fn csharp_replace_merge_case_clash_is_client_refused() {
 #[tokio::test]
 async fn csharp_native_mkdir_rename_readonly_delete_and_junction_sentinel() {
     let f = Fixture::new("m3-delete").await;
+    let before = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
     mkdir(&f.t, &f.dir(), "folder").await.unwrap();
-    assert!(f.dst.join("folder").is_dir());
+    let after = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    let folder = std::fs::metadata(f.dst.join("folder")).unwrap();
+    assert!(folder.is_dir());
+    let mtime = folder
+        .modified()
+        .unwrap()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    assert!(
+        (before..=after).contains(&mtime),
+        "native mkdir mtime {mtime} outside [{before}, {after}]"
+    );
     rename(&f.t, &f.dir(), "folder", "renamed").await.unwrap();
     assert!(f.dst.join("renamed").is_dir());
     assert_eq!(

@@ -1,0 +1,22 @@
+   Compiling taildrop-gui v0.17.0 (/Users/cortexuvula/Development/taildrop-gui/src-tauri)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 14.74s
+     Running unittests src/lib.rs (src-tauri/target/debug/deps/taildrop_gui_lib-ecfdd47c2e9dce6b)
+
+running 1 test
+test browser::win_agent::tests::proven_windows_mutations_use_only_native_verbs_and_mkdir_d_z ... FAILED
+
+failures:
+
+---- browser::win_agent::tests::proven_windows_mutations_use_only_native_verbs_and_mkdir_d_z stdout ----
+
+thread 'browser::win_agent::tests::proven_windows_mutations_use_only_native_verbs_and_mkdir_d_z' (26352440) panicked at src/browser/win_agent/tests.rs:721:5:
+mkdir mtime 0 outside [1795317341, 1795317341]
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    browser::win_agent::tests::proven_windows_mutations_use_only_native_verbs_and_mkdir_d_z
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 314 filtered out; finished in 0.00s
+
+error: test failed, to rerun pass `--lib`

@@ -458,9 +458,14 @@ pub async fn delete(t: &dyn SftpTransport, paths: &[String]) -> Result<(), Brows
     verb(t, "delete", &args, PLACE_WAIT).await.map(|_| ())
 }
 pub async fn mkdir(t: &dyn SftpTransport, dir: &str, name: &str) -> Result<(), BrowserError> {
+    let mtime = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()
+        .and_then(|d| i64::try_from(d.as_secs()).ok())
+        .ok_or_else(|| BrowserError::other("current time is outside Windows helper range"))?;
     let mut sink = WinAgentSink::open(t, dir, &super::transfer::new_stage_tag(), false).await?;
     let result = async {
-        sink.dir_begin(name, 0o755, 0).await?;
+        sink.dir_begin(name, 0o755, mtime).await?;
         sink.dir_end().await?;
         let (conflicts, errors) = sink.place(&[name.to_string()], false).await?;
         if !conflicts.is_empty() {

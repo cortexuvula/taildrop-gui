@@ -1,0 +1,31 @@
+   Compiling taildrop-gui v0.17.0 (/Users/cortexuvula/Development/taildrop-gui/src-tauri)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 11.89s
+     Running unittests src/lib.rs (src-tauri/target/debug/deps/taildrop_gui_lib-ecfdd47c2e9dce6b)
+
+running 23 tests
+test browser::win_agent::tests::protocol_exact_no_perl_prefix_or_shell_data ... ok
+test browser::win_agent::tests::failure_taxonomy_and_shared_revocation ... ok
+test browser::win_agent::tests::fixed_loader_is_utf16le_and_installer_has_pid_publish ... ok
+test browser::win_agent::tests::replace_merge_rejects_case_variants_before_second_header ... ok
+test browser::win_agent::tests::windows_absolute_and_nested_names_refuse_devices_and_shell_paths ... ok
+test browser::win_agent::tests::sink_validates_every_component_and_skips_links_without_l ... ok
+test browser::win_agent::tests::sink_parses_conflicts_errors_and_final_z_with_bounded_exit ... ok
+test browser::win_agent::tests::missing_helper_revokes_proof_even_when_write_and_eof_both_fail ... ok
+test browser::win_agent::tests::existing_exe_needs_exact_known_answer_and_account_singleflight ... ok
+test browser::win_agent::tests::unproven_windows_writes_never_open_exec_or_mutate_sftp ... ok
+test browser::win_agent::tests::short_and_oversize_payloads_fail_and_cleanup_is_eof_only ... ok
+test browser::win_agent::tests::probe_wire_defaults_false_and_preflight_requires_matching_capability ... ok
+test browser::win_agent::tests::w1_mkdir_command_adapter_keeps_drive_root_absolute ... ok
+test browser::win_agent::tests::w1_rename_command_adapter_keeps_drive_root_absolute ... ok
+test browser::win_agent::tests::cache_is_bounded_and_missing_helper_requires_reproof ... ok
+test browser::win_agent::tests::invalidate_inflight_probe_does_not_resurrect_or_retarget ... ok
+test browser::win_agent::tests::proven_windows_mutations_use_only_native_verbs_and_mkdir_d_z ... ok
+test browser::win_agent::tests::installer_source_is_the_only_sftp_write_and_is_hash_bound ... ok
+test browser::win_agent::tests::failed_install_source_cannot_poison_next_attempt ... ok
+test browser::win_agent::tests::vendored_csharp_is_plugin_exact ... ok
+test browser::win_agent::tests::forged_existing_exe_and_installed_marker_never_grant_capability ... ok
+test browser::win_agent::tests::capture_caps_while_reading_and_times_out_before_wait_exit ... ok
+test browser::win_agent::tests::proven_windows_engine_streams_remote_source_only_through_csharp_sink ... ok
+
+test result: ok. 23 passed; 0 failed; 0 ignored; 0 measured; 292 filtered out; finished in 0.06s
+
