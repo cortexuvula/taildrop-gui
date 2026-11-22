@@ -1,0 +1,15 @@
+{
+  "command": "/Users/cortexuvula/Development/taildrop-gui/src-tauri/target/debug/deps/taildrop_gui_lib-ecfdd47c2e9dce6b browser::win_agent::tests::proven_windows_engine_streams_remote_source_only_through_csharp_sink --exact --nocapture",
+  "cwd": "/Users/cortexuvula/Development/taildrop-gui",
+  "isolated_home_and_agent": true,
+  "CARGO_TARGET_DIR": "/Users/cortexuvula/Development/taildrop-gui/src-tauri/target",
+  "CARGO_INCREMENTAL": "0",
+  "CI": "1",
+  "started": "2026-11-22T14:23:31.646936+00:00",
+  "ended": "2026-11-22T14:23:32.248046+00:00",
+  "exit": 0,
+  "head": "baa019b26ee9a11d259cfc511302e9a1ffd88423",
+  "tracked_diff_sha256": "ea31907dd9736dbfea6519a4ff75ac9d53e7584a52f78a429aa55ef515bb0040",
+  "log": "ci-a-green.log",
+  "sha256": "631c9b0813f288e443f5ea1bdf77bf82a3025618f07a983f2fe5a9df982b774e"
+}

@@ -1,0 +1,15 @@
+{
+  "command": "cargo test --manifest-path src-tauri/Cargo.toml --lib browser::win_agent::tests -- --nocapture",
+  "cwd": "/Users/cortexuvula/Development/taildrop-gui",
+  "isolated_home_and_agent": false,
+  "CARGO_TARGET_DIR": "/Users/cortexuvula/Development/taildrop-gui/src-tauri/target",
+  "CARGO_INCREMENTAL": "0",
+  "CI": "1",
+  "started": "2026-11-22T14:29:28.632930+00:00",
+  "ended": "2026-11-22T14:29:28.909526+00:00",
+  "exit": 0,
+  "head": "106e464ba073a77dd6b29711b1cf15736bfc58ed",
+  "tracked_diff_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+  "log": "targeted-win-agent.log",
+  "sha256": "99bf1647ada4c507bf21fad2fc56f9f3acdfbf1e5df9f1c1d9aa1b793db69d5c"
+}

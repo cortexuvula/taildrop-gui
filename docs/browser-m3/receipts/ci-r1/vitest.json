@@ -1,0 +1,15 @@
+{
+  "command": "npm test",
+  "cwd": "/Users/cortexuvula/Development/taildrop-gui",
+  "isolated_home_and_agent": false,
+  "CARGO_TARGET_DIR": "/Users/cortexuvula/Development/taildrop-gui/src-tauri/target",
+  "CARGO_INCREMENTAL": "0",
+  "CI": "1",
+  "started": "2026-11-22T14:27:01.287030+00:00",
+  "ended": "2026-11-22T14:27:05.915339+00:00",
+  "exit": 0,
+  "head": "106e464ba073a77dd6b29711b1cf15736bfc58ed",
+  "tracked_diff_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+  "log": "vitest.log",
+  "sha256": "f3076556a3b26440115df38cf6eae39041771f18b0c6b141280bc54cfd75b86c"
+}

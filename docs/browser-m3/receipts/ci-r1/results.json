@@ -1,0 +1,379 @@
+{
+  "status": "partial fixture fixes; CI-C unresolved scope blocker; NO Windows GREEN or M3 acceptance",
+  "source_final": "106e464ba073a77dd6b29711b1cf15736bfc58ed",
+  "base_and_hosted_red_sha": "baa019b26ee9a11d259cfc511302e9a1ffd88423",
+  "hosted_red_run": "https://github.com/cortexuvula/taildrop-gui/actions/runs/45031529401",
+  "records": [
+    {
+      "command": "cargo test --manifest-path src-tauri/Cargo.toml",
+      "cwd": "/Users/cortexuvula/Development/taildrop-gui",
+      "isolated_home_and_agent": false,
+      "CARGO_TARGET_DIR": "/Users/cortexuvula/Development/taildrop-gui/src-tauri/target",
+      "CARGO_INCREMENTAL": "0",
+      "CI": "1",
+      "started": "2026-11-22T14:26:38.160971+00:00",
+      "ended": "2026-11-22T14:26:49.910942+00:00",
+      "exit": 0,
+      "head": "106e464ba073a77dd6b29711b1cf15736bfc58ed",
+      "tracked_diff_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "log": "cargo-full.log",
+      "sha256": "e05b46ca61fe0dfdb37094b369775a5e9466eaa954fcba2831ff9f55e490787c"
+    },
+    {
+      "command": "/Users/cortexuvula/Development/taildrop-gui/src-tauri/target/debug/deps/taildrop_gui_lib-ecfdd47c2e9dce6b",
+      "cwd": "/Users/cortexuvula/Development/taildrop-gui",
+      "isolated_home_and_agent": true,
+      "CARGO_TARGET_DIR": "/Users/cortexuvula/Development/taildrop-gui/src-tauri/target",
+      "CARGO_INCREMENTAL": "0",
+      "CI": "1",
+      "started": "2026-11-22T14:26:49.992938+00:00",
+      "ended": "2026-11-22T14:26:51.149034+00:00",
+      "exit": 0,
+      "head": "106e464ba073a77dd6b29711b1cf15736bfc58ed",
+      "tracked_diff_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "log": "cargo-lib-isolated.log",
+      "sha256": "21b55c602024e6c08fde8d46c4510867153f026ae5de603491d0ab7e811ec11b"
+    },
+    {
+      "command": "cargo check --manifest-path src-tauri/Cargo.toml --target x86_64-pc-windows-gnu --tests",
+      "cwd": "/Users/cortexuvula/Development/taildrop-gui",
+      "isolated_home_and_agent": false,
+      "CARGO_TARGET_DIR": "/Users/cortexuvula/Development/taildrop-gui/src-tauri/target",
+      "CARGO_INCREMENTAL": "0",
+      "CI": "1",
+      "started": "2026-11-22T14:25:29.340631+00:00",
+      "ended": "2026-11-22T14:25:35.302117+00:00",
+      "exit": 0,
+      "head": "6dc8ed38781ba44d8a38e553d44b343778c05458",
+      "tracked_diff_sha256": "8f093497f88ed33dbbe93f6017f1a835a9a4a31da19fd5f66f969bcbc54a3083",
+      "log": "check-windows-fixture.log",
+      "sha256": "968fa778c0655ff6328dff60c136ed56c6a182b7c4c5845042081ce6b0e1b3b6"
+    },
+    {
+      "command": "cargo check --manifest-path src-tauri/Cargo.toml --target x86_64-pc-windows-gnu --tests",
+      "cwd": "/Users/cortexuvula/Development/taildrop-gui",
+      "isolated_home_and_agent": false,
+      "CARGO_TARGET_DIR": "/Users/cortexuvula/Development/taildrop-gui/src-tauri/target",
+      "CARGO_INCREMENTAL": "0",
+      "CI": "1",
+      "started": "2026-11-22T14:26:56.836701+00:00",
+      "ended": "2026-11-22T14:26:57.115056+00:00",
+      "exit": 0,
+      "head": "106e464ba073a77dd6b29711b1cf15736bfc58ed",
+      "tracked_diff_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "log": "check-windows.log",
+      "sha256": "f591e097f22f91dd5c31fbbf7e587d80c0a4e0ed594f9c9012a544f38c52d926"
+    },
+    {
+      "command": "/Users/cortexuvula/Development/taildrop-gui/src-tauri/target/debug/deps/taildrop_gui_lib-ecfdd47c2e9dce6b browser::win_agent::tests::proven_windows_engine_streams_remote_source_only_through_csharp_sink --exact --nocapture",
+      "cwd": "/Users/cortexuvula/Development/taildrop-gui",
+      "isolated_home_and_agent": true,
+      "CARGO_TARGET_DIR": "/Users/cortexuvula/Development/taildrop-gui/src-tauri/target",
+      "CARGO_INCREMENTAL": "0",
+      "CI": "1",
+      "started": "2026-11-22T14:23:31.646936+00:00",
+      "ended": "2026-11-22T14:23:32.248046+00:00",
+      "exit": 0,
+      "head": "baa019b26ee9a11d259cfc511302e9a1ffd88423",
+      "tracked_diff_sha256": "ea31907dd9736dbfea6519a4ff75ac9d53e7584a52f78a429aa55ef515bb0040",
+      "log": "ci-a-green.log",
+      "sha256": "631c9b0813f288e443f5ea1bdf77bf82a3025618f07a983f2fe5a9df982b774e"
+    },
+    {
+      "command": "/Users/cortexuvula/Development/taildrop-gui/src-tauri/target/debug/deps/taildrop_gui_lib-ecfdd47c2e9dce6b browser::win_agent::tests::proven_windows_engine_streams_remote_source_only_through_csharp_sink --exact --nocapture",
+      "cwd": "/Users/cortexuvula/Development/taildrop-gui",
+      "isolated_home_and_agent": true,
+      "CARGO_TARGET_DIR": "/Users/cortexuvula/Development/taildrop-gui/src-tauri/target",
+      "CARGO_INCREMENTAL": "0",
+      "CI": "1",
+      "started": "2026-11-22T14:22:56.426275+00:00",
+      "ended": "2026-11-22T14:22:56.451907+00:00",
+      "exit": 101,
+      "head": "baa019b26ee9a11d259cfc511302e9a1ffd88423",
+      "tracked_diff_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "log": "ci-a-red.log",
+      "sha256": "4518707e4b3f81fa318141d4a6a632bd09224f06f3d8cb6820238e2d76c82342"
+    },
+    {
+      "command": "cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings",
+      "cwd": "/Users/cortexuvula/Development/taildrop-gui",
+      "isolated_home_and_agent": false,
+      "CARGO_TARGET_DIR": "/Users/cortexuvula/Development/taildrop-gui/src-tauri/target",
+      "CARGO_INCREMENTAL": "0",
+      "CI": "1",
+      "started": "2026-11-22T14:26:51.209098+00:00",
+      "ended": "2026-11-22T14:26:56.780063+00:00",
+      "exit": 0,
+      "head": "106e464ba073a77dd6b29711b1cf15736bfc58ed",
+      "tracked_diff_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "log": "clippy-host.log",
+      "sha256": "961480273c2f1aa59cf1e4149634cf8625fb52d6372d676f98382087df932052"
+    },
+    {
+      "command": "cargo clippy --manifest-path src-tauri/Cargo.toml --target x86_64-pc-windows-gnu --all-targets -- -D warnings",
+      "cwd": "/Users/cortexuvula/Development/taildrop-gui",
+      "isolated_home_and_agent": false,
+      "CARGO_TARGET_DIR": "/Users/cortexuvula/Development/taildrop-gui/src-tauri/target",
+      "CARGO_INCREMENTAL": "0",
+      "CI": "1",
+      "started": "2026-11-22T14:26:57.174242+00:00",
+      "ended": "2026-11-22T14:27:00.684210+00:00",
+      "exit": 0,
+      "head": "106e464ba073a77dd6b29711b1cf15736bfc58ed",
+      "tracked_diff_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "log": "clippy-windows.log",
+      "sha256": "43a5078a142cd841345c1c1584236d665673cc4a57fe37befa67cd839975d8e2"
+    },
+    {
+      "command": "cargo test --manifest-path src-tauri/Cargo.toml --lib --no-run",
+      "cwd": "/Users/cortexuvula/Development/taildrop-gui",
+      "isolated_home_and_agent": false,
+      "CARGO_TARGET_DIR": "/Users/cortexuvula/Development/taildrop-gui/src-tauri/target",
+      "CARGO_INCREMENTAL": "0",
+      "CI": "1",
+      "started": "2026-11-22T14:23:21.746999+00:00",
+      "ended": "2026-11-22T14:23:31.527103+00:00",
+      "exit": 0,
+      "head": "baa019b26ee9a11d259cfc511302e9a1ffd88423",
+      "tracked_diff_sha256": "ea31907dd9736dbfea6519a4ff75ac9d53e7584a52f78a429aa55ef515bb0040",
+      "log": "compile-ci-a-green.log",
+      "sha256": "33ecb18e82adf54336eff169d5d539292eb1b92fa9bfaa091d6f593109eaeefb"
+    },
+    {
+      "command": "cargo test --manifest-path src-tauri/Cargo.toml --lib --no-run --message-format=json",
+      "cwd": "/Users/cortexuvula/Development/taildrop-gui",
+      "isolated_home_and_agent": false,
+      "CARGO_TARGET_DIR": "/Users/cortexuvula/Development/taildrop-gui/src-tauri/target",
+      "CARGO_INCREMENTAL": "0",
+      "CI": "1",
+      "started": "2026-11-22T14:22:47.257627+00:00",
+      "ended": "2026-11-22T14:22:48.225350+00:00",
+      "exit": 0,
+      "head": "baa019b26ee9a11d259cfc511302e9a1ffd88423",
+      "tracked_diff_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "log": "compile-red.log",
+      "sha256": "52f38f0ce48d752995f2773083fb8a77e1c81f3aaa1b9d1677dc64f7f5cd73a5"
+    },
+    {
+      "command": "git diff --check baa019b HEAD",
+      "cwd": "/Users/cortexuvula/Development/taildrop-gui",
+      "isolated_home_and_agent": false,
+      "CARGO_TARGET_DIR": "/Users/cortexuvula/Development/taildrop-gui/src-tauri/target",
+      "CARGO_INCREMENTAL": "0",
+      "CI": "1",
+      "started": "2026-11-22T14:29:28.993031+00:00",
+      "ended": "2026-11-22T14:29:29.005210+00:00",
+      "exit": 0,
+      "head": "106e464ba073a77dd6b29711b1cf15736bfc58ed",
+      "tracked_diff_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "log": "diff-hygiene.log",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "command": "cargo fmt --manifest-path src-tauri/Cargo.toml --all -- --check",
+      "cwd": "/Users/cortexuvula/Development/taildrop-gui",
+      "isolated_home_and_agent": false,
+      "CARGO_TARGET_DIR": "/Users/cortexuvula/Development/taildrop-gui/src-tauri/target",
+      "CARGO_INCREMENTAL": "0",
+      "CI": "1",
+      "started": "2026-11-22T14:25:35.700279+00:00",
+      "ended": "2026-11-22T14:25:35.879077+00:00",
+      "exit": 0,
+      "head": "6dc8ed38781ba44d8a38e553d44b343778c05458",
+      "tracked_diff_sha256": "8f093497f88ed33dbbe93f6017f1a835a9a4a31da19fd5f66f969bcbc54a3083",
+      "log": "fmt-fixture.log",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "command": "cargo fmt --manifest-path src-tauri/Cargo.toml --all -- --check",
+      "cwd": "/Users/cortexuvula/Development/taildrop-gui",
+      "isolated_home_and_agent": false,
+      "CARGO_TARGET_DIR": "/Users/cortexuvula/Development/taildrop-gui/src-tauri/target",
+      "CARGO_INCREMENTAL": "0",
+      "CI": "1",
+      "started": "2026-11-22T14:27:00.744151+00:00",
+      "ended": "2026-11-22T14:27:00.899394+00:00",
+      "exit": 0,
+      "head": "106e464ba073a77dd6b29711b1cf15736bfc58ed",
+      "tracked_diff_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "log": "fmt.log",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "command": "npm run build",
+      "cwd": "/Users/cortexuvula/Development/taildrop-gui",
+      "isolated_home_and_agent": false,
+      "CARGO_TARGET_DIR": "/Users/cortexuvula/Development/taildrop-gui/src-tauri/target",
+      "CARGO_INCREMENTAL": "0",
+      "CI": "1",
+      "started": "2026-11-22T14:27:07.068126+00:00",
+      "ended": "2026-11-22T14:27:08.677158+00:00",
+      "exit": 0,
+      "head": "106e464ba073a77dd6b29711b1cf15736bfc58ed",
+      "tracked_diff_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "log": "frontend-build.log",
+      "sha256": "cb0e86f1806a11bcb986e9d9d47d9581ff67146c2250e49a1074bce04f5107b0"
+    },
+    {
+      "command": "./node_modules/.bin/playwright test --workers=4 --retries=0",
+      "cwd": "/Users/cortexuvula/Development/taildrop-gui",
+      "isolated_home_and_agent": false,
+      "CARGO_TARGET_DIR": "/Users/cortexuvula/Development/taildrop-gui/src-tauri/target",
+      "CARGO_INCREMENTAL": "0",
+      "CI": "1",
+      "started": "2026-11-22T14:27:08.742668+00:00",
+      "ended": "2026-11-22T14:27:19.432661+00:00",
+      "exit": 0,
+      "head": "106e464ba073a77dd6b29711b1cf15736bfc58ed",
+      "tracked_diff_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "log": "playwright.log",
+      "sha256": "0450945d682e1a4fe4e9dfb5ab52ecc6f4bd7b40d2a0ba4522bab642bd4155a7"
+    },
+    {
+      "command": "python3 docs/browser-m3/receipts/ci-r1/diagnose.py",
+      "cwd": "/Users/cortexuvula/Development/taildrop-gui",
+      "isolated_home_and_agent": false,
+      "CARGO_TARGET_DIR": "/Users/cortexuvula/Development/taildrop-gui/src-tauri/target",
+      "CARGO_INCREMENTAL": "0",
+      "CI": "1",
+      "started": "2026-11-22T14:29:28.094835+00:00",
+      "ended": "2026-11-22T14:29:28.578942+00:00",
+      "exit": 0,
+      "head": "106e464ba073a77dd6b29711b1cf15736bfc58ed",
+      "tracked_diff_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "log": "source-diagnosis.log",
+      "sha256": "3ee8eb6713dccda30d0834a48c2299537f380c99fd0cbd0df29c7443026d7d2e"
+    },
+    {
+      "command": "cargo test --manifest-path src-tauri/Cargo.toml --lib browser::win_agent::tests -- --nocapture",
+      "cwd": "/Users/cortexuvula/Development/taildrop-gui",
+      "isolated_home_and_agent": false,
+      "CARGO_TARGET_DIR": "/Users/cortexuvula/Development/taildrop-gui/src-tauri/target",
+      "CARGO_INCREMENTAL": "0",
+      "CI": "1",
+      "started": "2026-11-22T14:29:28.632930+00:00",
+      "ended": "2026-11-22T14:29:28.909526+00:00",
+      "exit": 0,
+      "head": "106e464ba073a77dd6b29711b1cf15736bfc58ed",
+      "tracked_diff_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "log": "targeted-win-agent.log",
+      "sha256": "99bf1647ada4c507bf21fad2fc56f9f3acdfbf1e5df9f1c1d9aa1b793db69d5c"
+    },
+    {
+      "command": "./node_modules/.bin/tsc --noEmit",
+      "cwd": "/Users/cortexuvula/Development/taildrop-gui",
+      "isolated_home_and_agent": false,
+      "CARGO_TARGET_DIR": "/Users/cortexuvula/Development/taildrop-gui/src-tauri/target",
+      "CARGO_INCREMENTAL": "0",
+      "CI": "1",
+      "started": "2026-11-22T14:27:05.974976+00:00",
+      "ended": "2026-11-22T14:27:07.011230+00:00",
+      "exit": 0,
+      "head": "106e464ba073a77dd6b29711b1cf15736bfc58ed",
+      "tracked_diff_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "log": "tsc.log",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "command": "npm test",
+      "cwd": "/Users/cortexuvula/Development/taildrop-gui",
+      "isolated_home_and_agent": false,
+      "CARGO_TARGET_DIR": "/Users/cortexuvula/Development/taildrop-gui/src-tauri/target",
+      "CARGO_INCREMENTAL": "0",
+      "CI": "1",
+      "started": "2026-11-22T14:27:01.287030+00:00",
+      "ended": "2026-11-22T14:27:05.915339+00:00",
+      "exit": 0,
+      "head": "106e464ba073a77dd6b29711b1cf15736bfc58ed",
+      "tracked_diff_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "log": "vitest.log",
+      "sha256": "f3076556a3b26440115df38cf6eae39041771f18b0c6b141280bc54cfd75b86c"
+    }
+  ],
+  "archive": "raw-logs.tar.gz",
+  "archive_sha256": "6e3361e29410fc6e4a92b3f29bf3d9ddf9c8bb21c1676790b23104dfcf599294",
+  "raw_logs": {
+    "cargo-full.log": {
+      "bytes": 24203,
+      "sha256": "e05b46ca61fe0dfdb37094b369775a5e9466eaa954fcba2831ff9f55e490787c"
+    },
+    "cargo-lib-isolated.log": {
+      "bytes": 23591,
+      "sha256": "21b55c602024e6c08fde8d46c4510867153f026ae5de603491d0ab7e811ec11b"
+    },
+    "check-windows-fixture.log": {
+      "bytes": 162,
+      "sha256": "968fa778c0655ff6328dff60c136ed56c6a182b7c4c5845042081ce6b0e1b3b6"
+    },
+    "check-windows.log": {
+      "bytes": 72,
+      "sha256": "f591e097f22f91dd5c31fbbf7e587d80c0a4e0ed594f9c9012a544f38c52d926"
+    },
+    "ci-a-green.log": {
+      "bytes": 222,
+      "sha256": "631c9b0813f288e443f5ea1bdf77bf82a3025618f07a983f2fe5a9df982b774e"
+    },
+    "ci-a-red.log": {
+      "bytes": 902,
+      "sha256": "4518707e4b3f81fa318141d4a6a632bd09224f06f3d8cb6820238e2d76c82342"
+    },
+    "clippy-host.log": {
+      "bytes": 162,
+      "sha256": "961480273c2f1aa59cf1e4149634cf8625fb52d6372d676f98382087df932052"
+    },
+    "clippy-windows.log": {
+      "bytes": 162,
+      "sha256": "43a5078a142cd841345c1c1584236d665673cc4a57fe37befa67cd839975d8e2"
+    },
+    "compile-ci-a-green.log": {
+      "bytes": 261,
+      "sha256": "33ecb18e82adf54336eff169d5d539292eb1b92fa9bfaa091d6f593109eaeefb"
+    },
+    "compile-red.log": {
+      "bytes": 487157,
+      "sha256": "52f38f0ce48d752995f2773083fb8a77e1c81f3aaa1b9d1677dc64f7f5cd73a5"
+    },
+    "diff-hygiene.log": {
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "fmt-fixture.log": {
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "fmt.log": {
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "frontend-build.log": {
+      "bytes": 605,
+      "sha256": "cb0e86f1806a11bcb986e9d9d47d9581ff67146c2250e49a1074bce04f5107b0"
+    },
+    "hosted-45031529401-red.log": {
+      "bytes": 143794,
+      "sha256": "c2e3396d9391ee1498ca40093507d77debf90b1a1634c8327d29db2724227853"
+    },
+    "playwright.log": {
+      "bytes": 9843,
+      "sha256": "0450945d682e1a4fe4e9dfb5ab52ecc6f4bd7b40d2a0ba4522bab642bd4155a7"
+    },
+    "source-diagnosis.log": {
+      "bytes": 1510,
+      "sha256": "3ee8eb6713dccda30d0834a48c2299537f380c99fd0cbd0df29c7443026d7d2e"
+    },
+    "targeted-win-agent.log": {
+      "bytes": 2681,
+      "sha256": "99bf1647ada4c507bf21fad2fc56f9f3acdfbf1e5df9f1c1d9aa1b793db69d5c"
+    },
+    "tsc.log": {
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "vitest.log": {
+      "bytes": 278,
+      "sha256": "f3076556a3b26440115df38cf6eae39041771f18b0c6b141280bc54cfd75b86c"
+    }
+  },
+  "native_windows_execution_here": false,
+  "note": "Logical .log paths in command records are byte-exact archive members, not loose files. Tar bytes verified before removing only new loose log copies. No executable/target-content digests taken. Initial compiler-artifact selector was corrected from kind=lib to profile.test after setup AssertionError; compile and RED logs are real separate runs."
+}

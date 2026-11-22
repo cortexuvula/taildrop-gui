@@ -1,0 +1,15 @@
+{
+  "command": "cargo check --manifest-path src-tauri/Cargo.toml --target x86_64-pc-windows-gnu --tests",
+  "cwd": "/Users/cortexuvula/Development/taildrop-gui",
+  "isolated_home_and_agent": false,
+  "CARGO_TARGET_DIR": "/Users/cortexuvula/Development/taildrop-gui/src-tauri/target",
+  "CARGO_INCREMENTAL": "0",
+  "CI": "1",
+  "started": "2026-11-22T14:25:29.340631+00:00",
+  "ended": "2026-11-22T14:25:35.302117+00:00",
+  "exit": 0,
+  "head": "6dc8ed38781ba44d8a38e553d44b343778c05458",
+  "tracked_diff_sha256": "8f093497f88ed33dbbe93f6017f1a835a9a4a31da19fd5f66f969bcbc54a3083",
+  "log": "check-windows-fixture.log",
+  "sha256": "968fa778c0655ff6328dff60c136ed56c6a182b7c4c5845042081ce6b0e1b3b6"
+}

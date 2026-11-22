@@ -1,0 +1,15 @@
+{
+  "command": "cargo test --manifest-path src-tauri/Cargo.toml --lib --no-run --message-format=json",
+  "cwd": "/Users/cortexuvula/Development/taildrop-gui",
+  "isolated_home_and_agent": false,
+  "CARGO_TARGET_DIR": "/Users/cortexuvula/Development/taildrop-gui/src-tauri/target",
+  "CARGO_INCREMENTAL": "0",
+  "CI": "1",
+  "started": "2026-11-22T14:22:47.257627+00:00",
+  "ended": "2026-11-22T14:22:48.225350+00:00",
+  "exit": 0,
+  "head": "baa019b26ee9a11d259cfc511302e9a1ffd88423",
+  "tracked_diff_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+  "log": "compile-red.log",
+  "sha256": "52f38f0ce48d752995f2773083fb8a77e1c81f3aaa1b9d1677dc64f7f5cd73a5"
+}
