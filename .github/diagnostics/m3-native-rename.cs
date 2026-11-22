@@ -30,6 +30,11 @@
 // evidence on disk. The raw NTSTATUS is logged immediately after the rename
 // returns, before any postcondition assertion; Win32 last-error is never
 // used as a substitute for it (it only decorates setup/teardown failures).
+// Observation reads of files that may still be held (the source handle or
+// the held reader) go through ReadAllShared: read access with
+// FileShare.Read|Write|Delete, disposed per call, because Windows sharing
+// is symmetric and File.ReadAllBytes' FileShare.Read cannot observe a file
+// held with write/delete access.
 // All log content is ASCII by construction (GUID sandbox, ASCII fixtures).
 //
 // Exit codes: 0 all cases internally consistent and sandbox removed;
@@ -129,14 +134,29 @@ public static class M3NativeRenameProof
         }
     }
 
+    // Best-effort close for exceptional unwinding only: it never throws, so
+    // the in-flight primary exception survives and the exit classification
+    // stays with the primary failure instead of cleanup-incomplete (S1).
+    static void CloseQuietly(ref IntPtr h, string who)
+    {
+        try { Close(ref h, who); }
+        catch (Exception e) { Log("CLEANUP_ERROR", who, e.Message); }
+    }
+
     // Vendor Top(): exact access/share/disposition/flags, logged before the call.
+    // The handle is ours until it is returned: any post-open failure closes it
+    // here instead of leaking it past the caller's assignment (S1).
     static IntPtr Top(string path)
     {
         Log("TOP_ARGS", path, "access=0x80000000", "share=0x00000007", "disposition=3", "flags=0x02000000");
         IntPtr h = CreateFileW(path, GENERIC_READ, SHARE_ALL, IntPtr.Zero, 3, 0x02000000, IntPtr.Zero);
         Need(h != new IntPtr(-1), "Top " + path);
-        Need((File.GetAttributes(path) & FileAttributes.Directory) != 0, "not a folder: " + path);
-        return h;
+        try
+        {
+            Need((File.GetAttributes(path) & FileAttributes.Directory) != 0, "not a folder: " + path);
+            return h;
+        }
+        catch { CloseQuietly(ref h, "top-postopen:" + path); throw; }
     }
 
     // Vendor Open(): status logged, never gated. Share is always 7 here.
@@ -210,18 +230,30 @@ public static class M3NativeRenameProof
     {
         IntPtr h;
         int st = Open(root, name, GENERIC_WRITE | GENERIC_READ | DELETE, CREATE, NON_DIRECTORY_FILE, true, out h);
-        Need(st >= 0, "fixture create " + name + " status=" + Hex(st));
-        try { WriteAll(h, name, b); } finally { Close(ref h, "put:" + name); }
+        if (st < 0)
+        {
+            CloseQuietly(ref h, "put-open-failed:" + name);   // failed opens hand back no real handle; Close guards
+            Need(false, "fixture create " + name + " status=" + Hex(st));
+        }
+        try { WriteAll(h, name, b); }
+        catch { CloseQuietly(ref h, "put-write-failed:" + name); throw; }
+        Close(ref h, "put:" + name);
     }
 
-    // Same open, but the handle stays open across the rename, exactly like
-    // the product's held temp file.
+    // Ownership transfers to the caller only on success: any failure after
+    // the open closes the local handle here (S1), preserving both the primary
+    // error and Case's invariant that h is closed exactly once.
     static IntPtr PutKeep(IntPtr root, string name, byte[] b)
     {
         IntPtr h;
         int st = Open(root, name, GENERIC_WRITE | GENERIC_READ | DELETE, CREATE, NON_DIRECTORY_FILE, true, out h);
-        Need(st >= 0, "source create " + name + " status=" + Hex(st));
-        WriteAll(h, name, b);
+        if (st < 0)
+        {
+            CloseQuietly(ref h, "putkeep-open-failed:" + name);
+            Need(false, "source create " + name + " status=" + Hex(st));
+        }
+        try { WriteAll(h, name, b); }
+        catch { CloseQuietly(ref h, "putkeep-write-failed:" + name); throw; }
         return h;
     }
 
@@ -256,6 +288,30 @@ public static class M3NativeRenameProof
         return b;
     }
 
+    // Observation read compatible with handles still held on the same file:
+    // the vendor source handle (access R/W/D, share 7) and the held reader.
+    // Sharing is symmetric, so the observer must share Read|Write|Delete;
+    // File.ReadAllBytes opens with FileShare.Read only and fails against a
+    // held writer with a sharing violation (review F1). Bounded read,
+    // disposed before returning; observation ordering unchanged.
+    static byte[] ReadAllShared(string path)
+    {
+        using (FileStream fs = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read | FileShare.Write | FileShare.Delete))
+        {
+            long len = fs.Length;
+            Need(len >= 0 && len <= 1048576, "observation read out of bounds: " + path + " len=" + len);
+            byte[] b = new byte[(int)len];
+            int got = 0;
+            while (got < b.Length)
+            {
+                int k = fs.Read(b, got, b.Length - got);
+                if (k <= 0) throw new IOException("short observation read: " + path);
+                got += k;
+            }
+            return b;
+        }
+    }
+
     static void Snapshot(string dir, string stage)
     {
         string[] entries = Directory.GetFileSystemEntries(dir);
@@ -264,7 +320,7 @@ public static class M3NativeRenameProof
         {
             Need(files.Contains(p), "unplanned entry: " + p);
             Need((File.GetAttributes(p) & FileAttributes.ReparsePoint) == 0, "reparse fixture: " + p);
-            byte[] b = File.ReadAllBytes(p);
+            byte[] b = ReadAllShared(p);
             Log("SNAPSHOT", stage, "path=" + p, "basename=" + Path.GetFileName(p), "bytes=" + b.Length, "sha256=" + Hash(b));
         }
     }
@@ -310,9 +366,9 @@ public static class M3NativeRenameProof
             Close(ref reader, kind + "/held-reader");
             Close(ref h, kind + "/source");
             Snapshot(dir, kind + "/after");
-            byte[] winning = File.ReadAllBytes(target);
+            byte[] winning = ReadAllShared(target);
             Need(Hash(winning) == Hash(st >= 0 ? New : Old), "winning bytes do not match observed status " + kind);
-            Need(Hash(File.ReadAllBytes(sentinel)) == Hash(Sentinel), "sentinel changed " + kind);
+            Need(Hash(ReadAllShared(sentinel)) == Hash(Sentinel), "sentinel changed " + kind);
             Need(File.Exists(source) == (st < 0), "source-name existence disagrees with status " + kind);
             Log("OBSERVATIONS_VALID", kind, "status=" + Hex(st), "winning_basename=" + actual, "winning_sha256=" + Hash(winning), "sentinel_sha256=" + Hash(Sentinel), "source_absent=" + (!File.Exists(source)));
             if (!held) Need(st == 0, "closed-target positive control FAILED (status=" + Hex(st) + ")");
