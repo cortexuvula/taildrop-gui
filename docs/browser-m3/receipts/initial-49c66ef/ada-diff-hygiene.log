@@ -1,0 +1,4 @@
+{"sha": "49c66ef632e498379393cca2f42ecbc69a5676fe", "at": "2026-11-22T02:30:51.253260+00:00", "command": ["git", "diff", "--check", "d111578", "HEAD"], "free_bytes": 106528768000, "env": {"CARGO_TARGET_DIR": "/Users/cortexuvula/Development/taildrop-gui/src-tauri/target", "CARGO_INCREMENTAL": "0", "CI": "1"}}
+docs/browser-m3/receipts/backend-vendor-green.log:9: new blank line at EOF.
+
+EXIT_STATUS=2

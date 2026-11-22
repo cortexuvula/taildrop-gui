@@ -1,0 +1,249 @@
+{
+  "schema_version": "verification_gate/v1",
+  "verification_gate_plan/v1": {
+    "required_sources": [
+      "authoritative M3 brief testing section",
+      ".github/workflows/ci.yml",
+      "CLAUDE.md"
+    ],
+    "implementation": "local commits only; do not publish",
+    "windows_execution": "windows-latest required, not observed"
+  },
+  "observed_check_results/v1": [
+    {
+      "name": "cargo-test",
+      "command": [
+        "cargo",
+        "test",
+        "--manifest-path",
+        "src-tauri/Cargo.toml",
+        "--lib"
+      ],
+      "source": "/Users/cortexuvula/Development/taildrop-gui",
+      "sha": "23a00f583458927d339a6c22a2ed2fb12153c383",
+      "at": "2026-11-22T02:42:53.787408+00:00",
+      "exit_status": 0,
+      "log": "docs/browser-m3/receipts/ada-cargo-test.log",
+      "summary": "313 passed, zero failed/ignored",
+      "scope": "macOS Rust lib suite; C# not executed",
+      "freshness": {
+        "observed_at": "2026-11-22T02:42:53.787408+00:00",
+        "tested_sha": "23a00f583458927d339a6c22a2ed2fb12153c383",
+        "subsequent_change": "documentation/receipts only; source unchanged"
+      }
+    },
+    {
+      "name": "fmt",
+      "command": [
+        "cargo",
+        "fmt",
+        "--manifest-path",
+        "src-tauri/Cargo.toml",
+        "--all",
+        "--",
+        "--check"
+      ],
+      "source": "/Users/cortexuvula/Development/taildrop-gui",
+      "sha": "23a00f583458927d339a6c22a2ed2fb12153c383",
+      "at": "2026-11-22T02:42:55.550881+00:00",
+      "exit_status": 0,
+      "log": "docs/browser-m3/receipts/ada-fmt.log",
+      "summary": "exit 0",
+      "scope": "Rust formatting",
+      "freshness": {
+        "observed_at": "2026-11-22T02:42:55.550881+00:00",
+        "tested_sha": "23a00f583458927d339a6c22a2ed2fb12153c383",
+        "subsequent_change": "documentation/receipts only; source unchanged"
+      }
+    },
+    {
+      "name": "clippy-host",
+      "command": [
+        "cargo",
+        "clippy",
+        "--manifest-path",
+        "src-tauri/Cargo.toml",
+        "--all-targets",
+        "--",
+        "-D",
+        "warnings"
+      ],
+      "source": "/Users/cortexuvula/Development/taildrop-gui",
+      "sha": "23a00f583458927d339a6c22a2ed2fb12153c383",
+      "at": "2026-11-22T02:42:55.888544+00:00",
+      "exit_status": 0,
+      "log": "docs/browser-m3/receipts/ada-clippy-host.log",
+      "summary": "exit 0",
+      "scope": "host all-targets",
+      "freshness": {
+        "observed_at": "2026-11-22T02:42:55.888544+00:00",
+        "tested_sha": "23a00f583458927d339a6c22a2ed2fb12153c383",
+        "subsequent_change": "documentation/receipts only; source unchanged"
+      }
+    },
+    {
+      "name": "check-windows",
+      "command": [
+        "cargo",
+        "check",
+        "--manifest-path",
+        "src-tauri/Cargo.toml",
+        "--target",
+        "x86_64-pc-windows-gnu",
+        "--tests"
+      ],
+      "source": "/Users/cortexuvula/Development/taildrop-gui",
+      "sha": "23a00f583458927d339a6c22a2ed2fb12153c383",
+      "at": "2026-11-22T02:43:12.800948+00:00",
+      "exit_status": 0,
+      "log": "docs/browser-m3/receipts/ada-check-windows.log",
+      "summary": "exit 0",
+      "scope": "Windows GNU tests compilation only; eight native tests",
+      "freshness": {
+        "observed_at": "2026-11-22T02:43:12.800948+00:00",
+        "tested_sha": "23a00f583458927d339a6c22a2ed2fb12153c383",
+        "subsequent_change": "documentation/receipts only; source unchanged"
+      }
+    },
+    {
+      "name": "clippy-windows",
+      "command": [
+        "cargo",
+        "clippy",
+        "--manifest-path",
+        "src-tauri/Cargo.toml",
+        "--target",
+        "x86_64-pc-windows-gnu",
+        "--all-targets",
+        "--",
+        "-D",
+        "warnings"
+      ],
+      "source": "/Users/cortexuvula/Development/taildrop-gui",
+      "sha": "23a00f583458927d339a6c22a2ed2fb12153c383",
+      "at": "2026-11-22T02:43:24.012769+00:00",
+      "exit_status": 0,
+      "log": "docs/browser-m3/receipts/ada-clippy-windows.log",
+      "summary": "exit 0",
+      "scope": "Windows GNU all-targets compilation/lint only",
+      "freshness": {
+        "observed_at": "2026-11-22T02:43:24.012769+00:00",
+        "tested_sha": "23a00f583458927d339a6c22a2ed2fb12153c383",
+        "subsequent_change": "documentation/receipts only; source unchanged"
+      }
+    },
+    {
+      "name": "diff-hygiene",
+      "command": [
+        "git",
+        "diff",
+        "--check",
+        "d111578",
+        "HEAD"
+      ],
+      "source": "/Users/cortexuvula/Development/taildrop-gui",
+      "sha": "23a00f583458927d339a6c22a2ed2fb12153c383",
+      "at": "2026-11-22T02:43:25.011264+00:00",
+      "exit_status": 0,
+      "log": "docs/browser-m3/receipts/ada-diff-hygiene.log",
+      "summary": "exit 0",
+      "scope": "full d111578..tested-SHA committed delta",
+      "freshness": {
+        "observed_at": "2026-11-22T02:43:25.011264+00:00",
+        "tested_sha": "23a00f583458927d339a6c22a2ed2fb12153c383",
+        "subsequent_change": "documentation/receipts only; source unchanged"
+      }
+    },
+    {
+      "name": "tsc",
+      "command": [
+        "./node_modules/.bin/tsc",
+        "--noEmit"
+      ],
+      "source": "/Users/cortexuvula/Development/taildrop-gui",
+      "sha": "23a00f583458927d339a6c22a2ed2fb12153c383",
+      "at": "2026-11-22T02:42:53.787662+00:00",
+      "exit_status": 0,
+      "log": "docs/browser-m3/receipts/ada-tsc.log",
+      "summary": "exit 0",
+      "scope": "TypeScript noEmit",
+      "freshness": {
+        "observed_at": "2026-11-22T02:42:53.787662+00:00",
+        "tested_sha": "23a00f583458927d339a6c22a2ed2fb12153c383",
+        "subsequent_change": "documentation/receipts only; source unchanged"
+      }
+    },
+    {
+      "name": "vitest",
+      "command": [
+        "npm",
+        "test"
+      ],
+      "source": "/Users/cortexuvula/Development/taildrop-gui",
+      "sha": "23a00f583458927d339a6c22a2ed2fb12153c383",
+      "at": "2026-11-22T02:42:55.588500+00:00",
+      "exit_status": 0,
+      "log": "docs/browser-m3/receipts/ada-vitest.log",
+      "summary": "211 tests passed in20 files",
+      "scope": "frontend unit/component tests with IPC fakes",
+      "freshness": {
+        "observed_at": "2026-11-22T02:42:55.588500+00:00",
+        "tested_sha": "23a00f583458927d339a6c22a2ed2fb12153c383",
+        "subsequent_change": "documentation/receipts only; source unchanged"
+      }
+    },
+    {
+      "name": "playwright",
+      "command": [
+        "./node_modules/.bin/playwright",
+        "test",
+        "--workers=4",
+        "--retries=0"
+      ],
+      "source": "/Users/cortexuvula/Development/taildrop-gui",
+      "sha": "23a00f583458927d339a6c22a2ed2fb12153c383",
+      "at": "2026-11-22T02:43:07.405864+00:00",
+      "exit_status": 0,
+      "log": "docs/browser-m3/receipts/ada-playwright.log",
+      "summary": "66 passed, zero retries",
+      "scope": "production App through IPC fakes, fresh CI Vite server",
+      "freshness": {
+        "observed_at": "2026-11-22T02:43:07.405864+00:00",
+        "tested_sha": "23a00f583458927d339a6c22a2ed2fb12153c383",
+        "subsequent_change": "documentation/receipts only; source unchanged"
+      }
+    },
+    {
+      "name": "build",
+      "command": [
+        "npm",
+        "run",
+        "build"
+      ],
+      "source": "/Users/cortexuvula/Development/taildrop-gui",
+      "sha": "23a00f583458927d339a6c22a2ed2fb12153c383",
+      "at": "2026-11-22T02:43:26.813665+00:00",
+      "exit_status": 0,
+      "log": "docs/browser-m3/receipts/ada-build.log",
+      "summary": "exit 0",
+      "scope": "TypeScript and Vite production frontend",
+      "freshness": {
+        "observed_at": "2026-11-22T02:43:26.813665+00:00",
+        "tested_sha": "23a00f583458927d339a6c22a2ed2fb12153c383",
+        "subsequent_change": "documentation/receipts only; source unchanged"
+      }
+    }
+  ],
+  "claim_verdict/v1": {
+    "local_implementation": "PASS",
+    "release": "HOLD",
+    "missing": [
+      "Codie independent review approval",
+      "exact-head windows-latest C# execution",
+      "Frikkie room-6 smoke",
+      "Frikkie accuro-server smoke"
+    ]
+  },
+  "generated_artifact_provenance/v1": "map_not_declared",
+  "not_evidence": "Cross-checking is not Windows execution. IPC fakes are not fleet/native proof. Review handoff is not approval or publication."
+}

@@ -1,0 +1,5 @@
+{"sha": "23a00f583458927d339a6c22a2ed2fb12153c383", "at": "2026-11-22T02:43:12.800948+00:00", "command": ["cargo", "check", "--manifest-path", "src-tauri/Cargo.toml", "--target", "x86_64-pc-windows-gnu", "--tests"], "free_bytes": 106521751552, "env": {"CARGO_TARGET_DIR": "/Users/cortexuvula/Development/taildrop-gui/src-tauri/target", "CARGO_INCREMENTAL": "0", "CI": "1"}}
+    Checking taildrop-gui v0.17.0 (/Users/cortexuvula/Development/taildrop-gui/src-tauri)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 11.13s
+
+EXIT_STATUS=0

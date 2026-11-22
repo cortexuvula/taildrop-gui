@@ -1,0 +1,14 @@
+{"sha": "23a00f583458927d339a6c22a2ed2fb12153c383", "at": "2026-11-22T02:43:26.813665+00:00", "command": ["npm", "run", "build"], "free_bytes": 106521092096, "env": {"CARGO_TARGET_DIR": "/Users/cortexuvula/Development/taildrop-gui/src-tauri/target", "CARGO_INCREMENTAL": "0", "CI": "1"}}
+npm notice run taildrop-gui@0.17.0 build
+npm notice run tsc && vite build
+[36mvite v7.3.6 [32mbuilding client environment for production...[36m[39m
+transforming...
+[32m✓[39m 79 modules transformed.
+rendering chunks...
+computing gzip size...
+[2mdist/[22m[32mindex.html                 [39m[1m[2m  0.46 kB[22m[1m[22m[2m │ gzip:  0.29 kB[22m
+[2mdist/[22m[2massets/[22m[35mindex-CqzCLmy_.css  [39m[1m[2m 37.15 kB[22m[1m[22m[2m │ gzip:  6.73 kB[22m
+[2mdist/[22m[2massets/[22m[36mindex-RkJhpgbn.js   [39m[1m[2m306.85 kB[22m[1m[22m[2m │ gzip: 93.91 kB[22m
+[32m✓ built in 709ms[39m
+
+EXIT_STATUS=0

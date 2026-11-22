@@ -1,0 +1,3 @@
+{"sha": "49c66ef632e498379393cca2f42ecbc69a5676fe", "at": "2026-11-22T02:30:21.254897+00:00", "command": ["cargo", "fmt", "--manifest-path", "src-tauri/Cargo.toml", "--all", "--", "--check"], "free_bytes": 106532708352, "env": {"CARGO_TARGET_DIR": "/Users/cortexuvula/Development/taildrop-gui/src-tauri/target", "CARGO_INCREMENTAL": "0", "CI": "1"}}
+
+EXIT_STATUS=0

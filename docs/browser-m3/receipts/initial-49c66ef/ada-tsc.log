@@ -1,0 +1,3 @@
+{"sha": "49c66ef632e498379393cca2f42ecbc69a5676fe", "at": "2026-11-22T02:29:53.786493+00:00", "command": ["./node_modules/.bin/tsc", "--noEmit"], "free_bytes": 106538151936, "env": {"CARGO_TARGET_DIR": "/Users/cortexuvula/Development/taildrop-gui/src-tauri/target", "CARGO_INCREMENTAL": "0", "CI": "1"}}
+
+EXIT_STATUS=0

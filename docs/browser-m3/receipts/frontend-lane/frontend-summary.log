@@ -1,0 +1,62 @@
+Task t_3de70319 frontend completion
+Worktree: /Users/cortexuvula/Development/taildrop-gui/.m3-codex-lane
+Branch: codex/t_3de70319/m3
+Frontend commits:
+  0c4de92 feat(browser): sanitize Windows agent capability proof
+  02d35fd feat(browser): gate Windows writes on scoped agent proof
+  8d389ca test(browser): cover proven Windows writes in production UI
+Final commit when frontend completed: 8d389ca
+Sibling backend commit e3edc65 is NOT authored/owned by frontend lane.
+
+Observed full final frontend verification (source bytes unchanged by subsequent commit):
+  ./node_modules/.bin/tsc --noEmit
+    exit 0; .m3-frontend-tsc.log
+  npm test
+    exit 0; 20 files, 211 tests passed; .m3-frontend-vitest.log
+  CI=1 ./node_modules/.bin/playwright test --workers=4 --retries=0
+    exit 0; 66 tests passed; .m3-frontend-playwright.log
+    CI=1 refused reuse of any existing Vite server, ensuring lane frontend served.
+  git diff --check -- e2e/tauri-mock.ts e2e/windows-agent.test.ts
+    exit 0
+No dependency installation or dependency/version changes. Lane node_modules symlinks to existing parent node_modules as authorized.
+
+RED evidence:
+  .m3-frontend-sanitizer-red.log: 8 failed, 26 passed; missing winAgent sanitizer field.
+  .m3-frontend-ui-red.log: 8 failed; missing browser_probe path / keyboard refusal.
+Focused GREEN evidence:
+  .m3-frontend-sanitizer-green.log
+  .m3-frontend-ui-green-final.log: 8 passed.
+  .m3-frontend-focused.log: 20 passed across pane hook and production UI.
+  .m3-frontend-ui-green.log preserves intermediate failure: rapid refresh batching required listingGeneration to reprobe even when loading true/false coalesced. Fixed and covered by successful repeated real write path.
+
+Implementation:
+- ProbeInfo.winAgent optional; sanitizeProbe accepts exact true only, defaults everything else to false.
+- Probe runs only after stable successful remote listing, with loadedUser pinned as asUser.
+- Pane capability binds target, user, and request generation; pending/old host/account replies cannot grant rights. Known Windows probe flavor is retained fail-closed during same-host reload/account switches, independently of proof.
+- Shared writable gate covers pane buttons, copy-INTO buttons/handler, keyboard mutation openers, confirmation and Replace; server independently remains authoritative.
+- Unknown OS remote waits for valid probe; probed openssh-windows flavor cannot use a missing OS hint to bypass refusal.
+- Missing/malformed/rejected proof retains readable pane and pull; no listing error caused by probe failure.
+- Existing dialog scope locks, conflict consent, same-host-two-account refusal, and pinned mutation account preserved. Local behavior unchanged.
+
+Changed frontend files:
+  src/types/browser.ts
+  src/lib/browser/guards.ts
+  src/lib/browser/__tests__/guards.test.ts
+  src/hooks/useBrowserPane.ts
+  src/hooks/__tests__/useBrowserPane.test.tsx
+  src/components/browser/FilePane.tsx
+  src/components/browser/TwoPaneView.tsx
+  src/components/browser/__tests__/TwoPaneView.winAgent.test.tsx
+  e2e/tauri-mock.ts
+  e2e/windows-agent.test.ts
+
+Rendered evidence inspected at 1180x740:
+  test-results/windows-agent-proven-Windo-756f6-through-production-controls-chromium/windows-proven.png
+  test-results/windows-agent-unproven-Win-6c23c-writes-pull-stays-available-chromium/windows-unproven.png
+No overlap in notice/actions; unproven state retains pull direction.
+
+Gaps/boundaries:
+- All frontend integration uses IPC boundary fakes. No claim of actual backend compile/exec or C# semantics verified on macOS.
+- No fleet contact, SSH/network writes, push/tag/merge, board action, backend/document/vendor edit by this frontend agent.
+- Backend sibling may leave concurrent backend changes; do not treat those as frontend dirt or stage them with frontend paths.
+- Logs are ignored/untracked local evidence for parent to copy into owned docs receipts.

@@ -1,0 +1,13 @@
+{
+  "schema": "static_added_line_scan/v1",
+  "sha": "23a00f583458927d339a6c22a2ed2fb12153c383",
+  "source_files": 22,
+  "rules": {
+    "hardcoded_secret": "(?i)(api_key|secret|password|passwd)\\s*=\\s*[\\x22\\x27][^\\x22\\x27]{6,}[\\x22\\x27]",
+    "shell_true": "shell\\s*=\\s*True|os\\.system\\(",
+    "unsafe_deserialization": "pickle\\.loads?\\(",
+    "unlinked_marker": "TODO|FIXME|unimplemented!|todo!"
+  },
+  "hits": [],
+  "scope": "Added source lines only; not a full security audit. Dynamic shell path/EncodedCommand and stdin field validation separately reviewed."
+}

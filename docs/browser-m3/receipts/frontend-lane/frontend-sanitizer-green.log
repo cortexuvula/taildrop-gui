@@ -1,0 +1,14 @@
+
+> taildrop-gui@0.17.0 test
+> vitest run src/lib/browser/__tests__/guards.test.ts
+
+
+ RUN  v4.1.10 /Users/cortexuvula/Development/taildrop-gui/.m3-codex-lane
+
+
+ Test Files  1 passed (1)
+      Tests  34 passed (34)
+   Start at  19:07:22
+   Duration  233ms (transform 61ms, setup 0ms, import 78ms, tests 11ms, environment 0ms)
+
+--- End captured output (original bytes retained above). ---

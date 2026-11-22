@@ -1,0 +1,47 @@
+{
+  "sha": "23a00f583458927d339a6c22a2ed2fb12153c383",
+  "command": "cargo test --manifest-path src-tauri/Cargo.toml --lib",
+  "runs": [
+    {
+      "run": 1,
+      "exit_status": 0
+    },
+    {
+      "run": 2,
+      "exit_status": 0
+    },
+    {
+      "run": 3,
+      "exit_status": 0
+    },
+    {
+      "run": 4,
+      "exit_status": 0
+    },
+    {
+      "run": 5,
+      "exit_status": 0
+    },
+    {
+      "run": 6,
+      "exit_status": 0
+    },
+    {
+      "run": 7,
+      "exit_status": 0
+    },
+    {
+      "run": 8,
+      "exit_status": 0
+    },
+    {
+      "run": 9,
+      "exit_status": 0
+    },
+    {
+      "run": 10,
+      "exit_status": 0
+    }
+  ],
+  "all_pass": true
+}

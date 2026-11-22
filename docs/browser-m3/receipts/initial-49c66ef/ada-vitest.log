@@ -1,0 +1,14 @@
+{"sha": "49c66ef632e498379393cca2f42ecbc69a5676fe", "at": "2026-11-22T02:29:55.155366+00:00", "command": ["npm", "test"], "free_bytes": 106537689088, "env": {"CARGO_TARGET_DIR": "/Users/cortexuvula/Development/taildrop-gui/src-tauri/target", "CARGO_INCREMENTAL": "0", "CI": "1"}}
+npm notice run taildrop-gui@0.17.0 test
+npm notice run vitest run
+
+ RUN  v4.1.10 /Users/cortexuvula/Development/taildrop-gui
+
+
+ Test Files  20 passed (20)
+      Tests  211 passed (211)
+   Start at  19:29:55
+   Duration  9.48s (transform 6.48s, setup 0ms, import 10.97s, tests 12.24s, environment 23.08s)
+
+
+EXIT_STATUS=0

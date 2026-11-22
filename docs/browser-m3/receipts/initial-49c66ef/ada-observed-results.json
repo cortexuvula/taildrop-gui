@@ -1,0 +1,155 @@
+[
+  {
+    "name": "cargo-test",
+    "command": [
+      "cargo",
+      "test",
+      "--manifest-path",
+      "src-tauri/Cargo.toml",
+      "--lib"
+    ],
+    "source": "/Users/cortexuvula/Development/taildrop-gui",
+    "sha": "49c66ef632e498379393cca2f42ecbc69a5676fe",
+    "at": "2026-11-22T02:29:53.786250+00:00",
+    "exit_status": 0,
+    "log": "docs/browser-m3/receipts/ada-cargo-test.log"
+  },
+  {
+    "name": "fmt",
+    "command": [
+      "cargo",
+      "fmt",
+      "--manifest-path",
+      "src-tauri/Cargo.toml",
+      "--all",
+      "--",
+      "--check"
+    ],
+    "source": "/Users/cortexuvula/Development/taildrop-gui",
+    "sha": "49c66ef632e498379393cca2f42ecbc69a5676fe",
+    "at": "2026-11-22T02:30:21.254897+00:00",
+    "exit_status": 0,
+    "log": "docs/browser-m3/receipts/ada-fmt.log"
+  },
+  {
+    "name": "clippy-host",
+    "command": [
+      "cargo",
+      "clippy",
+      "--manifest-path",
+      "src-tauri/Cargo.toml",
+      "--all-targets",
+      "--",
+      "-D",
+      "warnings"
+    ],
+    "source": "/Users/cortexuvula/Development/taildrop-gui",
+    "sha": "49c66ef632e498379393cca2f42ecbc69a5676fe",
+    "at": "2026-11-22T02:30:21.896126+00:00",
+    "exit_status": 0,
+    "log": "docs/browser-m3/receipts/ada-clippy-host.log"
+  },
+  {
+    "name": "check-windows",
+    "command": [
+      "cargo",
+      "check",
+      "--manifest-path",
+      "src-tauri/Cargo.toml",
+      "--target",
+      "x86_64-pc-windows-gnu",
+      "--tests"
+    ],
+    "source": "/Users/cortexuvula/Development/taildrop-gui",
+    "sha": "49c66ef632e498379393cca2f42ecbc69a5676fe",
+    "at": "2026-11-22T02:30:35.396513+00:00",
+    "exit_status": 0,
+    "log": "docs/browser-m3/receipts/ada-check-windows.log"
+  },
+  {
+    "name": "clippy-windows",
+    "command": [
+      "cargo",
+      "clippy",
+      "--manifest-path",
+      "src-tauri/Cargo.toml",
+      "--target",
+      "x86_64-pc-windows-gnu",
+      "--all-targets",
+      "--",
+      "-D",
+      "warnings"
+    ],
+    "source": "/Users/cortexuvula/Development/taildrop-gui",
+    "sha": "49c66ef632e498379393cca2f42ecbc69a5676fe",
+    "at": "2026-11-22T02:30:43.696849+00:00",
+    "exit_status": 0,
+    "log": "docs/browser-m3/receipts/ada-clippy-windows.log"
+  },
+  {
+    "name": "diff-hygiene",
+    "command": [
+      "git",
+      "diff",
+      "--check",
+      "d111578",
+      "HEAD"
+    ],
+    "source": "/Users/cortexuvula/Development/taildrop-gui",
+    "sha": "49c66ef632e498379393cca2f42ecbc69a5676fe",
+    "at": "2026-11-22T02:30:51.253260+00:00",
+    "exit_status": 2,
+    "log": "docs/browser-m3/receipts/ada-diff-hygiene.log"
+  },
+  {
+    "name": "tsc",
+    "command": [
+      "./node_modules/.bin/tsc",
+      "--noEmit"
+    ],
+    "source": "/Users/cortexuvula/Development/taildrop-gui",
+    "sha": "49c66ef632e498379393cca2f42ecbc69a5676fe",
+    "at": "2026-11-22T02:29:53.786493+00:00",
+    "exit_status": 0,
+    "log": "docs/browser-m3/receipts/ada-tsc.log"
+  },
+  {
+    "name": "vitest",
+    "command": [
+      "npm",
+      "test"
+    ],
+    "source": "/Users/cortexuvula/Development/taildrop-gui",
+    "sha": "49c66ef632e498379393cca2f42ecbc69a5676fe",
+    "at": "2026-11-22T02:29:55.155366+00:00",
+    "exit_status": 0,
+    "log": "docs/browser-m3/receipts/ada-vitest.log"
+  },
+  {
+    "name": "playwright",
+    "command": [
+      "./node_modules/.bin/playwright",
+      "test",
+      "--workers=4",
+      "--retries=0"
+    ],
+    "source": "/Users/cortexuvula/Development/taildrop-gui",
+    "sha": "49c66ef632e498379393cca2f42ecbc69a5676fe",
+    "at": "2026-11-22T02:30:05.401444+00:00",
+    "exit_status": 0,
+    "log": "docs/browser-m3/receipts/ada-playwright.log"
+  },
+  {
+    "name": "build",
+    "command": [
+      "npm",
+      "run",
+      "build"
+    ],
+    "source": "/Users/cortexuvula/Development/taildrop-gui",
+    "sha": "49c66ef632e498379393cca2f42ecbc69a5676fe",
+    "at": "2026-11-22T02:30:24.575543+00:00",
+    "exit_status": 0,
+    "log": "docs/browser-m3/receipts/ada-build.log"
+  }
+]

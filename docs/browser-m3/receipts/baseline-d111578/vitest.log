@@ -1,0 +1,12 @@
+npm notice run taildrop-gui@0.17.0 test
+npm notice run vitest run
+
+ RUN  v4.1.10 /Users/cortexuvula/Development/taildrop-gui
+
+
+ Test Files  19 passed (19)
+      Tests  193 passed (193)
+   Start at  19:03:37
+   Duration  11.49s (transform 8.38s, setup 0ms, import 14.17s, tests 13.21s, environment 20.99s)
+
+--- End captured output (original bytes retained above). ---

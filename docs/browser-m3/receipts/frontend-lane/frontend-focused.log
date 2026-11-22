@@ -1,0 +1,14 @@
+
+> taildrop-gui@0.17.0 test
+> vitest run src/hooks/__tests__/useBrowserPane.test.tsx src/components/browser/__tests__/TwoPaneView.winAgent.test.tsx
+
+
+ RUN  v4.1.10 /Users/cortexuvula/Development/taildrop-gui/.m3-codex-lane
+
+
+ Test Files  2 passed (2)
+      Tests  20 passed (20)
+   Start at  19:11:28
+   Duration  1.07s (transform 174ms, setup 0ms, import 308ms, tests 1.09s, environment 554ms)
+
+--- End captured output (original bytes retained above). ---

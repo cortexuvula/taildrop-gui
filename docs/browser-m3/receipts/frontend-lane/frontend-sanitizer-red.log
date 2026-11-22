@@ -1,0 +1,74 @@
+
+> taildrop-gui@0.17.0 test
+> vitest run src/lib/browser/__tests__/guards.test.ts
+
+
+ RUN  v4.1.10 /Users/cortexuvula/Development/taildrop-gui/.m3-codex-lane
+
+ ❯ src/lib/browser/__tests__/guards.test.ts (34 tests | 8 failed) 7ms
+     × defaults malformed/missing winAgent undefined to false 2ms
+     × defaults malformed/missing winAgent null to false 0ms
+     × defaults malformed/missing winAgent false to false 0ms
+     × defaults malformed/missing winAgent "true" to false 0ms
+     × defaults malformed/missing winAgent 1 to false 0ms
+     × defaults malformed/missing winAgent {} to false 0ms
+     × defaults malformed/missing winAgent undefined to false 0ms
+     × accepts only literal true as Windows agent proof 0ms
+
+⎯⎯⎯⎯⎯⎯⎯ Failed Tests 8 ⎯⎯⎯⎯⎯⎯⎯
+
+ FAIL  src/lib/browser/__tests__/guards.test.ts > sanitizeProbe > defaults malformed/missing winAgent undefined to false
+ FAIL  src/lib/browser/__tests__/guards.test.ts > sanitizeProbe > defaults malformed/missing winAgent null to false
+ FAIL  src/lib/browser/__tests__/guards.test.ts > sanitizeProbe > defaults malformed/missing winAgent false to false
+ FAIL  src/lib/browser/__tests__/guards.test.ts > sanitizeProbe > defaults malformed/missing winAgent "true" to false
+ FAIL  src/lib/browser/__tests__/guards.test.ts > sanitizeProbe > defaults malformed/missing winAgent 1 to false
+ FAIL  src/lib/browser/__tests__/guards.test.ts > sanitizeProbe > defaults malformed/missing winAgent {} to false
+ FAIL  src/lib/browser/__tests__/guards.test.ts > sanitizeProbe > defaults malformed/missing winAgent undefined to false
+AssertionError: expected { system: 'Windows', …(5) } to have property "winAgent" with value false
+
+- Expected:
+false
+
++ Received:
+undefined
+
+ ❯ src/lib/browser/__tests__/guards.test.ts:148:9
+    146|       system: "Windows", posix: false, home: "C:/Users/u",
+    147|       flavor: "openssh-windows", user: "u", extensions: {}, winAgent,
+    148|     })).toHaveProperty("winAgent", false);
+       |         ^
+    149|   });
+    150|   it("accepts only literal true as Windows agent proof", () => {
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[1/8]⎯
+
+ FAIL  src/lib/browser/__tests__/guards.test.ts > sanitizeProbe > accepts only literal true as Windows agent proof
+AssertionError: expected { system: 'Windows', …(5) } to have property "winAgent" with value true
+
+- Expected:
+true
+
++ Received:
+undefined
+
+ ❯ src/lib/browser/__tests__/guards.test.ts:154:9
+    152|       system: "Windows", posix: false, home: "C:/Users/u",
+    153|       flavor: "openssh-windows", user: "u", extensions: {}, winAgent: …
+    154|     })).toHaveProperty("winAgent", true);
+       |         ^
+    155|   });
+    156|   it("accepts a full probe", () => {
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[2/8]⎯
+
+
+ Test Files  1 failed (1)
+      Tests  8 failed | 26 passed (34)
+   Start at  19:07:11
+   Duration  130ms (transform 31ms, setup 0ms, import 39ms, tests 7ms, environment 0ms)
+
+npm notice
+npm notice New major version of npm available! 11.19.0 -> 12.2.3
+npm notice Changelog: https://github.com/npm/cli/releases/tag/v12.2.3
+npm notice To update run: npm install -g npm@12.2.3
+npm notice

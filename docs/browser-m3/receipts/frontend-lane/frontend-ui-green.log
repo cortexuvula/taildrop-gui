@@ -1,0 +1,363 @@
+
+> taildrop-gui@0.17.0 test
+> vitest run src/components/browser/__tests__/TwoPaneView.winAgent.test.tsx
+
+
+ RUN  v4.1.10 /Users/cortexuvula/Development/taildrop-gui/.m3-codex-lane
+
+ ❯ src/components/browser/__tests__/TwoPaneView.winAgent.test.tsx (8 tests | 1 failed) 1483ms
+     × probes the pinned account and permits all writes only after proof 1157ms
+
+⎯⎯⎯⎯⎯⎯⎯ Failed Tests 1 ⎯⎯⎯⎯⎯⎯⎯
+
+ FAIL  src/components/browser/__tests__/TwoPaneView.winAgent.test.tsx > Windows host/account capability in real UI > probes the pinned account and permits all writes only after proof
+AssertionError: expected true to be false // Object.is equality
+
+Ignored nodes: comments, script, style
+[36m<html>[39m
+  [36m<head />[39m
+  [36m<body>[39m
+    [36m<div>[39m
+      [36m<div[39m
+        [33mclass[39m=[32m"browser-view"[39m
+        [33mdata-testid[39m=[32m"browser-view"[39m
+      [36m>[39m
+        [36m<div[39m
+          [33mclass[39m=[32m"browser-panes"[39m
+        [36m>[39m
+          [36m<section[39m
+            [33maria-label[39m=[32m"File pane left"[39m
+            [33mclass[39m=[32m"file-pane "[39m
+            [33mdata-active[39m=[32m"false"[39m
+            [33mdata-testid[39m=[32m"pane-left"[39m
+          [36m>[39m
+            [36m<header[39m
+              [33mclass[39m=[32m"pane-header"[39m
+            [36m>[39m
+              [36m<div[39m
+                [33mclass[39m=[32m"machine-picker"[39m
+              [36m>[39m
+                [36m<button[39m
+                  [33maria-expanded[39m=[32m"false"[39m
+                  [33maria-haspopup[39m=[32m"listbox"[39m
+                  [33mclass[39m=[32m"machine-picker-button"[39m
+                  [33mtitle[39m=[32m"This computer"[39m
+                  [33mtype[39m=[32m"button"[39m
+                [36m>[39m
+                  [36m<span[39m
+                    [33maria-hidden[39m=[32m"true"[39m
+                    [33mclass[39m=[32m"machine-dot online"[39m
+                  [36m/>[39m
+                  [36m<span[39m
+                    [33mclass[39m=[32m"machine-label"[39m
+                  [36m>[39m
+                    [0mThis computer[0m
+                  [36m</span>[39m
+                  [36m<span[39m
+                    [33maria-hidden[39m=[32m"true"[39m
+                    [33mclass[39m=[32m"machine-caret"[39m
+                  [36m>[39m
+                    [0m▾[0m
+                  [36m</span>[39m
+                [36m</button>[39m
+              [36m</div>[39m
+              [36m<button[39m
+                [33mclass[39m=[32m"path-display"[39m
+                [33mtitle[39m=[32m"/ — Ctrl+L to edit"[39m
+                [33mtype[39m=[32m"button"[39m
+              [36m>[39m
+                [0m/[0m
+              [36m</button>[39m
+              [36m<button[39m
+                [33maria-label[39m=[32m"Refresh"[39m
+                [33mclass[39m=[32m"pane-icon-btn"[39m
+                [33mtitle[39m=[32m"Refresh (r)"[39m
+                [33mtype[39m=[32m"button"[39m
+              [36m>[39m
+                [0m⟳[0m
+              [36m</button>[39m
+            [36m</header>[39m
+            [36m<div[39m
+              [33maria-label[39m=[32m"Files on local"[39m
+              [33maria-multiselectable[39m=[32m"true"[39m
+              [33mclass[39m=[32m"pane-list"[39m
+              [33mrole[39m=[32m"listbox"[39m
+              [33mtabindex[39m=[32m"-1"[39m
+            [36m>[39m
+              [36m<div[39m
+                [33maria-selected[39m=[32m"true"[39m
+                [33mclass[39m=[32m"pane-row cursor "[39m
+                [33mdata-index[39m=[32m"0"[39m
+                [33mdata-kind[39m=[32m"file"[39m
+                [33mdata-name[39m=[32m"a.txt"[39m
+                [33mrole[39m=[32m"option"[39m
+              [36m>[39m
+                [36m<span[39m
+                  [33maria-hidden[39m=[32m"true"[39m
+                  [33mclass[39m=[32m"col-glyph"[39m
+                [36m>[39m
+                  [0m🗎[0m
+                [36m</span>[39m
+                [36m<span[39m
+                  [33mclass[39m=[32m"col-name"[39m
+                [36m>[39m
+                  [0ma.txt[0m
+                [36m</span>[39m
+                [36m<span[39m
+                  [33mclass[39m=[32m"col-size"[39m
+                [36m>[39m
+                  [0m1 B[0m
+                [36m</span>[39m
+                [36m<span[39m
+                  [33mclass[39m=[32m"col-time"[39m
+                [36m>[39m
+                  [0mDec 31, 1969[0m
+                [36m</span>[39m
+              [36m</div>[39m
+            [36m</div>[39m
+            [36m<footer[39m
+              [33mclass[39m=[32m"pane-footer"[39m
+            [36m>[39m
+              [36m<span>[39m
+                [0m1[0m
+                [0m [0m
+                [0mitem[0m
+              [36m</span>[39m
+              [36m<span[39m
+                [33mclass[39m=[32m"pane-actions"[39m
+              [36m>[39m
+                [36m<button[39m
+                  [33mclass[39m=[32m"pane-action"[39m
+                  [33mtitle[39m=[32m"New folder (n)"[39m
+                  [33mtype[39m=[32m"button"[39m
+                [36m>[39m
+                  [0mNew folder[0m
+                [36m</button>[39m
+                [36m<button[39m
+                  [33mclass[39m=[32m"pane-action"[39m
+                  [33mtitle[39m=[32m"Rename (R)"[39m
+                  [33mtype[39m=[32m"button"[39m
+                [36m>[39m
+                  [0mRename[0m
+                [36m</button>[39m
+                [36m<button[39m
+                  [33mclass[39m=[32m"pane-action danger"[39m
+                  [33mtitle[39m=[32m"Delete (D)"[39m
+                  [33mtype[39m=[32m"button"[39m
+                [36m>[39m
+                  [0mDelete[0m
+                [36m</button>[39m
+              [36m</span>[39m
+            [36m</footer>[39m
+          [36m</section>[39m
+          [36m<div[39m
+            [33maria-label[39m=[32m"Copy direction"[39m
+            [33mclass[39m=[32m"browser-toolbar"[39m
+            [33mrole[39m=[32m"toolbar"[39m
+          [36m>[39m
+            [36m<button[39m
+              [33mclass[39m=[32m"toolbar-btn"[39m
+              [33mdisabled[39m=[32m""[39m
+              [33mtitle[39m=[32m"Copy from left to right (c with left active)"[39m
+              [33mtype[39m=[32m"button"[39m
+            [36m>[39m
+              [0mCopy →[0m
+            [36m</button>[39m
+            [36m<button[39m
+              [33mclass[39m=[32m"toolbar-btn"[39m
+              [33mtitle[39m=[32m"Copy from right to left"[39m
+              [33mtype[39m=[32m"button"[39m
+            [36m>[39m
+              [0m← Copy[0m
+            [36m</button>[39m
+            [36m<button[39m
+              [33mclass[39m=[32m"toolbar-btn"[39m
+              [33mdata-testid[39m=[32m"known-hosts-button"[39m
+              [33mtitle[39m=[32m"Manage pinned host keys"[39m
+              [33mtype[39m=[32m"button"[39m
+            [36m>[39m
+              [0mKnown hosts[0m
+            [36m</button>[39m
+          [36m</div>[39m
+          [36m<section[39m
+            [33maria-label[39m=[32m"File pane right"[39m
+            [33mclass[39m=[32m"file-pane active"[39m
+            [33mdata-active[39m=[32m"true"[39m
+            [33mdata-testid[39m=[32m"pane-right"[39m
+          [36m>[39m
+            [36m<header[39m
+              [33mclass[39m=[32m"pane-header"[39m
+            [36m>[39m
+              [36m<div[39m
+                [33mclass[39m=[32m"machine-picker"[39m
+              [36m>[39m
+                [36m<button[39m
+                  [33maria-expanded[39m=[32m"false"[39m
+                  [33maria-haspopup[39m=[32m"listbox"[39m
+                  [33mclass[39m=[32m"machine-picker-button"[39m
+                  [33mtitle[39m=[32m"win-a"[39m
+                  [33mtype[39m=[32m"button"[39m
+                [36m>[39m
+                  [36m<span[39m
+                    [33maria-hidden[39m=[32m"true"[39m
+                    [33mclass[39m=[32m"machine-dot online"[39m
+                  [36m/>[39m
+                  [36m<span[39m
+                    [33mclass[39m=[32m"machine-label"[39m
+                  [36m>[39m
+                    [0mwin-a[0m
+                  [36m</span>[39m
+                  [36m<span[39m
+                    [33maria-hidden[39m=[32m"true"[39m
+                    [33mclass[39m=[32m"machine-caret"[39m
+                  [36m>[39m
+                    [0m▾[0m
+                  [36m</span>[39m
+                [36m</button>[39m
+              [36m</div>[39m
+              [36m<button[39m
+                [33mclass[39m=[32m"path-display"[39m
+                [33mtitle[39m=[32m"/ — Ctrl+L to edit"[39m
+                [33mtype[39m=[32m"button"[39m
+              [36m>[39m
+                [0m/[0m
+              [36m</button>[39m
+              [36m<button[39m
+                [33maria-label[39m=[32m"Refresh"[39m
+                [33mclass[39m=[32m"pane-icon-btn"[39m
+                [33mtitle[39m=[32m"Refresh (r)"[39m
+                [33mtype[39m=[32m"button"[39m
+              [36m>[39m
+                [0m⟳[0m
+              [36m</button>[39m
+            [36m</header>[39m
+            [36m<div[39m
+              [33mclass[39m=[32m"pane-notice"[39m
+              [33mrole[39m=[32m"status"[39m
+            [36m>[39m
+              [0mRemote writes unavailable: browse and pull only until this host/account's safety capability is proven.[0m
+            [36m</div>[39m
+            [36m<div[39m
+              [33maria-label[39m=[32m"Files on win-a"[39m
+              [33maria-multiselectable[39m=[32m"true"[39m
+              [33mclass[39m=[32m"pane-list"[39m
+              [33mrole[39m=[32m"listbox"[39m
+              [33mtabindex[39m=[32m"-1"[39m
+            [36m>[39m
+              [36m<div[39m
+                [33maria-selected[39m=[32m"true"[39m
+                [33mclass[39m=[32m"pane-row cursor "[39m
+                [33mdata-index[39m=[32m"0"[39m
+                [33mdata-kind[39m=[32m"file"[39m
+                [33mdata-name[39m=[32m"a.txt"[39m
+                [33mrole[39m=[32m"option"[39m
+              [36m>[39m
+                [36m<span[39m
+                  [33maria-hidden[39m=[32m"true"[39m
+                  [33mclass[39m=[32m"col-glyph"[39m
+                [36m>[39m
+                  [0m🗎[0m
+                [36m</span>[39m
+                [36m<span[39m
+                  [33mclass[39m=[32m"col-name"[39m
+                [36m>[39m
+                  [0ma.txt[0m
+                [36m</span>[39m
+                [36m<span[39m
+                  [33mclass[39m=[32m"col-size"[39m
+                [36m>[39m
+                  [0m1 B[0m
+                [36m</span>[39m
+                [36m<span[39m
+                  [33mclass[39m=[32m"col-time"[39m
+                [36m>[39m
+                  [0mDec 31, 1969[0m
+                [36m</span>[39m
+              [36m</div>[39m
+            [36m</div>[39m
+            [36m<footer[39m
+              [33mclass[39m=[32m"pane-footer"[39m
+            [36m>[39m
+              [36m<span>[39m
+                [0m1[0m
+                [0m [0m
+                [0mitem[0m
+              [36m</span>[39m
+              [36m<span[39m
+                [33mclass[39m=[32m"footer-user"[39m
+              [36m>[39m
+                [0malice[0m
+                [0m@[0m
+              [36m</span>[39m
+              [36m<span[39m
+                [33mclass[39m=[32m"footer-ro"[39m
+              [36m>[39m
+                [0mread-only[0m
+              [36m</span>[39m
+              [36m<span[39m
+                [33mclass[39m=[32m"pane-actions"[39m
+              [36m>[39m
+                [36m<button[39m
+                  [33mclass[39m=[32m"pane-action"[39m
+                  [33mdisabled[39m=[32m""[39m
+                  [33mtitle[39m=[32m"New folder (n)"[39m
+                  [33mtype[39m=[32m"button"[39m
+                [36m>[39m
+                  [0mNew folder[0m
+                [36m</button>[39m
+                [36m<button[39m
+                  [33mclass[39m=[32m"pane-action"[39m
+                  [33mdisabled[39m=[32m""[39m
+                  [33mtitle[39m=[32m"Rename (R)"[39m
+                  [33mtype[39m=[32m"button"[39m
+                [36m>[39m
+                  [0mRename[0m
+                [36m</button>[39m
+                [36m<button[39m
+                  [33mclass[39m=[32m"pane-action danger"[39m
+                  [33mdisabled[39m=[32m""[39m
+                  [33mtitle[39m=[32m"Delete (D)"[39m
+                  [33mtype[39m=[32m"button"[39m
+                [36m>[39m
+                  [0mDelete[0m
+                [36m</button>[39m
+              [36m</span>[39m
+            [36m</footer>[39m
+          [36m</section>[39m
+        [36m</div>[39m
+        [36m<div[39m
+          [33maria-live[39m=[32m"polite"[39m
+          [33mclass[39m=[32m"browser-status"[39m
+          [33mrole[39m=[32m"status"[39m
+        [36m/>[39m
+      [36m</div>[39m
+    [36m</div>[39m
+  [36m</body>[39m
+[36m</html>[39m
+
+- Expected
++ Received
+
+- false
++ true
+
+ ❯ src/components/browser/__tests__/TwoPaneView.winAgent.test.tsx:64:85
+     62|   await waitFor(() => {
+     63|     for (const name of ["New folder", "Rename", "Delete"]) {
+     64|       expect((right().getByRole("button", { name }) as HTMLButtonEleme…
+       |                                                                                     ^
+     65|     }
+     66|   });
+ ❯ runWithExpensiveErrorDiagnosticsDisabled ../node_modules/@testing-library/dom/dist/config.js:47:12
+ ❯ checkCallback ../node_modules/@testing-library/dom/dist/wait-for.js:124:77
+ ❯ Timeout.checkRealTimersCallback ../node_modules/@testing-library/dom/dist/wait-for.js:118:16
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[1/1]⎯
+
+
+ Test Files  1 failed (1)
+      Tests  1 failed | 7 passed (8)
+   Start at  19:09:44
+   Duration  2.03s (transform 118ms, setup 0ms, import 179ms, tests 1.48s, environment 296ms)
+
+--- End captured output (original bytes retained above). ---

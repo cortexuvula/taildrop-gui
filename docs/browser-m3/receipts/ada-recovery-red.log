@@ -1,0 +1,56 @@
+   Compiling taildrop-gui v0.17.0 (/Users/cortexuvula/Development/taildrop-gui/src-tauri)
+warning: use of deprecated method `std::sync::atomic::Atomic::<usize>::fetch_update`: renamed to `try_update` for consistency
+   --> src/browser/win_agent/tests.rs:246:42
+    |
+246 |                 if self.compile_failures.fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_sub(1)).is_ok() {
+    |                                          ^^^^^^^^^^^^
+    |
+    = note: `#[warn(deprecated)]` on by default
+help: replace the use of the deprecated method
+    |
+246 -                 if self.compile_failures.fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_sub(1)).is_ok() {
+246 +                 if self.compile_failures.try_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_sub(1)).is_ok() {
+    |
+
+warning: `taildrop-gui` (lib test) generated 1 warning (run `cargo fix --lib -p taildrop-gui --tests` to apply 1 suggestion)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 16.34s
+     Running unittests src/lib.rs (src-tauri/target/debug/deps/taildrop_gui_lib-ecfdd47c2e9dce6b)
+
+running 20 tests
+
+thread 'browser::win_agent::tests::missing_helper_revokes_proof_even_when_write_and_eof_both_fail' (26096518) panicked at src/browser/win_agent/tests.rs:757:5:
+EOF failure must not bypass missing-helper diagnostics
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+test browser::win_agent::tests::protocol_exact_no_perl_prefix_or_shell_data ... ok
+test browser::win_agent::tests::fixed_loader_is_utf16le_and_installer_has_pid_publish ... ok
+test browser::win_agent::tests::windows_absolute_and_nested_names_refuse_devices_and_shell_paths ... ok
+test browser::win_agent::tests::replace_merge_rejects_case_variants_before_second_header ... ok
+test browser::win_agent::tests::short_and_oversize_payloads_fail_and_cleanup_is_eof_only ... ok
+test browser::win_agent::tests::failure_taxonomy_and_shared_revocation ... ok
+test browser::win_agent::tests::probe_wire_defaults_false_and_preflight_requires_matching_capability ... ok
+test browser::win_agent::tests::unproven_windows_writes_never_open_exec_or_mutate_sftp ... ok
+test browser::win_agent::tests::sink_validates_every_component_and_skips_links_without_l ... ok
+test browser::win_agent::tests::sink_parses_conflicts_errors_and_final_z_with_bounded_exit ... ok
+test browser::win_agent::tests::existing_exe_needs_exact_known_answer_and_account_singleflight ... ok
+test browser::win_agent::tests::installer_source_is_the_only_sftp_write_and_is_hash_bound ... ok
+test browser::win_agent::tests::proven_windows_mutations_use_only_native_verbs_and_mkdir_d_z ... ok
+test browser::win_agent::tests::invalidate_inflight_probe_does_not_resurrect_or_retarget ... ok
+
+thread 'browser::win_agent::tests::failed_install_source_cannot_poison_next_attempt' (26096512) panicked at src/browser/win_agent/tests.rs:742:41:
+called `Result::unwrap()` on an `Err` value: BrowserError { message: "installer source already exists", kind: Exists, names: None, sftp_status: None, agent_rc: None }
+test browser::win_agent::tests::cache_is_bounded_and_missing_helper_requires_reproof ... ok
+test browser::win_agent::tests::missing_helper_revokes_proof_even_when_write_and_eof_both_fail ... FAILED
+test browser::win_agent::tests::failed_install_source_cannot_poison_next_attempt ... FAILED
+test browser::win_agent::tests::vendored_csharp_is_plugin_exact ... ok
+test browser::win_agent::tests::forged_existing_exe_and_installed_marker_never_grant_capability ... ok
+test browser::win_agent::tests::capture_caps_while_reading_and_times_out_before_wait_exit ... ok
+
+failures:
+
+failures:
+    browser::win_agent::tests::failed_install_source_cannot_poison_next_attempt
+    browser::win_agent::tests::missing_helper_revokes_proof_even_when_write_and_eof_both_fail
+
+test result: FAILED. 18 passed; 2 failed; 0 ignored; 0 measured; 292 filtered out; finished in 0.03s
+
+error: test failed, to rerun pass `--lib`

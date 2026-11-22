@@ -1,0 +1,14 @@
+
+> taildrop-gui@0.17.0 test
+> vitest run
+
+
+ RUN  v4.1.10 /Users/cortexuvula/Development/taildrop-gui/.m3-codex-lane
+
+
+ Test Files  20 passed (20)
+      Tests  211 passed (211)
+   Start at  19:12:58
+   Duration  9.11s (transform 4.51s, setup 0ms, import 8.65s, tests 11.35s, environment 19.03s)
+
+--- End captured output (original bytes retained above). ---
