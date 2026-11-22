@@ -927,13 +927,18 @@ async fn missing_helper_revokes_proof_even_when_write_and_eof_both_fail() {
 
 #[tokio::test]
 async fn proven_windows_engine_streams_remote_source_only_through_csharp_sink() {
-    use crate::browser::fake::{temp_root, FakeConfig, FakeServer};
+    use crate::browser::fake::{temp_root, write_temp_key, FakeConfig, FakeServer};
     use crate::browser::transfer::{run_copy, Side};
     let root = temp_root("m3-engine");
     std::fs::create_dir_all(root.join("source/nested")).unwrap();
     std::fs::write(root.join("source/nested/a"), b"actual source bytes").unwrap();
     let srv = FakeServer::start(FakeConfig::openssh(root)).await;
-    let src = srv.connect(&srv.root.join("trust")).await;
+    // OpenSSH requires publickey auth, even on loopback. Never depend on
+    // the developer's default key files or ssh-agent being available.
+    let (key, _key_guard) = write_temp_key("m3-engine");
+    let src = srv
+        .connect_as(&srv.root.join("trust"), "fakeuser", &[key])
+        .await;
     let dst = TestTransport {
         proof: b"Z".to_vec(),
         ..TestTransport::agent()
