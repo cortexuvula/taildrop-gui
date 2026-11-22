@@ -67,10 +67,9 @@ pub enum Side<'a> {
     Local,
     Remote {
         transport: &'a dyn SftpTransport,
-        /// Windows peers are browse+pull only in M1: refused as a copy
-        /// destination by `preflight`; as a source, symlinks are
-        /// skip+counted and junctions are undetectable over SFTP (M0 §5) —
-        /// the depth cap bounds any junction loop.
+        /// Windows destinations require a proven C# helper; sources remain
+        /// readable without one, with symlinks/junctions skipped by the
+        /// Windows SFTP source planner.
         windows: bool,
     },
 }
@@ -342,7 +341,11 @@ pub async fn run_copy(
         }
         Side::Local => (false, false),
     };
-    preflight_with_cap(req, windows, proven)?;
+    // Preserve the POSIX engine contract; commands owns its general preflight.
+    // Windows gets an engine-level fail-closed guard too: never reach RemoteSink.
+    if windows {
+        preflight_with_cap(req, true, proven)?;
+    }
     // ---- 1. Pre-walk for the progress total (plugin: local_size / T record)
     let (total, remote_plan) = match src {
         Side::Local => {
@@ -375,13 +378,8 @@ pub async fn run_copy(
             return Err(local_unsupported());
         }
         Side::Remote { transport, windows } => {
-            // M2b tier selection: on a POSIX destination whose capability
-            // probe found the vendored Perl agent, placement goes through
-            // the exec channel — atomic no-replace renames and handle-bound
-            // stage cleanup by the agent itself. EVERY other host keeps the
-            // current SFTP tiers UNCHANGED (documented fallback, never a
-            // silent downgrade): Windows destinations (M3 gate) and
-            // SftpOnly/ExecNoPerl hosts use RemoteSink exactly as in M2a.
+            // Windows is C#-only, never SFTP destination writes. POSIX uses
+            // the Perl helper when proven and otherwise its unchanged SFTP tiers.
             if *windows {
                 Box::new(
                     crate::browser::win_agent::WinAgentSink::open(

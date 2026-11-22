@@ -3295,7 +3295,7 @@ mod tests {
             shim: None,
         };
         let (emit, _p) = collector();
-        transfer::run_copy(
+        let error = transfer::run_copy(
             &r2r_req("/src", "/dst", &["a.txt"], false),
             &Side::Remote {
                 transport: &t,
@@ -3309,8 +3309,9 @@ mod tests {
             emit,
         )
         .await
-        .expect("windows-dst copy stays on the SFTP tier");
-        assert_eq!(std::fs::read(srv.root.join("dst/a.txt")).unwrap(), b"aaa");
+        .expect_err("unproven Windows destinations must not fall back to SFTP");
+        assert_eq!(error.kind, ErrorKind::Unsupported);
+        assert!(!srv.root.join("dst/a.txt").exists());
         assert_eq!(
             wrapper.exec_opens.load(Ordering::SeqCst),
             0,

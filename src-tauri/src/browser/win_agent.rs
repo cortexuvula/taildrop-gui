@@ -191,44 +191,49 @@ async fn capture(
     budget: Duration,
     cap: usize,
 ) -> Result<(Vec<u8>, Option<u32>, String), BrowserError> {
-    tokio::time::timeout(budget, async {
-        let mut ch = t.open_exec(cmd).await?;
-        let result = async {
-            // Even a failed write must close stdin before waiting (PS InputFormat None).
-            let write = ch.write_all(input).await;
-            ch.close_stdin().await?;
-            let mut out = Vec::new();
-            let mut buf = [0u8; 4096];
-            loop {
-                let n = ch.read(&mut buf).await?;
-                if n == 0 {
-                    break;
-                }
-                if n > cap.saturating_sub(out.len()) {
-                    return Err(BrowserError::other("Windows helper output exceeded cap"));
-                }
-                out.extend_from_slice(&buf[..n]);
+    let deadline = tokio::time::Instant::now() + budget;
+    let mut ch = tokio::time::timeout_at(deadline, t.open_exec(cmd))
+        .await
+        .map_err(|_| timeout_error())??;
+    let result = tokio::time::timeout_at(deadline, async {
+        // Even a failed write must close stdin before waiting (PS InputFormat None).
+        let write = ch.write_all(input).await;
+        ch.close_stdin().await?;
+        let mut out = Vec::new();
+        let mut buf = [0u8; 4096];
+        loop {
+            let n = ch.read(&mut buf).await?;
+            if n == 0 {
+                break;
             }
-            let rc = ch.wait_exit(budget).await;
-            let stderr = ch.stderr_tail();
-            if let Err(e) = write {
-                return Err(if rc == Some(0) {
-                    e
-                } else {
-                    classify_failure(rc, &stderr)
-                });
+            if n > cap.saturating_sub(out.len()) {
+                return Err(BrowserError::other("Windows helper output exceeded cap"));
             }
-            Ok((out, rc, stderr))
+            out.extend_from_slice(&buf[..n]);
         }
-        .await;
-        if result.is_err() {
-            let _ = ch.close_stdin().await;
-            let _ = ch.wait_exit(CLEANUP_WAIT).await;
+        let rc = ch.wait_exit(budget).await;
+        let stderr = ch.stderr_tail();
+        if let Err(e) = write {
+            return Err(if rc == Some(0) {
+                e
+            } else {
+                classify_failure(rc, &stderr)
+            });
         }
-        result
+        Ok((out, rc, stderr))
     })
     .await
-    .map_err(|_| timeout_error())?
+    .unwrap_or_else(|_| Err(timeout_error()));
+    if result.is_err() {
+        // Retain the channel across timeout cancellation, EOF first, then wait.
+        // This cleanup extension is itself bounded; install has an outer budget.
+        let _ = tokio::time::timeout(CLEANUP_WAIT, async {
+            let _ = ch.close_stdin().await;
+            let _ = ch.wait_exit(CLEANUP_WAIT).await;
+        })
+        .await;
+    }
+    result
 }
 
 fn compile_script(folder: &str) -> String {
@@ -375,14 +380,23 @@ async fn verb(
     budget: Duration,
 ) -> Result<Vec<u8>, BrowserError> {
     let a = require(t)?;
-    let (out, rc, err) = capture(
+    let captured = capture(
         t,
         &a.command()?,
         &fields(verb, args)?,
         budget,
         MAX_LISTING_ENTRIES,
     )
-    .await?;
+    .await;
+    let (out, rc, err) = match captured {
+        Ok(value) => value,
+        Err(e) => {
+            if helper_missing(&e.message) {
+                a.revoke();
+            }
+            return Err(e);
+        }
+    };
     if rc != Some(0) {
         return Err(a.failure(rc, &err));
     }
@@ -541,6 +555,9 @@ impl WinAgentSink {
                     format!("Windows case clash in {rel}"),
                 ));
             }
+            if self.paths.len() >= MAX_LISTING_ENTRIES && !self.paths.contains_key(&folded) {
+                return Err(BrowserError::other("too many Windows path components"));
+            }
             self.paths.insert(folded, path.clone());
         }
         if !self.records.insert(rel.to_owned()) {
@@ -666,19 +683,4 @@ impl CopySink for WinAgentSink {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    #[test]
-    fn vendored_csharp_is_plugin_exact() {
-        use sha2::{Digest, Sha256};
-        assert_eq!(
-            format!("{:x}", Sha256::digest(AGENT_CS.as_bytes())),
-            "cfa1c1af6b1617180b3297d5e0f69b8c6dc322ce85807aba1ab47099fdaa5133"
-        );
-        assert_eq!(
-            &format!("{:x}", Sha256::digest(AGENT_CS.as_bytes()))[..16],
-            SOURCE_HASH
-        );
-        assert!(AGENT_CS.contains("public class Pipe : Stream"));
-    }
-}
+mod tests;

@@ -964,7 +964,7 @@ pub fn browser_copy_jobs(state: State<'_, Arc<BrowserState>>) -> Vec<CopyJobSnap
     state.jobs.snapshots()
 }
 
-/// Create a folder. Name validated server-side; Windows targets refused (M1).
+/// Create a folder. Windows uses a proven C# D/Z receive, never SFTP mkdir.
 #[tauri::command]
 pub async fn browser_mkdir(
     state: State<'_, Arc<BrowserState>>,
@@ -1019,7 +1019,7 @@ async fn mkdir_remote(
 
 /// Rename — NEVER replaces an existing target (invariant §4.13). Local:
 /// atomic no-replace renameat. Remote: existence check + rename (TOCTOU
-/// ceiling documented, §6.4); Windows targets refused (M1).
+/// ceiling documented, §6.4); Windows uses the C# atomic no-replace verb.
 #[tauri::command]
 pub async fn browser_rename(
     state: State<'_, Arc<BrowserState>>,
