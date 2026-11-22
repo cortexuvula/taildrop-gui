@@ -380,6 +380,10 @@ async fn csharp_toctou_keep_and_atomic_replace_preserve_realname() {
     )
     .await
     .unwrap();
+    // Hold the payload until the agent has opened its exclusive temp.
+    // This plants the competing winner after native receive has started.
+    wait_for_file(&f.dst.join(".tailfiles-incoming-0000000000000002-1"), 0).await;
+    assert!(!f.dst.join("race").exists());
     std::fs::write(f.dst.join("race"), b"winner").unwrap();
     s.file_chunk(b"new").await.unwrap();
     s.file_end(0, 1).await.unwrap();
@@ -394,15 +398,19 @@ async fn csharp_toctou_keep_and_atomic_replace_preserve_realname() {
     let stop = Arc::new(AtomicBool::new(false));
     let _stop_on_unwind = StopReader(stop.clone());
     let ready = Arc::new(tokio::sync::Notify::new());
-    let observed = Arc::new(AtomicUsize::new(0));
+    let old_seen = Arc::new(AtomicUsize::new(0));
+    let new_seen = Arc::new(AtomicUsize::new(0));
+    let new_ready = Arc::new(tokio::sync::Notify::new());
     let path = f.dst.join("Report.TXT");
     let st = stop.clone();
     let rd = ready.clone();
-    let obs = observed.clone();
+    let olds = old_seen.clone();
+    let news = new_seen.clone();
+    let nr = new_ready.clone();
     let reader = tokio::task::spawn_blocking(move || {
         let initial = std::fs::read(&path).expect("initial atomic-replace reader");
         assert_eq!(initial, vec![b'o'; 1024 * 1024]);
-        obs.fetch_add(1, Ordering::SeqCst);
+        olds.fetch_add(1, Ordering::SeqCst);
         rd.notify_one();
         let deadline = std::time::Instant::now() + Duration::from_secs(60);
         while !st.load(Ordering::SeqCst) {
@@ -416,7 +424,12 @@ async fn csharp_toctou_keep_and_atomic_replace_preserve_realname() {
                 data == vec![b'o'; 1024 * 1024] || data == vec![b'n'; 1024 * 1024],
                 "atomic replacement exposed partial data"
             );
-            obs.fetch_add(1, Ordering::SeqCst);
+            if data[0] == b'n' {
+                news.fetch_add(1, Ordering::SeqCst);
+                nr.notify_one();
+            } else {
+                olds.fetch_add(1, Ordering::SeqCst);
+            }
         }
     });
     tokio::time::timeout(Duration::from_secs(10), ready.notified())
@@ -425,9 +438,14 @@ async fn csharp_toctou_keep_and_atomic_replace_preserve_realname() {
     let mut s = f.sink("0000000000000003", true).await;
     put(&mut s, "report.txt", &new, 0o644, 1).await;
     placed(&mut s).await;
+    // Require the concurrent reader to observe the complete replacement too.
+    tokio::time::timeout(Duration::from_secs(10), new_ready.notified())
+        .await
+        .expect("atomic-replace reader never observed new contents");
     stop.store(true, Ordering::SeqCst);
     reader.await.unwrap();
-    assert!(observed.load(Ordering::SeqCst) > 0);
+    assert!(old_seen.load(Ordering::SeqCst) > 0);
+    assert!(new_seen.load(Ordering::SeqCst) > 0);
     assert_eq!(std::fs::read(f.dst.join("Report.TXT")).unwrap(), new);
     let names: Vec<_> = std::fs::read_dir(&f.dst)
         .unwrap()
@@ -471,6 +489,47 @@ async fn csharp_eof_cancel_removes_unfinished_only_and_leaves_lookalike() {
     assert_eq!(std::fs::read(&look).unwrap(), b"not ours");
     f.assert_zero_sftp();
 }
+#[tokio::test]
+async fn csharp_eof_cancel_removes_unfinished_directory_tree() {
+    let f = Fixture::new("m3-dir-cancel").await;
+    let tag = "0000000000000007";
+    let mut s = f.sink(tag, false).await;
+    s.dir_begin("tree", 0o755, 123).await.unwrap();
+    s.dir_begin("tree/nested", 0o755, 123).await.unwrap();
+    put(
+        &mut s,
+        "tree/nested/complete",
+        b"inside unfinished tree",
+        0o644,
+        123,
+    )
+    .await;
+    let chunk = crate::browser::transfer::CHUNK;
+    s.file_begin(
+        "tree/nested/partial",
+        &FileMeta {
+            size: (chunk * 2) as u64,
+            mode: 0o644,
+            mtime: 123,
+        },
+    )
+    .await
+    .unwrap();
+    s.file_chunk(&vec![b'p'; chunk]).await.unwrap();
+    let temp = f.dst.join(format!(".tailfiles-incoming-{tag}-1"));
+    wait_for_file(&temp.join("nested/partial"), chunk as u64).await;
+    assert_eq!(
+        std::fs::read(temp.join("nested/complete")).unwrap(),
+        b"inside unfinished tree"
+    );
+    assert!(!f.dst.join("tree").exists());
+    s.remove().await.unwrap();
+    assert!(!temp.exists());
+    assert!(!f.dst.join("tree").exists());
+    assert_eq!(std::fs::read_dir(&f.dst).unwrap().count(), 0);
+    f.assert_zero_sftp();
+}
+
 #[tokio::test]
 async fn csharp_planted_exact_next_temp_and_lookalike_untouched() {
     let f = Fixture::new("m3-planted").await;
@@ -556,33 +615,40 @@ async fn csharp_native_mkdir_rename_readonly_delete_and_junction_sentinel() {
     std::fs::create_dir(&sentinel).unwrap();
     std::fs::write(sentinel.join("keep"), b"sentinel").unwrap();
     let junction = f.dst.join("junction");
-    let status = Command::new("cmd.exe")
-        .arg("/c")
-        .arg(format!(
-            "mklink /J \"{}\" \"{}\"",
-            junction.display(),
-            sentinel.display()
-        ))
-        .stdin(Stdio::null())
-        .output()
-        .await
-        .unwrap();
-    assert!(
-        status.status.success(),
-        "junction fixture creation: {}",
-        String::from_utf8_lossy(&status.stderr)
-    );
+    let tree = f.dst.join("recursive");
+    std::fs::create_dir_all(tree.join("nested")).unwrap();
+    std::fs::write(tree.join("nested/ordinary"), b"delete inside tree").unwrap();
+    for link in [&junction, &tree.join("nested/junction")] {
+        let status = Command::new("cmd.exe")
+            .arg("/c")
+            .arg(format!(
+                "mklink /J \"{}\" \"{}\"",
+                link.display(),
+                sentinel.display()
+            ))
+            .stdin(Stdio::null())
+            .output()
+            .await
+            .unwrap();
+        assert!(
+            status.status.success(),
+            "junction fixture creation: {}",
+            String::from_utf8_lossy(&status.stderr)
+        );
+    }
     delete(
         &f.t,
         &[
             ro.to_string_lossy().into_owned(),
             junction.to_string_lossy().into_owned(),
+            tree.to_string_lossy().into_owned(),
         ],
     )
     .await
     .unwrap();
     assert!(!ro.exists());
     assert!(!junction.exists());
+    assert!(!tree.exists());
     assert_eq!(std::fs::read(sentinel.join("keep")).unwrap(), b"sentinel");
     f.assert_zero_sftp();
 }

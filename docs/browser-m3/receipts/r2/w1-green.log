@@ -8,3 +8,4 @@ test browser::win_agent::tests::w1_mkdir_command_adapter_keeps_drive_root_absolu
 
 test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 313 filtered out; finished in 0.01s
 
+-- End raw output --
