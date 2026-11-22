@@ -334,9 +334,13 @@ async fn csharp_eof_cancel_removes_unfinished_only_and_leaves_lookalike() {
     )
     .await
     .unwrap();
-    s.file_chunk(&vec![b'p'; 64 * 1024]).await.unwrap();
+    // C# WriteData fills one entire 256 KiB Exact() buffer BEFORE WriteFile.
+    // Send that full buffer (still short of the 1 MiB declaration), otherwise
+    // the disk-write barrier can never be reached and the test just times out.
+    let chunk = crate::browser::transfer::CHUNK;
+    s.file_chunk(&vec![b'p'; chunk]).await.unwrap();
     let temp = f.dst.join(format!(".tailfiles-incoming-{tag}-2"));
-    wait_for_file(&temp, 1).await;
+    wait_for_file(&temp, chunk as u64).await;
     // Same production cleanup used on cooperative cancellation and short-payload errors.
     assert!(s.file_end(0, 0).await.is_err());
     s.remove().await.unwrap();
