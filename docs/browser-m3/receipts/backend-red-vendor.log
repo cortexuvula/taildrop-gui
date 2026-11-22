@@ -1,0 +1,24 @@
+   Compiling taildrop-gui v0.17.0 (/Users/cortexuvula/Development/taildrop-gui/.m3-codex-lane/src-tauri)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 14.82s
+     Running unittests src/lib.rs (/Users/cortexuvula/Development/taildrop-gui/src-tauri/target/debug/deps/taildrop_gui_lib-4914de7c67634a9d)
+
+running 1 test
+test browser::win_agent::tests::vendored_csharp_is_plugin_exact ... FAILED
+
+failures:
+
+---- browser::win_agent::tests::vendored_csharp_is_plugin_exact stdout ----
+
+thread 'browser::win_agent::tests::vendored_csharp_is_plugin_exact' (25878196) panicked at src/browser/win_agent.rs:11:9:
+assertion `left == right` failed
+  left: "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+ right: "cfa1c1af6b1617180b3297d5e0f69b8c6dc322ce85807aba1ab47099fdaa5133"
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    browser::win_agent::tests::vendored_csharp_is_plugin_exact
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 292 filtered out; finished in 0.00s
+
+error: test failed, to rerun pass `--lib`

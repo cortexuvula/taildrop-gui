@@ -1,0 +1,50 @@
+[
+  {
+    "command": "cargo test --manifest-path src-tauri/Cargo.toml --lib",
+    "source": "/Users/cortexuvula/Development/taildrop-gui/.m3-codex-lane",
+    "code_sha": "84c1f10f98d7d66cb7ef33dbedbd01d17e576825",
+    "utc": "2026-11-22T02:24:29.415664+00:00",
+    "exit_status": 0,
+    "log": "docs/browser-m3/receipts/backend-final-lib.txt"
+  },
+  {
+    "command": "cargo fmt --manifest-path src-tauri/Cargo.toml --all -- --check",
+    "source": "/Users/cortexuvula/Development/taildrop-gui/.m3-codex-lane",
+    "code_sha": "84c1f10f98d7d66cb7ef33dbedbd01d17e576825",
+    "utc": "2026-11-22T02:24:42.833886+00:00",
+    "exit_status": 0,
+    "log": "docs/browser-m3/receipts/backend-final-fmt.txt"
+  },
+  {
+    "command": "cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings",
+    "source": "/Users/cortexuvula/Development/taildrop-gui/.m3-codex-lane",
+    "code_sha": "84c1f10f98d7d66cb7ef33dbedbd01d17e576825",
+    "utc": "2026-11-22T02:24:43.249819+00:00",
+    "exit_status": 0,
+    "log": "docs/browser-m3/receipts/backend-final-host-clippy.txt"
+  },
+  {
+    "command": "cargo check --manifest-path src-tauri/Cargo.toml --target x86_64-pc-windows-gnu --tests",
+    "source": "/Users/cortexuvula/Development/taildrop-gui/.m3-codex-lane",
+    "code_sha": "84c1f10f98d7d66cb7ef33dbedbd01d17e576825",
+    "utc": "2026-11-22T02:24:51.557448+00:00",
+    "exit_status": 0,
+    "log": "docs/browser-m3/receipts/backend-final-windows-check-tests.txt"
+  },
+  {
+    "command": "cargo clippy --manifest-path src-tauri/Cargo.toml --target x86_64-pc-windows-gnu --all-targets -- -D warnings",
+    "source": "/Users/cortexuvula/Development/taildrop-gui/.m3-codex-lane",
+    "code_sha": "84c1f10f98d7d66cb7ef33dbedbd01d17e576825",
+    "utc": "2026-11-22T02:24:57.906759+00:00",
+    "exit_status": 0,
+    "log": "docs/browser-m3/receipts/backend-final-windows-clippy.txt"
+  },
+  {
+    "command": "git diff --check",
+    "source": "/Users/cortexuvula/Development/taildrop-gui/.m3-codex-lane",
+    "code_sha": "84c1f10f98d7d66cb7ef33dbedbd01d17e576825",
+    "utc": "2026-11-22T02:25:03.885845+00:00",
+    "exit_status": 0,
+    "log": "docs/browser-m3/receipts/backend-final-diff-hygiene.txt"
+  }
+]

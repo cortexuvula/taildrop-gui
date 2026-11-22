@@ -1,0 +1,12 @@
+Code commit: 84c1f10f98d7d66cb7ef33dbedbd01d17e576825
+UTC: 2026-11-22T02:24:43.249819+00:00
+Command: cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
+CARGO_TARGET_DIR=/Users/cortexuvula/Development/taildrop-gui/src-tauri/target
+CARGO_INCREMENTAL=0
+Filesystem   1G-blocks Used Available Capacity  iused      ifree %iused  Mounted on
+/dev/disk3s5       926  778        99    89% 10952767 1040324720    1%   /System/Volumes/Data
+
+    Checking taildrop-gui v0.17.0 (/Users/cortexuvula/Development/taildrop-gui/.m3-codex-lane/src-tauri)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 8.16s
+
+Exit status: 0

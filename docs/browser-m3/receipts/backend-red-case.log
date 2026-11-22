@@ -1,0 +1,22 @@
+   Compiling taildrop-gui v0.17.0 (/Users/cortexuvula/Development/taildrop-gui/.m3-codex-lane/src-tauri)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 10.56s
+     Running unittests src/lib.rs (/Users/cortexuvula/Development/taildrop-gui/src-tauri/target/debug/deps/taildrop_gui_lib-ecfdd47c2e9dce6b)
+
+running 1 test
+test browser::win_agent::tests::replace_merge_rejects_case_variants_before_second_header ... FAILED
+
+failures:
+
+---- browser::win_agent::tests::replace_merge_rejects_case_variants_before_second_header stdout ----
+
+thread 'browser::win_agent::tests::replace_merge_rejects_case_variants_before_second_header' (25942673) panicked at src/browser/win_agent/tests.rs:563:47:
+called `Result::unwrap_err()` on an `Ok` value: ()
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    browser::win_agent::tests::replace_merge_rejects_case_variants_before_second_header
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 308 filtered out; finished in 0.00s
+
+error: test failed, to rerun pass `--lib`
