@@ -46,6 +46,39 @@ perl -e 'my $n = <STDIN>; defined $n or exit 2; read(STDIN, my $c, $n) == $n or 
 Docs line (browser README/handoff): see `docs/browser-m2/m2b-handoff.md` and
 `m1-handoff.md`.
 
+## Windows C# helper (M3)
+
+`agent.cs` is the exact UTF-8 runtime body of `WIN_AGENT_CS` at the same
+upstream commit above, `bin/tailfiles:1495–2216`, including `Pipe` (overlapped
+stdio). Copyright © 2026 Drew Majerus; MIT license below applies in full.
+No header is prepended: the **actual uploaded bytes**, 35158 bytes, have
+SHA-256 `cfa1c1af6b1617180b3297d5e0f69b8c6dc322ce85807aba1ab47099fdaa5133`.
+The filename uses its first 16 hex characters: `agent-cfa1c1af6b161718.exe`.
+The Rust vendoring test pins both bytes and filename hash.
+
+`browser/win_agent.rs` ports `win_ps` / `win_agent` (lines 2222–2287):
+UTF-16LE EncodedCommand works under cmd and PowerShell login shells;
+PowerShell 5.1 Add-Type compiles a PID-specific temporary exe and Move-Item
+publishes it. Unlike upstream, query/compile/probe entire I/O is bounded and
+stdout is capped while reading; old helper versions are not garbage-collected.
+Existing and newly installed binaries must pass `exists` with the actual
+TailFiles directory, count `1`, and their own basename: exactly `1`, exit 0.
+Installer executable paths additionally reject `&;!()` to narrow shell parsing.
+All other paths travel only as NUL-delimited stdin data.
+
+Receive supports D/F/Z only: symlinks are skipped and counted, never sent as L.
+It places completed sibling files incrementally: cancellation/EOF removes
+unfinished items through held handles, **not previously committed siblings**.
+Dot-prefixed temporary names are not Windows Hidden attributes. The explicit
+destination's Top follows that path; descendant opens are no-follow.
+Receive ignores POSIX modes (inherits destination ACLs); timestamps are best
+effort (SetFileTime's return is not checked upstream). No mode-fidelity claim
+is made. Client validation checks every path component, reserved names, and
+case-variant sibling paths even during Replace/merge; RealName retains the
+existing destination spelling. Mkdir is a single D/Z receive, since upstream
+has no mkdir verb. Rename and delete use the native helper verbs; destructive
+calls retain fresh-home/parent guards plus C#'s all-target handle guards.
+
 ## MIT License (omarchy-tailnet-files)
 
 ```

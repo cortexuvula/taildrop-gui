@@ -5199,6 +5199,7 @@ name = "taildrop-gui"
 version = "0.17.0"
 dependencies = [
  "async-trait",
+ "base64 0.22.1",
  "bytes",
  "dirs 6.0.0",
  "env_logger",

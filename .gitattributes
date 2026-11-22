@@ -4,3 +4,4 @@
 # core.autocrlf, which breaks both the pins and the wire bytes.
 src-tauri/agents/*.pl text eol=lf
 src-tauri/agents/*.sh text eol=lf
+src-tauri/agents/*.cs text eol=lf

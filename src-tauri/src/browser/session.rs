@@ -403,9 +403,13 @@ pub struct RusshTransport {
     /// after connect (`set_agent_cap`); read by the copy engine's tier
     /// selection. `None` = not probed = the SFTP-only default.
     agent_cap: Mutex<Option<crate::browser::agent::AgentCap>>,
+    win_agent: Mutex<Option<crate::browser::win_agent::WinAgent>>,
 }
 
 impl RusshTransport {
+    pub fn set_win_agent(&self, agent: Option<crate::browser::win_agent::WinAgent>) {
+        *self.win_agent.lock().unwrap_or_else(|p| p.into_inner()) = agent;
+    }
     pub fn flavor(&self) -> ServerFlavor {
         self.flavor
     }
@@ -658,6 +662,7 @@ pub async fn connect(params: ConnectParams) -> Result<RusshTransport, BrowserErr
         user,
         auth_method,
         agent_cap: Mutex::new(None),
+        win_agent: Mutex::new(None),
     })
 }
 
@@ -959,6 +964,13 @@ impl SftpTransport for RusshTransport {
         &self.extensions
     }
 
+    fn win_agent(&self) -> Option<crate::browser::win_agent::WinAgent> {
+        self.win_agent
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .clone()
+            .filter(|a| a.proven())
+    }
     fn agent_cap(&self) -> crate::browser::agent::AgentCap {
         self.agent_cap
             .lock()

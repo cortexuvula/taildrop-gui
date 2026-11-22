@@ -28,6 +28,7 @@ use crate::browser::probe::{build_probe_info, is_posix, ProbeCache};
 use crate::browser::session::{RusshTransport, SessionCtx};
 use crate::browser::transfer::{self, Side};
 use crate::browser::transport::SftpTransport as _;
+use crate::browser::win_agent::{self, WinAgentCache};
 use crate::browser::{
     valid_host, valid_user, BrowserConfig, BrowserError, BrowserPeer, CopyEvent, CopyJobSnapshot,
     CopyRequest, DeleteOutcome, ErrorKind, JobState, KnownHostPin, Listing, ProbeInfo,
@@ -497,6 +498,7 @@ pub struct BrowserState {
     /// (a capability change is a server-admin event; invalidated on account
     /// change and forget-host alongside the probe cache).
     pub agent_caps: AgentCapCache,
+    pub win_agents: WinAgentCache,
     pub peers: Arc<PeerMetaCache>,
     pub jobs: Arc<JobRegistry>,
     pub config_dir: PathBuf,
@@ -511,6 +513,7 @@ impl BrowserState {
             ctx: Arc::new(SessionCtx::new(&config_dir)),
             probes: ProbeCache::new(),
             agent_caps: AgentCapCache::new(),
+            win_agents: WinAgentCache::default(),
             peers: Arc::new(PeerMetaCache::new()),
             jobs: Arc::new(JobRegistry::new()),
             config_dir,
@@ -673,6 +676,13 @@ async fn execute_copy(
         }
     };
 
+    // Sources never need a Windows helper. Same-host copies borrow the source
+    // connection but MUST still prove it in its destination role.
+    if let OwnedSide::Remote(remote) = dst_side.as_ref().unwrap_or(&src_side) {
+        if remote.windows {
+            attach_windows_agent(state, &req.dst_target, &remote.transport).await;
+        }
+    }
     let result = run_with_sides(app, state, id, req, cancel, &src_side, dst_side.as_ref()).await;
 
     // S-1 self-heal (Codie M2b review): if the DESTINATION's agent bailed
@@ -744,7 +754,11 @@ async fn run_with_sides(
 
     let dst_windows = matches!(dst_ref, Side::Remote { windows: true, .. });
     // Server-side preflight (in addition to the UI's own checks).
-    transfer::preflight(req, dst_windows)?;
+    let proven = match &dst_ref {
+        Side::Remote { transport, .. } => transport.win_agent().is_some_and(|a| a.proven()),
+        _ => false,
+    };
+    transfer::preflight_with_cap(req, dst_windows, proven)?;
 
     // Existence pre-check unless replace consent — ask the filesystem, not
     // the listing (case-insensitive volumes answer correctly).
@@ -810,8 +824,13 @@ async fn probe_impl(
     }
     let user = state.ctx.resolve_user(host, as_user)?;
     if use_cache {
-        if let Some(info) = state.probes.get(host, &user) {
-            return Ok(info);
+        if let Some(mut info) = state.probes.get(host, &user) {
+            // Listings may have cached OS/home without probing the helper. Never
+            // let that read-only cache masquerade as a Windows capability probe.
+            info.win_agent = state.win_agents.get(host, &user).is_some();
+            if info.posix || info.win_agent {
+                return Ok(info);
+            }
         }
     } else {
         // Fresh probe (delete guards need THIS machine's current home).
@@ -825,13 +844,17 @@ async fn probe_impl(
     let os_hint = meta.map(|m| m.os).unwrap_or_default();
     let transport = state.ctx.open(host, &user, ts_keys).await?;
     let home = transport.realpath(".").await?;
-    let info = build_probe_info(
+    let mut info = build_probe_info(
         home,
         os_hint,
         transport.flavor(),
         transport.user().to_string(),
         transport.extensions().clone(),
     );
+    if !info.posix {
+        attach_windows_agent(state, host, &transport).await;
+        info.win_agent = transport.win_agent().is_some();
+    }
     let _ = Box::new(transport).close().await;
     state.probes.put(host, &user, info.clone());
     Ok(info)
@@ -965,6 +988,9 @@ pub async fn browser_mkdir(
         return Ok(());
     }
     let transport = open_remote_mut(&state, &target, as_user.as_deref()).await?;
+    if transport.flavor().is_windows() {
+        attach_windows_agent(&state, &target, &transport).await;
+    }
     let r = mkdir_remote(&transport, &target, &path, &name).await;
     let _ = Box::new(transport).close().await;
     r
@@ -972,12 +998,13 @@ pub async fn browser_mkdir(
 
 async fn mkdir_remote(
     t: &RusshTransport,
-    target: &str,
+    _target: &str,
     path: &str,
     name: &str,
 ) -> Result<(), BrowserError> {
     if t.flavor().is_windows() {
-        return Err(windows_write_refusal("New folder", target));
+        win_agent::validate_absolute(path)?;
+        return win_agent::mkdir(t, &parent_of(path), name).await;
     }
     // Note: for non-Windows targets the plugin validates names only on the
     // Windows destination itself; this branch intentionally does not refuse
@@ -1023,7 +1050,10 @@ pub async fn browser_rename(
     let transport = open_remote_mut(&state, &target, as_user.as_deref()).await?;
     let r = async {
         if transport.flavor().is_windows() {
-            return Err(windows_write_refusal("Rename", &target));
+            attach_windows_agent(&state, &target, &transport).await;
+            win_agent::validate_absolute(&old)?;
+            win_agent::validate_absolute(&new)?;
+            return win_agent::rename(&transport, &parent_of(&old), &old_name, &new_name).await;
         }
         // Never replace: ask the filesystem (case-insensitive volumes answer
         // for case-variant clashes too).
@@ -1119,8 +1149,8 @@ pub async fn browser_delete(
     // Fresh probe: the guard needs THIS machine's current home (never a
     // cached one — invariant §4.10 "home probed fresh per delete").
     let probe = probe_impl(&state, &target, as_user.as_deref(), false).await?;
-    if !probe.posix && probe.flavor.is_windows() {
-        return Err(windows_write_refusal("Delete", &target));
+    if !probe.posix && !probe.win_agent {
+        return Err(win_agent::unavailable());
     }
     let homes: Vec<String> = if probe.home.is_empty() {
         Vec::new() // fail closed: guard_delete refuses without a home
@@ -1129,6 +1159,9 @@ pub async fn browser_delete(
     };
     let transport = open_remote_mut(&state, &target, as_user.as_deref()).await?;
     let windows = transport.flavor().is_windows();
+    if windows {
+        attach_windows_agent(&state, &target, &transport).await;
+    }
     let r = async {
         // Guard as-written, then resolve parents and guard again (a
         // symlinked parent can't hide a home folder).
@@ -1146,6 +1179,15 @@ pub async fn browser_delete(
                 return Err(BrowserError::new(ErrorKind::Denied, why));
             }
             resolved.push(real);
+        }
+        if windows {
+            // Existing fresh-home + resolved-parent checks above remain mandatory.
+            // C# checks ALL opened targets again before the first deletion.
+            win_agent::delete(&transport, &resolved).await?;
+            return Ok(DeleteOutcome {
+                trashed: false,
+                done: resolved.len(),
+            });
         }
         // M2b: PHYSICAL delete re-check — where the exec-agent capability
         // was probed for this host/account, the vendored POSIX script
@@ -1582,6 +1624,7 @@ pub async fn browser_set_user(
         .map_err(|e| e.message)?;
     state.probes.invalidate_host(&host);
     state.agent_caps.invalidate_host(&host);
+    state.win_agents.invalidate_host(&host);
     Ok(())
 }
 
@@ -1655,6 +1698,7 @@ pub async fn browser_forget_host_key(
     state.ctx.trust.forget(flavor, &host)?;
     state.probes.invalidate_host(&host);
     state.agent_caps.invalidate_host(&host);
+    state.win_agents.invalidate_host(&host);
     Ok(())
 }
 
@@ -1679,11 +1723,8 @@ async fn open_remote_mut(
     state.ctx.open(target, &user, ts_keys).await
 }
 
-fn windows_write_refusal(op: &str, target: &str) -> BrowserError {
-    BrowserError::unsupported(format!(
-        "{op} on Windows peers ({target}) is disabled until the M3 safety gate passes — \
-         browse and pull only for now"
-    ))
+async fn attach_windows_agent(state: &BrowserState, target: &str, t: &RusshTransport) {
+    t.set_win_agent(state.win_agents.get_or_probe(target, t.user(), t).await);
 }
 
 /// Basename of an absolute path, refusing empties and traversal.

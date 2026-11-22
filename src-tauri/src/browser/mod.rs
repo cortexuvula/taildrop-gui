@@ -28,6 +28,7 @@ pub mod session;
 pub mod transfer;
 pub mod transport;
 pub mod trust;
+pub mod win_agent;
 pub mod winnames;
 
 use serde::{Deserialize, Serialize};
@@ -268,6 +269,9 @@ impl ServerFlavor {
 pub struct ProbeInfo {
     pub system: String,
     pub posix: bool,
+    /// Proven helper for the exact probed host/account; absent old data fails closed.
+    #[serde(default, rename = "winAgent")]
+    pub win_agent: bool,
     pub home: String,
     pub flavor: ServerFlavor,
     /// The account the probe authenticated as — pin for later actions.

@@ -158,6 +158,11 @@ pub trait SftpTransport: Send + Sync {
         crate::browser::agent::AgentCap::SftpOnly
     }
 
+    /// A proven Windows helper for THIS transport's host/account. No default writes.
+    fn win_agent(&self) -> Option<crate::browser::win_agent::WinAgent> {
+        None
+    }
+
     /// M2b: open an exec channel running a FIXED command string (the
     /// vendored agent bootstrap or the POSIX delete re-check). Paths are
     /// never part of the command — they travel as stdin data (plugin

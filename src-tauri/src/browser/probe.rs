@@ -40,6 +40,7 @@ pub fn build_probe_info(
     ProbeInfo {
         system,
         posix,
+        win_agent: false,
         home,
         flavor,
         user,

@@ -182,7 +182,16 @@ impl ProgressReporter {
 /// Pre-flight validation shared by every copy: guards, account pinning,
 /// Windows-write refusal, control chars, unique single-parent selection,
 /// copy-into-itself.
+#[cfg(test)]
 pub fn preflight(req: &CopyRequest, dst_windows: bool) -> Result<(), BrowserError> {
+    preflight_with_cap(req, dst_windows, false)
+}
+
+pub fn preflight_with_cap(
+    req: &CopyRequest,
+    dst_windows: bool,
+    win_agent: bool,
+) -> Result<(), BrowserError> {
     if req.names.is_empty() {
         return Err(BrowserError::new(
             ErrorKind::Other,
@@ -222,12 +231,16 @@ pub fn preflight(req: &CopyRequest, dst_windows: bool) -> Result<(), BrowserErro
             ));
         }
     }
-    // M1 gate: Windows peers are browse + pull only.
     if dst_windows {
-        return Err(BrowserError::unsupported(
-            "Writing to Windows peers is disabled until the M3 safety gate passes — \
-             browse and pull only for now",
-        ));
+        if !win_agent {
+            return Err(crate::browser::win_agent::unavailable());
+        }
+        crate::browser::win_agent::validate_absolute(&req.dst_dir)?;
+        for name in &req.names {
+            if let Some(why) = crate::browser::winnames::windows_name_problem(name) {
+                return Err(BrowserError::new(ErrorKind::Denied, why));
+            }
+        }
     }
     if let Some(reason) = guards::copy_precondition_problem(
         &req.src_target,
@@ -235,7 +248,7 @@ pub fn preflight(req: &CopyRequest, dst_windows: bool) -> Result<(), BrowserErro
         &req.src_dir,
         &req.dst_dir,
         &req.names,
-        false,
+        dst_windows,
     ) {
         return Err(BrowserError::new(ErrorKind::Other, reason));
     }
@@ -251,6 +264,13 @@ pub async fn existing_names(
     dst_dir: &str,
     names: &[String],
 ) -> Result<Vec<String>, BrowserError> {
+    if let Side::Remote {
+        transport,
+        windows: true,
+    } = dst
+    {
+        return crate::browser::win_agent::exists(*transport, dst_dir, names).await;
+    }
     let mut clash = Vec::new();
     for n in names {
         let exists = match dst {
@@ -316,6 +336,13 @@ pub async fn run_copy(
     cancel: CancellationToken,
     emit: Arc<dyn Fn(u8, String, String) + Send + Sync>,
 ) -> Result<CopyOutcome, BrowserError> {
+    let (windows, proven) = match dst {
+        Side::Remote { transport, windows } => {
+            (*windows, transport.win_agent().is_some_and(|a| a.proven()))
+        }
+        Side::Local => (false, false),
+    };
+    preflight_with_cap(req, windows, proven)?;
     // ---- 1. Pre-walk for the progress total (plugin: local_size / T record)
     let (total, remote_plan) = match src {
         Side::Local => {
@@ -355,7 +382,17 @@ pub async fn run_copy(
             // current SFTP tiers UNCHANGED (documented fallback, never a
             // silent downgrade): Windows destinations (M3 gate) and
             // SftpOnly/ExecNoPerl hosts use RemoteSink exactly as in M2a.
-            if !*windows && transport.agent_cap() == crate::browser::agent::AgentCap::PerlExec {
+            if *windows {
+                Box::new(
+                    crate::browser::win_agent::WinAgentSink::open(
+                        *transport,
+                        &req.dst_dir,
+                        &stage_tag,
+                        req.replace,
+                    )
+                    .await?,
+                )
+            } else if transport.agent_cap() == crate::browser::agent::AgentCap::PerlExec {
                 Box::new(
                     crate::browser::agent::AgentSink::open(
                         *transport,

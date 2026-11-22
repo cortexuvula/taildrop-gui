@@ -33,6 +33,8 @@ env_logger = "0.11"
 russh = { version = "=0.65.2", default-features = false, features = ["ring"] }
 russh-sftp = "=3.0.1"
 async-trait = "0.1"
+# Fixed Windows PowerShell UTF-16LE EncodedCommand installer.
+base64 = "0.22"
 # Random 64-bit staging tags (.tailfiles-incoming-<16hex>).
 rand = "0.9"
 # Local delete is Trash-only, never permanent (safety invariant 11).
