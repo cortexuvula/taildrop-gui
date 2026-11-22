@@ -16,7 +16,13 @@ pub(super) struct ChildChannel {
 }
 impl ChildChannel {
     pub(super) async fn spawn(exe: &str) -> Result<Box<dyn ExecChannel>, BrowserError> {
-        let mut child = Command::new(exe)
+        // Exercise the actual cmd /c launcher too, not just the exe directly.
+        let mut command = Command::new("cmd.exe");
+        command.arg("/c").arg(exe);
+        Self::spawn_command(command).await
+    }
+    async fn spawn_command(mut command: Command) -> Result<Box<dyn ExecChannel>, BrowserError> {
+        let mut child = command
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -87,6 +93,14 @@ impl ExecChannel for ChildChannel {
         String::from_utf8_lossy(&self.stderr.lock().unwrap()).into_owned()
     }
 }
+// A test panic must not leave a started spawn_blocking reader alive during
+// Tokio runtime shutdown. Also give the reader its own finite deadline.
+struct StopReader(Arc<AtomicBool>);
+impl Drop for StopReader {
+    fn drop(&mut self) {
+        self.0.store(true, Ordering::SeqCst);
+    }
+}
 struct Fixture {
     root: PathBuf,
     t: TestTransport,
@@ -98,7 +112,7 @@ impl Fixture {
         let folder = root.join("TailFiles");
         std::fs::create_dir_all(&folder).unwrap();
         std::fs::write(folder.join(format!("agent-{SOURCE_HASH}.cs")), AGENT_CS).unwrap();
-        let script=format!("$ErrorActionPreference='Stop'\nif ($PSVersionTable.PSVersion.Major -ne 5) {{ throw 'Windows PowerShell 5.1 required' }}\n$csc=Join-Path $env:WINDIR 'Microsoft.NET\\Framework64\\v4.0.30319\\csc.exe'\nif (!(Test-Path -LiteralPath $csc)) {{ throw '.NET Framework 4 csc required' }}\n{}",compile_script(&folder.to_string_lossy()));
+        let script=format!("$ErrorActionPreference='Stop'\nif ($PSVersionTable.PSVersion.Major -ne 5) {{ throw 'Windows PowerShell 5.1 required' }}\n$csc=Join-Path $env:WINDIR 'Microsoft.NET\\Framework64\\v4.0.30319\\csc.exe'\nif (!(Test-Path -LiteralPath $csc)) {{ throw '.NET Framework 4 csc required' }}\n{}",compile_script(&folder.to_string_lossy(), &format!("agent-{SOURCE_HASH}.cs")));
         let command = win_ps(&script);
         let args: Vec<_> = command.split_whitespace().skip(1).collect();
         let output = tokio::time::timeout(
@@ -206,6 +220,105 @@ async fn wait_for_file(p: &Path, min_size: u64) {
 }
 
 #[tokio::test]
+async fn csharp_loader_compile_and_known_answer_under_both_login_shells() {
+    let f = Fixture::new("m3 shell paths").await;
+    let folder = f.root.join("TailFiles");
+    let agent = f.t.agent.as_ref().unwrap();
+    for powershell_login in [false, true] {
+        let source_name = format!(
+            "agent-{SOURCE_HASH}.{}.cs",
+            super::super::super::transfer::new_stage_tag()
+        );
+        let source = folder.join(&source_name);
+        std::fs::write(&source, AGENT_CS).unwrap();
+        let install = win_ps(&compile_script(&folder.to_string_lossy(), &source_name));
+        let mut login = if powershell_login {
+            let mut c = Command::new("powershell.exe");
+            c.args([
+                "-NoProfile",
+                "-NonInteractive",
+                "-InputFormat",
+                "None",
+                "-Command",
+            ]);
+            c
+        } else {
+            let mut c = Command::new("cmd.exe");
+            c.arg("/c");
+            c
+        };
+        let output = tokio::time::timeout(
+            INSTALL_WAIT,
+            login
+                .arg(&install)
+                .stdin(Stdio::null())
+                .kill_on_drop(true)
+                .output(),
+        )
+        .await
+        .expect("login-shell install deadline")
+        .expect("login shell required");
+        assert!(
+            output.status.success(),
+            "shell={powershell_login}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(!source.exists(), "compile finally must remove its source");
+
+        let mut login = if powershell_login {
+            let mut c = Command::new("powershell.exe");
+            c.args([
+                "-NoProfile",
+                "-NonInteractive",
+                "-InputFormat",
+                "None",
+                "-Command",
+            ]);
+            c.arg(agent.command().unwrap());
+            c
+        } else {
+            let mut c = Command::new("cmd.exe");
+            c.arg("/c").arg(&agent.exe);
+            c
+        };
+        // Stdio is assigned by spawn_command, exactly as in the other tests.
+        login.kill_on_drop(true);
+        let mut ch = ChildChannel::spawn_command(login).await.unwrap();
+        let payload = fields(
+            "exists",
+            &[
+                &folder.to_string_lossy(),
+                "1",
+                &format!("agent-{SOURCE_HASH}.exe"),
+            ],
+        )
+        .unwrap();
+        tokio::time::timeout(IO_WAIT, async {
+            ch.write_all(&payload).await.unwrap();
+            ch.close_stdin().await.unwrap();
+            let mut out = Vec::new();
+            let mut buf = [0; 64];
+            loop {
+                let n = ch.read(&mut buf).await.unwrap();
+                if n == 0 {
+                    break;
+                }
+                out.extend_from_slice(&buf[..n]);
+                assert!(out.len() <= 64, "native stdout cap");
+            }
+            assert_eq!(ch.wait_exit(IO_WAIT).await, Some(0), "{}", ch.stderr_tail());
+            assert_eq!(
+                out, b"1",
+                "shell={powershell_login} must preserve the binary record stream"
+            );
+        })
+        .await
+        .expect("login-shell helper protocol deadline");
+    }
+    f.assert_zero_sftp();
+}
+
+#[tokio::test]
 async fn csharp_tree_mtime_modes_ignored_and_client_con_refusal() {
     let f = Fixture::new("m3-tree").await;
     let mut s = f.sink("0000000000000001", false).await;
@@ -279,6 +392,7 @@ async fn csharp_toctou_keep_and_atomic_replace_preserve_realname() {
     let new = vec![b'n'; 1024 * 1024];
     std::fs::write(f.dst.join("Report.TXT"), &old).unwrap();
     let stop = Arc::new(AtomicBool::new(false));
+    let _stop_on_unwind = StopReader(stop.clone());
     let ready = Arc::new(tokio::sync::Notify::new());
     let observed = Arc::new(AtomicUsize::new(0));
     let path = f.dst.join("Report.TXT");
@@ -290,7 +404,12 @@ async fn csharp_toctou_keep_and_atomic_replace_preserve_realname() {
         assert_eq!(initial, vec![b'o'; 1024 * 1024]);
         obs.fetch_add(1, Ordering::SeqCst);
         rd.notify_one();
+        let deadline = std::time::Instant::now() + Duration::from_secs(60);
         while !st.load(Ordering::SeqCst) {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "atomic-replace reader deadline"
+            );
             let data =
                 std::fs::read(&path).expect("atomic replacement must never expose a missing path");
             assert!(
@@ -300,7 +419,9 @@ async fn csharp_toctou_keep_and_atomic_replace_preserve_realname() {
             obs.fetch_add(1, Ordering::SeqCst);
         }
     });
-    ready.notified().await;
+    tokio::time::timeout(Duration::from_secs(10), ready.notified())
+        .await
+        .expect("atomic-replace reader readiness deadline");
     let mut s = f.sink("0000000000000003", true).await;
     put(&mut s, "report.txt", &new, 0o644, 1).await;
     placed(&mut s).await;

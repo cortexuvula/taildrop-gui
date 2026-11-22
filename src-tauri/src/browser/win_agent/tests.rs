@@ -23,6 +23,7 @@ struct MockChannel {
     rc: Option<u32>,
     err: String,
     hang_read: bool,
+    fail_io: bool,
 }
 impl MockChannel {
     fn boxed(out: &[u8], rc: Option<u32>) -> (Box<dyn ExecChannel>, Arc<Mutex<Wire>>) {
@@ -35,6 +36,7 @@ impl MockChannel {
                 rc,
                 err: String::new(),
                 hang_read: false,
+                fail_io: false,
             }),
             wire,
         )
@@ -43,6 +45,9 @@ impl MockChannel {
 #[async_trait]
 impl ExecChannel for MockChannel {
     async fn write_all(&mut self, d: &[u8]) -> Result<(), BrowserError> {
+        if self.fail_io {
+            return Err(BrowserError::other("broken write pipe"));
+        }
         self.wire.lock().unwrap().input.extend_from_slice(d);
         Ok(())
     }
@@ -61,6 +66,9 @@ impl ExecChannel for MockChannel {
     }
     async fn close_stdin(&mut self) -> Result<(), BrowserError> {
         self.wire.lock().unwrap().closed = true;
+        if self.fail_io {
+            return Err(BrowserError::other("broken EOF pipe"));
+        }
         Ok(())
     }
     async fn wait_exit(&mut self, _: Duration) -> Option<u32> {
@@ -70,6 +78,9 @@ impl ExecChannel for MockChannel {
         self.rc
     }
     fn stderr_tail(&self) -> String {
+        if self.fail_io && self.wire.lock().unwrap().waits == 0 {
+            return String::new();
+        }
         self.err.clone()
     }
 }
@@ -84,6 +95,9 @@ struct TestTransport {
     wires: Mutex<Vec<Arc<Mutex<Wire>>>>,
     proof: Vec<u8>,
     installed: bool,
+    compile_failures: AtomicUsize,
+    source_paths: Mutex<HashSet<String>>,
+    broken_pipes: bool,
     uploaded: Arc<Mutex<Vec<u8>>>,
     mutations: AtomicUsize,
     gate: Option<(Arc<tokio::sync::Notify>, Arc<tokio::sync::Notify>)>,
@@ -101,6 +115,9 @@ impl Default for TestTransport {
             wires: Mutex::new(Vec::new()),
             proof: b"1".to_vec(),
             installed: true,
+            compile_failures: AtomicUsize::new(0),
+            source_paths: Mutex::default(),
+            broken_pipes: false,
             uploaded: Arc::default(),
             mutations: AtomicUsize::new(0),
             gate: None,
@@ -182,10 +199,16 @@ impl SftpTransport for TestTransport {
         _: u32,
     ) -> Result<Box<dyn RemoteWriter>, BrowserError> {
         assert!(!self.installed);
-        assert_eq!(
-            p,
-            format!("/C:/Users/alice/AppData/Local/TailFiles/agent-{SOURCE_HASH}.cs")
-        );
+        assert!(p.starts_with(&format!(
+            "/C:/Users/alice/AppData/Local/TailFiles/agent-{SOURCE_HASH}"
+        )));
+        assert!(p.ends_with(".cs"));
+        if !self.source_paths.lock().unwrap().insert(p.to_string()) {
+            return Err(BrowserError::new(
+                ErrorKind::Exists,
+                "installer source already exists",
+            ));
+        }
         self.mutations.fetch_add(1, Ordering::SeqCst);
         Ok(Box::new(SourceWriter(self.uploaded.clone())))
     }
@@ -220,6 +243,7 @@ impl SftpTransport for TestTransport {
             release.notified().await;
         }
         tokio::task::yield_now().await;
+        let mut rc = Some(0);
         let out = if cmd.starts_with("powershell ") {
             let script = decode_ps(cmd);
             if script.contains("GetFolderPath") {
@@ -230,12 +254,21 @@ impl SftpTransport for TestTransport {
                 .into_bytes()
             } else {
                 assert!(script.contains("Add-Type"));
-                b"installed\r\n".to_vec()
+                if self
+                    .compile_failures
+                    .compare_exchange(1, 0, Ordering::SeqCst, Ordering::SeqCst)
+                    .is_ok()
+                {
+                    rc = Some(1);
+                    b"compile refused".to_vec()
+                } else {
+                    b"installed\r\n".to_vec()
+                }
             }
         } else {
             self.proof.clone()
         };
-        let (mut ch, wire) = MockChannel::boxed(&out, Some(0));
+        let (mut ch, wire) = MockChannel::boxed(&out, rc);
         self.wires.lock().unwrap().push(wire);
         if self.hang {
             ch = Box::new(MockChannel {
@@ -245,6 +278,18 @@ impl SftpTransport for TestTransport {
                 rc: Some(0),
                 err: String::new(),
                 hang_read: true,
+                fail_io: false,
+            });
+        }
+        if self.broken_pipes {
+            ch = Box::new(MockChannel {
+                wire: self.wires.lock().unwrap().last().unwrap().clone(),
+                out: Vec::new(),
+                offset: 0,
+                rc: Some(9009),
+                err: "is not recognized as an internal or external command".to_string(),
+                hang_read: false,
+                fail_io: true,
             });
         }
         Ok(ch)
@@ -285,7 +330,7 @@ fn fixed_loader_is_utf16le_and_installer_has_pid_publish() {
     assert!(
         cmd.starts_with("powershell -NoProfile -NonInteractive -InputFormat None -EncodedCommand ")
     );
-    let s = compile_script(r"C:\Users\alice\AppData\Local\TailFiles");
+    let s = compile_script(r"C:\Users\alice\AppData\Local\TailFiles", "agent-test.cs");
     for marker in [
         "$PID",
         "Add-Type -OutputAssembly $tmp -OutputType ConsoleApplication",
@@ -700,6 +745,105 @@ async fn sink_parses_conflicts_errors_and_final_z_with_bounded_exit() {
     sink.remove().await.unwrap();
     assert!(wire.lock().unwrap().closed);
     assert_eq!(wire.lock().unwrap().waits, 1);
+}
+
+#[tokio::test]
+async fn failed_install_source_cannot_poison_next_attempt() {
+    let t = TestTransport {
+        installed: false,
+        compile_failures: AtomicUsize::new(1),
+        ..TestTransport::default()
+    };
+    assert!(install_and_prove(&t).await.is_err());
+    // Preserve the failed attempt's source, just as an interrupted remote
+    // compile may. The next attempt must not overwrite or unlink that name.
+    let prior = t.source_paths.lock().unwrap().clone();
+    assert_eq!(prior.len(), 1);
+    assert!(install_and_prove(&t).await.unwrap().proven());
+    let paths = t.source_paths.lock().unwrap();
+    assert_eq!(paths.len(), 2);
+    assert!(prior.is_subset(&paths));
+}
+
+#[tokio::test]
+async fn missing_helper_revokes_proof_even_when_write_and_eof_both_fail() {
+    let a = proven();
+    let t = TestTransport {
+        agent: Some(a.clone()),
+        broken_pipes: true,
+        ..TestTransport::default()
+    };
+    assert!(WinAgentSink::open(&t, "C:/data", "0123456789abcdef", false)
+        .await
+        .is_err());
+    assert!(
+        !a.proven(),
+        "EOF failure must not bypass missing-helper diagnostics"
+    );
+    assert!(t.wires.lock().unwrap()[0].lock().unwrap().waits > 0);
+
+    let a = proven();
+    let t = TestTransport {
+        agent: Some(a.clone()),
+        broken_pipes: true,
+        ..TestTransport::default()
+    };
+    assert!(rename(&t, "C:/data", "a", "b").await.is_err());
+    assert!(
+        !a.proven(),
+        "verb EOF failure must still consume exit diagnostics"
+    );
+}
+
+#[tokio::test]
+async fn proven_windows_engine_streams_remote_source_only_through_csharp_sink() {
+    use crate::browser::fake::{temp_root, FakeConfig, FakeServer};
+    use crate::browser::transfer::{run_copy, Side};
+    let root = temp_root("m3-engine");
+    std::fs::create_dir_all(root.join("source/nested")).unwrap();
+    std::fs::write(root.join("source/nested/a"), b"actual source bytes").unwrap();
+    let srv = FakeServer::start(FakeConfig::openssh(root)).await;
+    let src = srv.connect(&srv.root.join("trust")).await;
+    let dst = TestTransport {
+        proof: b"Z".to_vec(),
+        ..TestTransport::agent()
+    };
+    let req = crate::browser::CopyRequest {
+        src_target: "source".into(),
+        src_user: Some("fakeuser".into()),
+        src_dir: "/source".into(),
+        dst_target: "windows".into(),
+        dst_user: Some("alice".into()),
+        dst_dir: "C:/data".into(),
+        names: vec!["nested".into()],
+        replace: false,
+    };
+    let outcome = run_copy(
+        &req,
+        &Side::Remote {
+            transport: &src,
+            windows: false,
+        },
+        &Side::Remote {
+            transport: &dst,
+            windows: true,
+        },
+        tokio_util::sync::CancellationToken::new(),
+        Arc::new(|_, _, _| {}),
+    )
+    .await
+    .unwrap();
+    assert_eq!(outcome.bytes, b"actual source bytes".len() as u64);
+    assert_eq!(outcome.skipped, 0);
+    assert_eq!(dst.opens.load(Ordering::SeqCst), 1);
+    assert_eq!(dst.mutations.load(Ordering::SeqCst), 0);
+    let input = dst.wires.lock().unwrap()[0].lock().unwrap().input.clone();
+    assert!(input.starts_with(b"recv\0C:/data\0.tailfiles-incoming-"));
+    assert!(input
+        .windows(b"Fnested/a\0".len())
+        .any(|w| w == b"Fnested/a\0"));
+    assert!(input.ends_with(b"actual source bytesZ"));
+    Box::new(src).close().await.unwrap();
 }
 
 #[cfg(windows)]

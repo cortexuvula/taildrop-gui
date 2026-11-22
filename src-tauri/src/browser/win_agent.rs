@@ -198,7 +198,7 @@ async fn capture(
     let result = tokio::time::timeout_at(deadline, async {
         // Even a failed write must close stdin before waiting (PS InputFormat None).
         let write = ch.write_all(input).await;
-        ch.close_stdin().await?;
+        let eof = ch.close_stdin().await;
         let mut out = Vec::new();
         let mut buf = [0u8; 4096];
         loop {
@@ -213,7 +213,7 @@ async fn capture(
         }
         let rc = ch.wait_exit(budget).await;
         let stderr = ch.stderr_tail();
-        if let Err(e) = write {
+        if let Err(e) = write.and(eof) {
             return Err(if rc == Some(0) {
                 e
             } else {
@@ -225,19 +225,28 @@ async fn capture(
     .await
     .unwrap_or_else(|_| Err(timeout_error()));
     if result.is_err() {
-        // Retain the channel across timeout cancellation, EOF first, then wait.
-        // This cleanup extension is itself bounded; install has an outer budget.
-        let _ = tokio::time::timeout(CLEANUP_WAIT, async {
+        // EOF failure must never suppress diagnostic collection. A process
+        // that exited before write/EOF may only report 'not recognized' here.
+        let rc = tokio::time::timeout(CLEANUP_WAIT, async {
             let _ = ch.close_stdin().await;
-            let _ = ch.wait_exit(CLEANUP_WAIT).await;
+            ch.wait_exit(CLEANUP_WAIT).await
         })
-        .await;
+        .await
+        .ok()
+        .flatten();
+        let stderr = ch.stderr_tail();
+        if helper_missing(&stderr) {
+            return Err(classify_failure(rc, &stderr));
+        }
     }
     result
 }
 
-fn compile_script(folder: &str) -> String {
-    format!("$ErrorActionPreference = 'Stop'; $ProgressPreference = 'SilentlyContinue'\n$d = {}; $h = '{SOURCE_HASH}'\n$tmp = Join-Path $d ('agent-' + $h + '.' + $PID + '.exe')\nAdd-Type -OutputAssembly $tmp -OutputType ConsoleApplication -TypeDefinition ([IO.File]::ReadAllText((Join-Path $d ('agent-' + $h + '.cs'))))\ntry {{ Move-Item -LiteralPath $tmp -Destination (Join-Path $d ('agent-' + $h + '.exe')) }} catch {{ Remove-Item -LiteralPath $tmp -ErrorAction SilentlyContinue }}\nRemove-Item -LiteralPath (Join-Path $d ('agent-' + $h + '.cs')) -ErrorAction SilentlyContinue\n'installed'\n", ps_quote(folder))
+fn compile_script(folder: &str, source_name: &str) -> String {
+    // Source is exclusive and attempt-unique, while the final exe stays
+    // source-hash-bound. An interrupted upload can leave an orphan source,
+    // never poison subsequent retries or cause us to overwrite its name.
+    format!("$ErrorActionPreference = 'Stop'; $ProgressPreference = 'SilentlyContinue'\n$d = {}; $h = '{SOURCE_HASH}'\n$src = Join-Path $d {}\n$tmp = Join-Path $d ('agent-' + $h + '.' + $PID + '.exe')\ntry {{\nAdd-Type -OutputAssembly $tmp -OutputType ConsoleApplication -TypeDefinition ([IO.File]::ReadAllText($src))\ntry {{ Move-Item -LiteralPath $tmp -Destination (Join-Path $d ('agent-' + $h + '.exe')) }} catch {{ if (!(Test-Path -LiteralPath (Join-Path $d ('agent-' + $h + '.exe')) -PathType Leaf)) {{ throw }} }}\n}} finally {{\nRemove-Item -LiteralPath $tmp -ErrorAction SilentlyContinue\nRemove-Item -LiteralPath $src -ErrorAction SilentlyContinue\n}}\n'installed'\n", ps_quote(folder), ps_quote(source_name))
 }
 async fn install_and_prove(t: &dyn SftpTransport) -> Result<WinAgent, BrowserError> {
     tokio::time::timeout(INSTALL_WAIT, async {
@@ -260,12 +269,13 @@ async fn install_and_prove(t: &dyn SftpTransport) -> Result<WinAgent, BrowserErr
                 Ok(()) => (),
                 Err(e) => { if !t.stat(&sftp_dir).await?.is_some_and(|n| n.is_dir && !n.is_symlink) { return Err(e); } }
             }
-            let src = format!("{sftp_dir}/agent-{SOURCE_HASH}.cs");
+            let source_name = format!("agent-{SOURCE_HASH}.{}.cs", super::transfer::new_stage_tag());
+            let src = format!("{sftp_dir}/{source_name}");
             let mut writer = t.create_exclusive(&src, 0o600).await?;
             let write = writer.write_all(AGENT_CS.as_bytes()).await;
             let close = writer.close().await;
             write?; close?;
-            let (out, rc, err) = capture(t, &win_ps(&compile_script(&folder)), b"", INSTALL_WAIT, 4096).await?;
+            let (out, rc, err) = capture(t, &win_ps(&compile_script(&folder, &source_name)), b"", INSTALL_WAIT, 4096).await?;
             if rc != Some(0) || !out.windows(9).any(|w| w == b"installed") { return Err(classify_failure(rc, &err)); }
         }
         // Test-Path/installed alone is NEVER capability proof, even for existing exe.
@@ -665,8 +675,8 @@ impl CopySink for WinAgentSink {
     async fn remove(&mut self) -> Result<(), BrowserError> {
         // EOF cleanup ONLY. Never delete a temporary path by client-known name.
         tokio::time::timeout(CLEANUP_WAIT, async {
-            self.eof().await?;
-            if !self.placed {
+            let eof = self.eof().await;
+            if !self.placed || eof.is_err() {
                 let rc = self.ch.wait_exit(CLEANUP_WAIT).await;
                 if helper_missing(&self.ch.stderr_tail()) {
                     self.agent.revoke();
@@ -675,7 +685,7 @@ impl CopySink for WinAgentSink {
                     return Err(timeout_error());
                 }
             }
-            Ok(())
+            eof
         })
         .await
         .map_err(|_| timeout_error())?

@@ -61,6 +61,11 @@ UTF-16LE EncodedCommand works under cmd and PowerShell login shells;
 PowerShell 5.1 Add-Type compiles a PID-specific temporary exe and Move-Item
 publishes it. Unlike upstream, query/compile/probe entire I/O is bounded and
 stdout is capped while reading; old helper versions are not garbage-collected.
+Installer sources use exclusive `agent-<hash>.<random-16hex>.cs` names so a
+failed/interrupted upload cannot poison the next attempt. The final executable
+keeps the plugin's exact `agent-<hash>.exe` basename. The compile script removes
+its own source/PID-temp in `finally` and accepts a Move-Item race only when a
+final executable exists (which must still pass the known-answer proof).
 Existing and newly installed binaries must pass `exists` with the actual
 TailFiles directory, count `1`, and their own basename: exactly `1`, exit 0.
 Installer executable paths additionally reject `&;!()` to narrow shell parsing.
