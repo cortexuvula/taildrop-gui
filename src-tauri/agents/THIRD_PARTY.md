@@ -48,13 +48,71 @@ Docs line (browser README/handoff): see `docs/browser-m2/m2b-handoff.md` and
 
 ## Windows C# helper (M3)
 
-`agent.cs` is the exact UTF-8 runtime body of `WIN_AGENT_CS` at the same
-upstream commit above, `bin/tailfiles:1495–2216`, including `Pipe` (overlapped
-stdio). Copyright © 2026 Drew Majerus; MIT license below applies in full.
-No header is prepended: the **actual uploaded bytes**, 35158 bytes, have
-SHA-256 `cfa1c1af6b1617180b3297d5e0f69b8c6dc322ce85807aba1ab47099fdaa5133`.
-The filename uses its first 16 hex characters: `agent-cfa1c1af6b161718.exe`.
-The Rust vendoring test pins both bytes and filename hash.
+Upstream: the exact UTF-8 runtime body of `WIN_AGENT_CS` at
+omarchy-tailnet-files commit `c95f1b7bf446304b6c8826b149f6d94ca719ac69`,
+`bin/tailfiles:1495–2216`, including `Pipe` (overlapped stdio).
+Copyright © 2026 Drew Majerus; MIT license below applies in full.
+
+Two payloads now exist:
+
+| File | Role | Bytes | SHA-256 |
+|---|---|---|---|
+| `agent.upstream-c95f1b7.cs` | Immutable upstream reference; never uploaded, compiled only inside the native Windows test fixture as the RED witness | 35158 | `cfa1c1af6b1617180b3297d5e0f69b8c6dc322ce85807aba1ab47099fdaa5133` |
+| `agent.cs` | ACTIVE payload (uploaded, installed, executed) — reviewed successor | 35927 | `adefa12c41424c983b78cf1ba5956ba23d1dd0e1a03be11784167cdf9e563f10` |
+
+The active executable name uses the successor hash's first 16 hex
+characters: `agent-adefa12c41424c98.exe`. The Rust vendoring tests pin both
+files (upstream immutability + active hash/divergence), and `win_agent.rs`
+pins `SOURCE_HASH` to the active payload's first 16 hex characters. A host
+that already installed the upstream-named `agent-cfa1c1af6b161718.exe` keeps
+it; old helper versions are not garbage-collected.
+
+### Reviewed successor delta (owner ruling 2026-11-22)
+
+Owner choice: "Preserve busy-file success — authorize a narrow vendor change,
+Codie review and CI". Measured control behind it: hosted diagnostic run
+45084283852 (NTFS, PowerShell 5.1) — legacy class-10 replacement succeeded on
+a closed destination but returned `0xC0000022` with the destination held open
+under READ|WRITE|DELETE sharing. The successor is the smallest
+handle-relative change that requests the documented newer semantic:
+
+- `RenameTo` only, two code lines: a replacing rename
+  (`replace == true`) now calls `NtSetInformationFile` with information
+  class 65 (`FileRenameInformationEx`) and a DWORD `Flags` value of
+  `0x3` = `FILE_RENAME_FLAG_REPLACE_IF_EXISTS (0x1) |
+  FILE_RENAME_FLAG_POSIX_SEMANTICS (0x2)` (MS-FSCC FileRenameInformationEx)
+  written at offset 0 of the same native layout (union Flags →
+  RootDirectory at `IntPtr.Size` → counted `FileNameLength` in bytes →
+  UTF-16 name); `AllocHGlobal`/`FreeHGlobal` cleanup unchanged. A
+  non-replacing rename keeps class 10 with flags 0, byte-equivalent to
+  upstream, preserving its collision refusal.
+- Everything else — `Pipe`, TOCTOU keep, RealName casing (the destination's
+  real spelling is passed explicitly, so exact-name POSIX renames land on
+  it), consent timing, per-item temp ownership, mtime/bytes, directory
+  merge, link safety, cancellation/EOF cleanup, rename/exists/delete verbs
+  — is upstream behavior preserved verbatim.
+
+Behavior and support limits (documented, not all yet runtime-proven):
+
+- Busy-file success: with POSIX semantics the replace succeeds while other
+  handles hold the destination open IF they share deletion (the normal
+  reader share READ|WRITE|DELETE); existing handles keep reading the old
+  bytes, new opens see the replacement (MS-FSCC POSIX_SEMANTICS wording).
+- Fail-closed: a holder that denies delete sharing, an OS/filesystem
+  without class 65 (`STATUS_INVALID_INFO_CLASS`, pre-Win10-RS1-era
+  systems), or an unsupported filesystem still fails the rename; the
+  helper then reports its existing conflict reply (`C` record → typed
+  Exists at the Rust layer), removes only its own staged temp, and never
+  deletes or replaces the old target. No delete-before-rename, no retry
+  loop, no closed-reader trick, no SFTP fallback.
+- Minimum supported environment for busy-file replace: Windows/FileSystem
+  accepting `FileRenameInformationEx` with POSIX semantics (NTFS on
+  Windows 10 RS1+/Windows Server 2016+ era; the hosted diagnostic
+  environment NT 10.0.26100 qualifies). On such systems the no-replace
+  lane is unaffected. This OS floor is a documented qualification, not a
+  runtime probe implemented in the product.
+- Unsupported-filesystem runtime proof is pending Windows CI; it cannot be
+  produced on macOS.
 
 `browser/win_agent.rs` ports `win_ps` / `win_agent` (lines 2222–2287):
 UTF-16LE EncodedCommand works under cmd and PowerShell login shells;

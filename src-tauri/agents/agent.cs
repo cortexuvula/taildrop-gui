@@ -278,6 +278,16 @@ namespace TailFiles
         }
 
         // Rename the object `h` holds to `name` inside the folder `dir` holds.
+        // A replacing rename uses FileRenameInformationEx with POSIX
+        // semantics: it succeeds while other handles hold the destination
+        // open under delete sharing, those handles keep reading the old
+        // bytes, and later opens of the name see this file. The name given
+        // by the caller is used exactly (RealName keeps the destination's
+        // own spelling). Systems or disks without that information class,
+        // and handles that do not share deletion, fail the rename; the
+        // caller keeps its staged temp and never touches the destination.
+        // A non-replacing rename keeps the classic information class and
+        // its collision refusal unchanged.
         static int RenameTo(IntPtr h, IntPtr dir, string name, bool replace)
         {
             CheckName(name);
@@ -286,12 +296,12 @@ namespace TailFiles
             try
             {
                 for (int k = 0; k < size; k++) Marshal.WriteByte(buf, k, 0);
-                Marshal.WriteByte(buf, 0, (byte)(replace ? 1 : 0));
+                Marshal.WriteInt32(buf, 0, replace ? 3 : 0); // DWORD flags: REPLACE_IF_EXISTS | POSIX_SEMANTICS
                 Marshal.WriteIntPtr(buf, IntPtr.Size, dir);
                 Marshal.WriteInt32(buf, 2 * IntPtr.Size, n);
                 Marshal.Copy(name.ToCharArray(), 0, IntPtr.Add(buf, off), name.Length);
                 IO_STATUS_BLOCK io;
-                return NtSetInformationFile(h, out io, buf, (uint)size, 10);
+                return NtSetInformationFile(h, out io, buf, (uint)size, replace ? 65 : 10);
             }
             finally { Marshal.FreeHGlobal(buf); }
         }
