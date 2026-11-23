@@ -1,0 +1,4 @@
+### fmt
+cwd: src-tauri
+command: env CARGO_INCREMENTAL=0 cargo fmt --check
+started: 2026-11-23T01:53:56Z

@@ -1,0 +1,6 @@
+### clippy-wingnu
+cwd: src-tauri
+command: env CARGO_INCREMENTAL=0 cargo clippy --target x86_64-pc-windows-gnu --lib --tests -- --deny warnings
+started: 2026-11-23T01:54:16Z
+   Compiling taildrop-gui v0.17.0 (/Users/cortexuvula/Development/taildrop-gui/src-tauri)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 4.75s

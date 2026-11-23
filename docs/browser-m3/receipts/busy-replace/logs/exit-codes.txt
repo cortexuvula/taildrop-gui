@@ -1,0 +1,25 @@
+fmt exit=0
+check-host exit=0
+clippy-host exit=0
+test-lib exit=0
+check-wingnu exit=0
+clippy-wingnu exit=0
+tsc exit=0
+fe-build exit=0
+vitest exit=0
+playwright exit=0
+pin-red exit=101 (expected nonzero)
+pin-green exit=0 (expected 0)
+--- payload digests ---
+adefa12c41424c983b78cf1ba5956ba23d1dd0e1a03be11784167cdf9e563f10  src-tauri/agents/agent.cs
+cfa1c1af6b1617180b3297d5e0f69b8c6dc322ce85807aba1ab47099fdaa5133  src-tauri/agents/agent.upstream-c95f1b7.cs
+   35927 src-tauri/agents/agent.cs
+   35158 src-tauri/agents/agent.upstream-c95f1b7.cs
+   71085 total
+git HEAD: 991fce07d0431c29b8b233c349746149bb32f97b
+ src-tauri/agents/THIRD_PARTY.md                  |  72 +++++++-
+ src-tauri/agents/agent.cs                        |  14 +-
+ src-tauri/src/browser/win_agent.rs               |  12 +-
+ src-tauri/src/browser/win_agent/tests.rs         |  39 ++++-
+ src-tauri/src/browser/win_agent/tests/windows.rs | 207 +++++++++++++++++++++++
+ 5 files changed, 327 insertions(+), 17 deletions(-)

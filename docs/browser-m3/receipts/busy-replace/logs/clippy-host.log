@@ -1,0 +1,6 @@
+### clippy-host
+cwd: src-tauri
+command: env CARGO_INCREMENTAL=0 cargo clippy --all-targets -- --deny warnings
+started: 2026-11-23T01:54:03Z
+   Compiling taildrop-gui v0.17.0 (/Users/cortexuvula/Development/taildrop-gui/src-tauri)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 6.20s
