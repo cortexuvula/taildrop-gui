@@ -70,6 +70,18 @@ Reproduce: `bash docs/browser-m3/receipts/busy-replace/run-gates.sh`.
 Disk at run time: 93 GiB free (floor 60). One pre-existing target dir reused
 (`src-tauri/target`), `CARGO_INCREMENTAL=0`, no new targets/worktrees/installs.
 
+## Round-end consistency fixes (same turn, doc-only; code-final unchanged)
+
+- `docs/browser-m3/SMOKE.md` (living peer-smoke procedure, not a historical
+  receipt): expected/inventory executable updated
+  `agent-cfa1c1af6b161718.exe` → `agent-adefa12c41424c98.exe`, with a note
+  that legacy exes are retained on peers but capability binds the successor
+  name; "unmodified C# receiver" wording corrected to name the reviewed
+  rename divergence.
+- `src-tauri/Cargo.toml` sha2 dev-dependency comment: no longer claims every
+  pinned body is byte-identical (upstream reference is; the active successor
+  is sha256-pinned with a reviewed delta).
+
 ## OPEN — not claimed
 
 - Native Windows C#/PowerShell runtime of the successor and of the RED
