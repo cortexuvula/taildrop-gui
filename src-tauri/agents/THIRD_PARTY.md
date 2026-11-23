@@ -101,9 +101,12 @@ Behavior and support limits (documented, not all yet runtime-proven):
 - Fail-closed: a holder that denies delete sharing, an OS/filesystem
   without class 65 (`STATUS_INVALID_INFO_CLASS`, pre-Win10-RS1-era
   systems), or an unsupported filesystem still fails the rename; the
-  helper then reports its existing conflict reply (`C` record → typed
-  Exists at the Rust layer), removes only its own staged temp, and never
-  deletes or replaces the old target. No delete-before-rename, no retry
+  helper then reports its existing `C` conflict record, removes only its
+  own staged temp, and never deletes or replaces the old target. At the
+  Rust layer a consented Replace surfaces the existing generic Other copy
+  error ("Couldn't replace … a folder can only replace a folder…"); only
+  keep/no-replace aggregation produces typed Exists. No typed
+  unsupported-filesystem classification is claimed. No delete-before-rename, no retry
   loop, no closed-reader trick, no SFTP fallback.
 - Minimum supported environment for busy-file replace: Windows/FileSystem
   accepting `FileRenameInformationEx` with POSIX semantics (NTFS on
