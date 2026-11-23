@@ -15,7 +15,10 @@ use super::transport::SftpTransport;
 use super::{BrowserError, ErrorKind, MAX_DEPTH, MAX_FIELD_BYTES, MAX_LISTING_ENTRIES};
 
 pub const AGENT_CS: &str = include_str!("../../agents/agent.cs");
-pub const SOURCE_HASH: &str = "cfa1c1af6b161718";
+/// Pin of the ACTIVE successor payload (reviewed vendor divergence; the
+/// upstream c95f1b7 bytes are preserved and pinned separately in
+/// agents/agent.upstream-c95f1b7.cs). See agents/THIRD_PARTY.md.
+pub const SOURCE_HASH: &str = "adefa12c41424c98";
 const INSTALL_WAIT: Duration = Duration::from_secs(180);
 const IO_WAIT: Duration = Duration::from_secs(30);
 const CACHE_TTL: Duration = Duration::from_secs(600);
@@ -242,11 +245,14 @@ async fn capture(
     result
 }
 
-fn compile_script(folder: &str, source_name: &str) -> String {
+fn compile_script_for(folder: &str, source_name: &str, hash: &str) -> String {
     // Source is exclusive and attempt-unique, while the final exe stays
     // source-hash-bound. An interrupted upload can leave an orphan source,
     // never poison subsequent retries or cause us to overwrite its name.
-    format!("$ErrorActionPreference = 'Stop'; $ProgressPreference = 'SilentlyContinue'\n$d = {}; $h = '{SOURCE_HASH}'\n$src = Join-Path $d {}\n$tmp = Join-Path $d ('agent-' + $h + '.' + $PID + '.exe')\ntry {{\nAdd-Type -OutputAssembly $tmp -OutputType ConsoleApplication -TypeDefinition ([IO.File]::ReadAllText($src))\ntry {{ Move-Item -LiteralPath $tmp -Destination (Join-Path $d ('agent-' + $h + '.exe')) }} catch {{ if (!(Test-Path -LiteralPath (Join-Path $d ('agent-' + $h + '.exe')) -PathType Leaf)) {{ throw }} }}\n}} finally {{\nRemove-Item -LiteralPath $tmp -ErrorAction SilentlyContinue\nRemove-Item -LiteralPath $src -ErrorAction SilentlyContinue\n}}\n'installed'\n", ps_quote(folder), ps_quote(source_name))
+    format!("$ErrorActionPreference = 'Stop'; $ProgressPreference = 'SilentlyContinue'\n$d = {}; $h = '{hash}'\n$src = Join-Path $d {}\n$tmp = Join-Path $d ('agent-' + $h + '.' + $PID + '.exe')\ntry {{\nAdd-Type -OutputAssembly $tmp -OutputType ConsoleApplication -TypeDefinition ([IO.File]::ReadAllText($src))\ntry {{ Move-Item -LiteralPath $tmp -Destination (Join-Path $d ('agent-' + $h + '.exe')) }} catch {{ if (!(Test-Path -LiteralPath (Join-Path $d ('agent-' + $h + '.exe')) -PathType Leaf)) {{ throw }} }}\n}} finally {{\nRemove-Item -LiteralPath $tmp -ErrorAction SilentlyContinue\nRemove-Item -LiteralPath $src -ErrorAction SilentlyContinue\n}}\n'installed'\n", ps_quote(folder), ps_quote(source_name))
+}
+fn compile_script(folder: &str, source_name: &str) -> String {
+    compile_script_for(folder, source_name, SOURCE_HASH)
 }
 async fn install_and_prove(t: &dyn SftpTransport) -> Result<WinAgent, BrowserError> {
     tokio::time::timeout(INSTALL_WAIT, async {

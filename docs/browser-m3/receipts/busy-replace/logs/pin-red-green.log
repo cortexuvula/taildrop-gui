@@ -1,0 +1,38 @@
+### pin-red-green (RED: upstream bytes as agent.cs -> active pin must fail)
+2026-11-23T01:54:36Z
+   Compiling taildrop-gui v0.17.0 (/Users/cortexuvula/Development/taildrop-gui/src-tauri)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 8.39s
+     Running unittests src/lib.rs (target/debug/deps/taildrop_gui_lib-ecfdd47c2e9dce6b)
+
+running 2 tests
+test browser::win_agent::tests::vendored_csharp_upstream_reference_is_immutable ... ok
+test browser::win_agent::tests::vendored_csharp_active_successor_is_pinned_divergence ... FAILED
+
+failures:
+
+---- browser::win_agent::tests::vendored_csharp_active_successor_is_pinned_divergence stdout ----
+
+thread 'browser::win_agent::tests::vendored_csharp_active_successor_is_pinned_divergence' (30430274) panicked at src/browser/win_agent/tests.rs:342:5:
+assertion `left == right` failed
+  left: "cfa1c1af6b1617180b3297d5e0f69b8c6dc322ce85807aba1ab47099fdaa5133"
+ right: "adefa12c41424c983b78cf1ba5956ba23d1dd0e1a03be11784167cdf9e563f10"
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    browser::win_agent::tests::vendored_csharp_active_successor_is_pinned_divergence
+
+test result: FAILED. 1 passed; 1 failed; 0 ignored; 0 measured; 317 filtered out; finished in 0.00s
+
+error: test failed, to rerun pass `--lib`
+adefa12c41424c983b78cf1ba5956ba23d1dd0e1a03be11784167cdf9e563f10  src-tauri/agents/agent.cs
+   Compiling taildrop-gui v0.17.0 (/Users/cortexuvula/Development/taildrop-gui/src-tauri)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 7.08s
+     Running unittests src/lib.rs (target/debug/deps/taildrop_gui_lib-ecfdd47c2e9dce6b)
+
+running 2 tests
+test browser::win_agent::tests::vendored_csharp_upstream_reference_is_immutable ... ok
+test browser::win_agent::tests::vendored_csharp_active_successor_is_pinned_divergence ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 317 filtered out; finished in 0.00s
+

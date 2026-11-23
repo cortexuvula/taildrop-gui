@@ -1,0 +1,34 @@
+{
+  "kind": "source/static diagnosis and preservation; NO Windows runtime",
+  "base": "baa019b26ee9a11d259cfc511302e9a1ffd88423",
+  "source_final": "106e464ba073a77dd6b29711b1cf15736bfc58ed",
+  "preserved_files_checked": 109,
+  "preserved_all_equal": true,
+  "vendor": {
+    "upstream_pin": "c95f1b7bf446304b6c8826b149f6d94ca719ac69",
+    "bytes": 35158,
+    "sha256": "cfa1c1af6b1617180b3297d5e0f69b8c6dc322ce85807aba1ab47099fdaa5133",
+    "byte_exact": true
+  },
+  "protected_equal_to_d111578": [
+    "src-tauri/src/tailscale.rs",
+    "src-tauri/src/browser/agent.rs",
+    "src-tauri/agents/agent.pl",
+    "src-tauri/agents/posix_delete.sh"
+  ],
+  "ci_c_original_reader_test_byte_equal": true,
+  "ci_c_production_sink_unchanged": true,
+  "ci_b_static_cmd_encoding_model": {
+    "old": "cmd.exe /c \"mklink /J \\\"C:\\owned scratch\\recursive\\nested\\junction\\\" \\\"C:\\owned scratch\\sentinel\\\"\"",
+    "new": "cmd.exe /d /c mklink /J \"C:\\owned scratch\\recursive\\nested\\junction\" \"C:\\owned scratch\\sentinel\"",
+    "source": "https://raw.githubusercontent.com/rust-lang/rust/b940084d7/library/std/src/sys/args/windows.rs",
+    "native_runtime_observed": false
+  },
+  "targets_created": [],
+  "targets_deleted": [],
+  "existing_target_retained": "/Users/cortexuvula/Development/taildrop-gui/src-tauri/target",
+  "existing_target_size_du_k": "9567008\t/Users/cortexuvula/Development/taildrop-gui/src-tauri/target",
+  "free_bytes": 106292817920,
+  "publishing": "none",
+  "fleet_contact": false
+}

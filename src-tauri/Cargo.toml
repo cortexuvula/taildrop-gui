@@ -56,7 +56,9 @@ bytes = "1"
 # M2b loopback harness: the vendored Perl agent runs as a LOCAL child
 # process (tokio::process) with the exact NUL-framed SSH-exec protocol.
 tokio = { version = "1", features = ["process"] }
-# Vendoring-integrity pins (sha256 of the byte-identical agent bodies).
+# Vendoring-integrity pins (sha256 of the vendored agent bodies: the
+# byte-identical Perl/POSIX payloads and the immutable C# upstream
+# reference, plus the sha256-pinned reviewed C# successor).
 sha2 = "0.10"
 
 [profile.release]

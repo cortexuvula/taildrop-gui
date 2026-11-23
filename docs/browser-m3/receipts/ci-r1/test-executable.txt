@@ -1,0 +1,1 @@
+/Users/cortexuvula/Development/taildrop-gui/src-tauri/target/debug/deps/taildrop_gui_lib-ecfdd47c2e9dce6b

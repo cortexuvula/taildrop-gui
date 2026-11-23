@@ -1,0 +1,4 @@
+### tsc
+cwd: .
+command: npx tsc --noEmit
+started: 2026-11-23T01:54:21Z

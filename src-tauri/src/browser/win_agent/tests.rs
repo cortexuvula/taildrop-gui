@@ -310,17 +310,46 @@ fn decode_ps(cmd: &str) -> String {
     .unwrap()
 }
 
+/// Upstream reference: the exact WIN_AGENT_CS runtime body vendored from
+/// omarchy-tailnet-files c95f1b7 (bin/tailfiles:1495–2216). Immutable; the
+/// active `agent.cs` is a reviewed successor that intentionally diverges.
+const UPSTREAM_AGENT_CS: &str = include_str!("../../../agents/agent.upstream-c95f1b7.cs");
+const UPSTREAM_SOURCE_HASH: &str = "cfa1c1af6b161718";
+const UPSTREAM_AGENT_SHA256: &str =
+    "cfa1c1af6b1617180b3297d5e0f69b8c6dc322ce85807aba1ab47099fdaa5133";
+/// Pin of the ACTIVE successor bytes (owner-approved busy-file replacement
+/// divergence; see agents/THIRD_PARTY.md for the reviewed delta).
+const AGENT_CS_SHA256: &str = "adefa12c41424c983b78cf1ba5956ba23d1dd0e1a03be11784167cdf9e563f10";
+
 #[test]
-fn vendored_csharp_is_plugin_exact() {
+fn vendored_csharp_upstream_reference_is_immutable() {
+    use sha2::{Digest, Sha256};
+    let hash = format!("{:x}", Sha256::digest(UPSTREAM_AGENT_CS.as_bytes()));
+    assert_eq!(hash, UPSTREAM_AGENT_SHA256);
+    assert_eq!(&hash[..16], UPSTREAM_SOURCE_HASH);
+    assert!(UPSTREAM_AGENT_CS.contains("public class Pipe : Stream"));
+    assert!(!UPSTREAM_AGENT_CS.contains('\r'));
+    // The legacy replacement rename (classic FileRenameInformation, boolean
+    // ReplaceIfExists) is preserved verbatim in the reference payload.
+    assert!(UPSTREAM_AGENT_CS.contains("Marshal.WriteByte(buf, 0, (byte)(replace ? 1 : 0));"));
+    assert!(UPSTREAM_AGENT_CS.contains("(uint)size, 10);"));
+}
+
+#[test]
+fn vendored_csharp_active_successor_is_pinned_divergence() {
     use sha2::{Digest, Sha256};
     let hash = format!("{:x}", Sha256::digest(AGENT_CS.as_bytes()));
-    assert_eq!(
-        hash,
-        "cfa1c1af6b1617180b3297d5e0f69b8c6dc322ce85807aba1ab47099fdaa5133"
-    );
+    assert_eq!(hash, AGENT_CS_SHA256);
     assert_eq!(&hash[..16], SOURCE_HASH);
     assert!(AGENT_CS.contains("public class Pipe : Stream"));
     assert!(!AGENT_CS.contains('\r'));
+    // The reviewed delta, source-bound: a replacing rename requests
+    // FileRenameInformationEx with REPLACE_IF_EXISTS|POSIX_SEMANTICS as a
+    // DWORD at offset 0; a non-replacing rename keeps class 10 and flags 0.
+    assert!(AGENT_CS.contains("Marshal.WriteInt32(buf, 0, replace ? 3 : 0);"));
+    assert!(AGENT_CS.contains("(uint)size, replace ? 65 : 10);"));
+    // Never disguise the active divergence as upstream byte equivalence.
+    assert_ne!(AGENT_CS.as_bytes(), UPSTREAM_AGENT_CS.as_bytes());
 }
 #[test]
 fn fixed_loader_is_utf16le_and_installer_has_pid_publish() {
@@ -927,13 +956,18 @@ async fn missing_helper_revokes_proof_even_when_write_and_eof_both_fail() {
 
 #[tokio::test]
 async fn proven_windows_engine_streams_remote_source_only_through_csharp_sink() {
-    use crate::browser::fake::{temp_root, FakeConfig, FakeServer};
+    use crate::browser::fake::{temp_root, write_temp_key, FakeConfig, FakeServer};
     use crate::browser::transfer::{run_copy, Side};
     let root = temp_root("m3-engine");
     std::fs::create_dir_all(root.join("source/nested")).unwrap();
     std::fs::write(root.join("source/nested/a"), b"actual source bytes").unwrap();
     let srv = FakeServer::start(FakeConfig::openssh(root)).await;
-    let src = srv.connect(&srv.root.join("trust")).await;
+    // OpenSSH requires publickey auth, even on loopback. Never depend on
+    // the developer's default key files or ssh-agent being available.
+    let (key, _key_guard) = write_temp_key("m3-engine");
+    let src = srv
+        .connect_as(&srv.root.join("trust"), "fakeuser", &[key])
+        .await;
     let dst = TestTransport {
         proof: b"Z".to_vec(),
         ..TestTransport::agent()

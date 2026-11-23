@@ -1,0 +1,15 @@
+{
+  "command": "./node_modules/.bin/tsc --noEmit",
+  "cwd": "/Users/cortexuvula/Development/taildrop-gui",
+  "isolated_home_and_agent": false,
+  "CARGO_TARGET_DIR": "/Users/cortexuvula/Development/taildrop-gui/src-tauri/target",
+  "CARGO_INCREMENTAL": "0",
+  "CI": "1",
+  "started": "2026-11-22T14:27:05.974976+00:00",
+  "ended": "2026-11-22T14:27:07.011230+00:00",
+  "exit": 0,
+  "head": "106e464ba073a77dd6b29711b1cf15736bfc58ed",
+  "tracked_diff_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+  "log": "tsc.log",
+  "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+}

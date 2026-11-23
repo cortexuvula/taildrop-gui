@@ -455,6 +455,213 @@ async fn csharp_toctou_keep_and_atomic_replace_preserve_realname() {
     assert!(!names.contains(&"report.txt".to_owned()));
     f.assert_zero_sftp();
 }
+
+// ---------------------------------------------------- busy-file replacement
+// Owner ruling 2026-11-22: preserve successful atomic Replace while readers
+// keep the old destination open under the normal reader share
+// READ|WRITE|DELETE. The active successor requests FileRenameInformationEx
+// with REPLACE_IF_EXISTS|POSIX_SEMANTICS. The legacy upstream bytes stay
+// callable ONLY through this native fixture's reference-source seam, so the
+// held-open regression is RED under the original payload and GREEN under the
+// successor — never a lucky gap in a reopen loop.
+
+/// Compile an arbitrary agent source into TailFiles as agent-<hash16>.exe.
+/// Test seam only: production always installs the pinned SOURCE_HASH and
+/// never falls back to another payload.
+async fn compile_reference(folder: &Path, source: &str, hash16: &str) -> PathBuf {
+    let source_name = format!(
+        "agent-{hash16}.{}.cs",
+        super::super::super::transfer::new_stage_tag()
+    );
+    std::fs::write(folder.join(&source_name), source).unwrap();
+    let script = format!(
+        "$ErrorActionPreference='Stop'\nif ($PSVersionTable.PSVersion.Major -ne 5) {{ throw 'Windows PowerShell 5.1 required' }}\n$csc=Join-Path $env:WINDIR 'Microsoft.NET\\Framework64\\v4.0.30319\\csc.exe'\nif (!(Test-Path -LiteralPath $csc)) {{ throw '.NET Framework 4 csc required' }}\n{}",
+        compile_script_for(&folder.to_string_lossy(), &source_name, hash16)
+    );
+    let command = win_ps(&script);
+    let args: Vec<_> = command.split_whitespace().skip(1).collect();
+    let output = tokio::time::timeout(
+        INSTALL_WAIT,
+        Command::new("powershell.exe")
+            .args(args)
+            .stdin(Stdio::null())
+            .kill_on_drop(true)
+            .output(),
+    )
+    .await
+    .expect("PowerShell compile exceeded 180s")
+    .expect("Windows PowerShell 5.1 missing: test must fail, not skip");
+    assert!(
+        output.status.success(),
+        "PowerShell/.NET csc compile failed: {}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let exe = folder.join(format!("agent-{hash16}.exe"));
+    assert!(exe.is_file());
+    assert!(
+        !folder.join(&source_name).exists(),
+        "compile finally must remove its source"
+    );
+    exe
+}
+
+/// Drive one replacing recv against an already-compiled agent exe with the
+/// exact production wire encoding (fields/f_record), bypassing the WinAgent
+/// proof layer: only this fixture may address a non-production payload.
+async fn raw_recv_replace(
+    exe: &str,
+    dir: &str,
+    tag: &str,
+    name: &str,
+    data: &[u8],
+) -> (Vec<String>, Vec<String>, Option<u32>) {
+    let mut ch = ChildChannel::spawn(exe).await.unwrap();
+    let mut input = fields("recv", &[dir, &stage_dir_name(tag), "replace"]).unwrap();
+    input.extend_from_slice(&agent::f_record(name, 0o644, 1, data.len() as u64).unwrap());
+    input.extend_from_slice(data);
+    input.push(b'Z');
+    ch.write_all(&input).await.unwrap();
+    ch.close_stdin().await.unwrap();
+    let mut reader = ReplyReader::new();
+    let mut conflicts = Vec::new();
+    let mut errors = Vec::new();
+    let mut done = false;
+    while let Some(reply) = tokio::time::timeout(PLACE_WAIT, reader.next(ch.as_mut()))
+        .await
+        .expect("raw recv reply deadline")
+        .unwrap()
+    {
+        match reply {
+            AgentReply::Conflict(p) => conflicts.push(p),
+            AgentReply::Error(p) => errors.push(p),
+            AgentReply::Done => {
+                done = true;
+                break;
+            }
+        }
+    }
+    let rc = ch.wait_exit(PLACE_WAIT).await;
+    assert!(
+        done,
+        "helper must finish its reply stream: {}",
+        ch.stderr_tail()
+    );
+    (conflicts, errors, rc)
+}
+
+fn incoming_temps(dst: &Path, tag: &str) -> Vec<String> {
+    std::fs::read_dir(dst)
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .filter(|n| n.starts_with(&format!(".tailfiles-incoming-{tag}")))
+        .collect()
+}
+
+#[tokio::test]
+async fn csharp_busy_destination_replacement_succeeds_under_held_reader() {
+    let f = Fixture::new("m3-busy").await;
+    let old = vec![b'o'; 64 * 1024];
+    let new = vec![b'n'; 64 * 1024];
+    std::fs::write(f.dst.join("Report.TXT"), &old).unwrap();
+    std::fs::write(f.dst.join("sentinel"), b"keep").unwrap();
+    // A normal reader: Rust std opens READ|WRITE|DELETE sharing, and the one
+    // handle stays open across the whole replacement — no reopen loop whose
+    // gaps a rename could slip through.
+    let mut held = std::fs::File::open(f.dst.join("Report.TXT")).unwrap();
+    let mut seen = Vec::new();
+    std::io::Read::read_to_end(&mut held, &mut seen).unwrap();
+    assert_eq!(seen, old);
+    let tag = "0000000000000008";
+    let mut s = f.sink(tag, true).await;
+    put(&mut s, "report.txt", &new, 0o644, 1).await;
+    placed(&mut s).await; // the successor must place while the destination is held
+                          // The held handle keeps reading the complete OLD bytes (POSIX semantics).
+    std::io::Seek::seek(&mut held, std::io::SeekFrom::Start(0)).unwrap();
+    let mut after = Vec::new();
+    std::io::Read::read_to_end(&mut held, &mut after).unwrap();
+    assert_eq!(after, old);
+    // Subsequent opens read the complete NEW bytes, at the retained spelling.
+    assert_eq!(std::fs::read(f.dst.join("Report.TXT")).unwrap(), new);
+    let names: Vec<_> = std::fs::read_dir(&f.dst)
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    assert!(names.contains(&"Report.TXT".to_owned()));
+    assert!(!names.contains(&"report.txt".to_owned()));
+    assert!(incoming_temps(&f.dst, tag).is_empty());
+    assert_eq!(std::fs::read(f.dst.join("sentinel")).unwrap(), b"keep");
+    f.assert_zero_sftp();
+}
+
+#[tokio::test]
+async fn legacy_upstream_busy_destination_replacement_fails_closed_red_witness() {
+    let f = Fixture::new("m3-legacy-red").await;
+    let legacy = compile_reference(
+        &f.root.join("TailFiles"),
+        UPSTREAM_AGENT_CS,
+        UPSTREAM_SOURCE_HASH,
+    )
+    .await;
+    let old = vec![b'o'; 64 * 1024];
+    let new = vec![b'n'; 64 * 1024];
+    std::fs::write(f.dst.join("Report.TXT"), &old).unwrap();
+    let mut held = std::fs::File::open(f.dst.join("Report.TXT")).unwrap();
+    let mut seen = Vec::new();
+    std::io::Read::read_to_end(&mut held, &mut seen).unwrap();
+    assert_eq!(seen, old);
+    let tag = "0000000000000009";
+    let (conflicts, errors, rc) =
+        raw_recv_replace(&legacy.to_string_lossy(), &f.dir(), tag, "Report.TXT", &new).await;
+    // Legacy FileRenameInformation cannot replace a held-open destination
+    // even under full sharing: the helper reports its conflict, exits
+    // cleanly, removes only its staged temp, and the old destination and the
+    // held reader's bytes are intact. That failure is this RED witness.
+    assert_eq!(conflicts, vec!["Report.TXT".to_owned()]);
+    assert!(errors.is_empty());
+    assert_eq!(rc, Some(0));
+    assert_eq!(std::fs::read(f.dst.join("Report.TXT")).unwrap(), old);
+    std::io::Seek::seek(&mut held, std::io::SeekFrom::Start(0)).unwrap();
+    let mut after = Vec::new();
+    std::io::Read::read_to_end(&mut held, &mut after).unwrap();
+    assert_eq!(after, old);
+    assert!(incoming_temps(&f.dst, tag).is_empty());
+    f.assert_zero_sftp();
+}
+
+#[tokio::test]
+async fn csharp_busy_destination_without_delete_share_fails_closed() {
+    use std::os::windows::fs::OpenOptionsExt;
+    let f = Fixture::new("m3-busy-noshare").await;
+    let old = vec![b'o'; 4096];
+    let new = vec![b'n'; 4096];
+    std::fs::write(f.dst.join("Report.TXT"), &old).unwrap();
+    // READ|WRITE sharing only: the holder denies delete sharing, so even the
+    // POSIX-semantics successor must fail closed — never bypass a
+    // restrictive handle.
+    let mut held = std::fs::OpenOptions::new()
+        .read(true)
+        .share_mode(3)
+        .open(f.dst.join("Report.TXT"))
+        .unwrap();
+    let mut seen = Vec::new();
+    std::io::Read::read_to_end(&mut held, &mut seen).unwrap();
+    assert_eq!(seen, old);
+    let tag = "0000000000000010";
+    let mut s = f.sink(tag, true).await;
+    put(&mut s, "report.txt", &new, 0o644, 1).await;
+    let (c, e) = s.place(&[], true).await.unwrap();
+    assert_eq!(c, vec!["report.txt".to_owned()]);
+    assert!(e.is_empty());
+    s.remove().await.unwrap();
+    assert_eq!(std::fs::read(f.dst.join("Report.TXT")).unwrap(), old);
+    std::io::Seek::seek(&mut held, std::io::SeekFrom::Start(0)).unwrap();
+    let mut after = Vec::new();
+    std::io::Read::read_to_end(&mut held, &mut after).unwrap();
+    assert_eq!(after, old);
+    assert!(incoming_temps(&f.dst, tag).is_empty());
+    f.assert_zero_sftp();
+}
 #[tokio::test]
 async fn csharp_eof_cancel_removes_unfinished_only_and_leaves_lookalike() {
     let f = Fixture::new("m3-cancel").await;
@@ -576,7 +783,7 @@ async fn csharp_replace_merge_case_clash_is_client_refused() {
 }
 #[tokio::test]
 async fn csharp_native_mkdir_rename_readonly_delete_and_junction_sentinel() {
-    let f = Fixture::new("m3-delete").await;
+    let f = Fixture::new("m3-delete space").await;
     let before = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
@@ -618,23 +825,33 @@ async fn csharp_native_mkdir_rename_readonly_delete_and_junction_sentinel() {
     let tree = f.dst.join("recursive");
     std::fs::create_dir_all(tree.join("nested")).unwrap();
     std::fs::write(tree.join("nested/ordinary"), b"delete inside tree").unwrap();
-    for link in [&junction, &tree.join("nested/junction")] {
+    let nested_junction = tree.join("nested").join("junction");
+    for link in [&junction, &nested_junction] {
+        // Pass paths as individual args. An already-quoted command passed
+        // through arg() gets CRT backslash-escaped quotes, which cmd /c does
+        // not decode. Component joins also avoid mklink's mixed-separator path.
         let status = Command::new("cmd.exe")
-            .arg("/c")
-            .arg(format!(
-                "mklink /J \"{}\" \"{}\"",
-                link.display(),
-                sentinel.display()
-            ))
+            .args(["/d", "/c", "mklink", "/J"])
+            .arg(link)
+            .arg(&sentinel)
             .stdin(Stdio::null())
             .output()
             .await
             .unwrap();
         assert!(
             status.status.success(),
-            "junction fixture creation: {}",
+            "junction fixture creation for {}: {}\n{}",
+            link.display(),
+            String::from_utf8_lossy(&status.stdout),
             String::from_utf8_lossy(&status.stderr)
         );
+        use std::os::windows::fs::MetadataExt;
+        assert_ne!(
+            std::fs::symlink_metadata(link).unwrap().file_attributes() & 0x400,
+            0,
+            "fixture must be an actual reparse point"
+        );
+        assert_eq!(std::fs::read(link.join("keep")).unwrap(), b"sentinel");
     }
     delete(
         &f.t,

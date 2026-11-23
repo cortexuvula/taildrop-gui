@@ -64,19 +64,22 @@ Do not select the whole `$root` for deletion while any assertion remains.
    as not run (the fake-source Rust test covers its engine routing).
 4. Refresh/reopen the Windows pane and repeat a harmless exists/copy check to
    exercise the existing-executable/cache path. Expected executable:
-   `%LOCALAPPDATA%\TailFiles\agent-cfa1c1af6b161718.exe`.
+   `%LOCALAPPDATA%\TailFiles\agent-adefa12c41424c98.exe` (busy-file-replace
+   successor; a peer that ran an older build may still hold a legacy
+   `agent-cfa1c1af6b161718.exe` — old versions are not garbage-collected —
+   but capability and this smoke bind the successor name).
 
 Read-only executable inventory (not capability proof):
 
 ```powershell
-$exe = Join-Path ([Environment]::GetFolderPath('LocalApplicationData')) 'TailFiles\agent-cfa1c1af6b161718.exe'
+$exe = Join-Path ([Environment]::GetFolderPath('LocalApplicationData')) 'TailFiles\agent-adefa12c41424c98.exe'
 Get-Item -LiteralPath $exe | Select-Object FullName,Length,LastWriteTimeUtc
 Get-FileHash -Algorithm SHA256 -LiteralPath $exe
 ```
 
 Executable digests vary with the compiler; record the observed digest, do not
-compare it to the C# source digest. POSIX modes are **not** preserved by this
-unmodified C# receiver; Windows inherits destination ACLs. Mtime is upstream
+compare it to the C# source digest. POSIX modes are **not** preserved by this C# receiver (vendored upstream
+body with the reviewed busy-file-replace rename divergence; Windows inherits destination ACLs). Mtime is upstream
 best effort, not a guarantee on every filesystem.
 
 ## 3. Consent, spelling, names and cancellation
