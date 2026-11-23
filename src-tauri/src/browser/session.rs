@@ -1022,7 +1022,16 @@ struct SshExecChannel {
     stdout: std::collections::VecDeque<u8>,
     stderr: Arc<Mutex<Vec<u8>>>,
     exit: Option<u32>,
-    eof: bool,
+    /// Read-side EOF: no further stdout can arrive on this channel. This is
+    /// NOT channel completion — RFC 4254 does not require exit-status to
+    /// precede EOF/Close, and real servers deliver EOF first (observed live:
+    /// Windows OpenSSH 9.5 on both M3 peers, 2026-11-23; reproduced
+    /// deterministically in `exec_status_loopback` below), so a status that
+    /// follows EOF must still be collected.
+    stdout_eof: bool,
+    /// Channel completion: Close received, or the channel's message stream
+    /// is exhausted. Only this ends the search for an exit status.
+    closed: bool,
 }
 
 impl SshExecChannel {
@@ -1034,7 +1043,8 @@ impl SshExecChannel {
             stdout: std::collections::VecDeque::new(),
             stderr: Arc::new(Mutex::new(Vec::new())),
             exit: None,
-            eof: false,
+            stdout_eof: false,
+            closed: false,
         }
     }
 
@@ -1042,7 +1052,8 @@ impl SshExecChannel {
     /// `Ok(false)` = channel exhausted (no more messages will arrive).
     async fn pump(&mut self) -> Result<bool, BrowserError> {
         let Some(msg) = self.channel.wait().await else {
-            self.eof = true;
+            self.stdout_eof = true;
+            self.closed = true;
             return Ok(false);
         };
         match msg {
@@ -1056,8 +1067,11 @@ impl SshExecChannel {
                 }
             }
             ChannelMsg::ExitStatus { exit_status } => self.exit = Some(exit_status),
-            // RFC 4254 ordering: exit-status precedes EOF/Close.
-            ChannelMsg::Eof | ChannelMsg::Close => self.eof = true,
+            ChannelMsg::Eof => self.stdout_eof = true,
+            ChannelMsg::Close => {
+                self.stdout_eof = true;
+                self.closed = true;
+            }
             // want_reply=true: the server's refusal of the exec request.
             ChannelMsg::Failure => {
                 return Err(BrowserError::unsupported(
@@ -1098,7 +1112,7 @@ impl crate::browser::agent::ExecChannel for SshExecChannel {
                 }
                 return Ok(n);
             }
-            if self.eof {
+            if self.stdout_eof {
                 return Ok(0);
             }
             self.pump().await?;
@@ -1116,23 +1130,28 @@ impl crate::browser::agent::ExecChannel for SshExecChannel {
     }
 
     async fn wait_exit(&mut self, timeout: Duration) -> Option<u32> {
-        if self.exit.is_some() {
-            return self.exit;
-        }
-        let waited = tokio::time::timeout(timeout, async {
-            loop {
-                if self.exit.is_some() || self.eof {
-                    return self.exit;
-                }
-                match self.pump().await {
-                    Ok(_) => continue,
-                    Err(_) => return self.exit,
-                }
+        // Wait for the process status until the CHANNEL completes (Close or
+        // message-stream exhaustion), not until stdout EOF: a status that
+        // follows EOF must still be observed. A channel that completes
+        // without ever sending a status reports None (unknown), and a
+        // silent channel is bounded by the caller's deadline — never a
+        // guess, never a busy loop (pump pends when nothing arrives).
+        let deadline = tokio::time::Instant::now() + timeout;
+        loop {
+            if self.exit.is_some() || self.closed {
+                return self.exit;
             }
-        })
-        .await;
-        // Timeout: report what we have (None = capability/exit unknown).
-        waited.unwrap_or(self.exit)
+            let left = deadline.saturating_duration_since(tokio::time::Instant::now());
+            if left.is_zero() {
+                // Timeout: report what we have (None = capability/exit
+                // unknown).
+                return self.exit;
+            }
+            match tokio::time::timeout(left, self.pump()).await {
+                Ok(Ok(true)) => continue,
+                Ok(Ok(false)) | Ok(Err(_)) | Err(_) => return self.exit,
+            }
+        }
     }
 
     fn stderr_tail(&self) -> String {
@@ -1439,4 +1458,346 @@ GTh6CwKBgFmJ0tIBN0a4sQe5H9qeYfSPbpeJ1sIL+olscXP0+q+YwsI9N8MrMGqM
 ZUL/jkhM15B4OWsgkIS9a2a6+670bW1uL5660HbtwSxvAt7VhCa6IsULxDyx0Jx4
 Wdlj8alBZoITtFBHPGIPvHqqAjV8fNbDomLxImXrVYxsgRa3DssZ
 -----END RSA PRIVATE KEY-----";
+}
+
+/// Loopback exec-channel regression harness (M3-EXEC-STATUS-REPAIR-20261123).
+///
+/// A real russh server over 127.0.0.1 emits scripted ChannelMsg sequences;
+/// the PRODUCTION `connect()` (auth + SFTP subsystem) and the production
+/// `open_exec()` adapter are driven exactly as callers drive them
+/// (write/EOF, read to stdout EOF, then `wait_exit`). This reproduces the
+/// live-peer symptom deterministically: Windows OpenSSH 9.5 on both M3
+/// peers returned correct stdout but no observable exit status, because the
+/// adapter treated stdout-side EOF as terminal while RFC 4254 does not
+/// require exit-status to precede EOF/Close — a status arriving after EOF
+/// was never pumped.
+#[cfg(test)]
+mod exec_status_loopback {
+    use super::*;
+    use crate::browser::agent::ExecChannel;
+    use crate::browser::transport::SftpTransport;
+    use russh::server::{
+        self, Auth, ChannelOpenHandle, Msg as SrvMsg, Server as _, Session as SrvSession,
+        VerifiedPublicKey,
+    };
+    use russh::{Channel, ChannelId};
+    use russh_sftp::server::Handler as SftpHandler;
+    use std::collections::HashMap;
+    use std::path::PathBuf;
+
+    #[derive(Clone)]
+    enum Seq {
+        EofThenStatus(u32),
+        StatusBeforeEof(u32),
+        EofCloseNoStatus,
+        StderrThenStatus(u32),
+        Refuse,
+        Silent,
+    }
+
+    struct MinimalSftp;
+    impl SftpHandler for MinimalSftp {
+        type Error = StatusCode;
+        fn unimplemented(&self) -> Self::Error {
+            StatusCode::OpUnsupported
+        }
+    }
+
+    async fn run_seq(ch: Channel<SrvMsg>, seq: Seq) {
+        match seq {
+            Seq::EofThenStatus(rc) => {
+                let _ = ch.data_bytes(&b"out"[..]).await;
+                let _ = ch.eof().await;
+                let _ = ch.exit_status(rc).await;
+                let _ = ch.close().await;
+            }
+            Seq::StatusBeforeEof(rc) => {
+                let _ = ch.data_bytes(&b"out"[..]).await;
+                let _ = ch.exit_status(rc).await;
+                let _ = ch.eof().await;
+                let _ = ch.close().await;
+            }
+            Seq::EofCloseNoStatus => {
+                let _ = ch.data_bytes(&b"out"[..]).await;
+                let _ = ch.eof().await;
+                let _ = ch.close().await;
+            }
+            Seq::StderrThenStatus(rc) => {
+                let _ = ch.extended_data_bytes(1, &b"err"[..]).await;
+                let _ = ch.data_bytes(&b"out"[..]).await;
+                let _ = ch.eof().await;
+                let _ = ch.exit_status(rc).await;
+                let _ = ch.close().await;
+            }
+            Seq::Refuse | Seq::Silent => {}
+        }
+    }
+
+    #[derive(Clone)]
+    struct LoopServer {
+        scripts: Arc<HashMap<String, Seq>>,
+        channels: Arc<Mutex<HashMap<ChannelId, Channel<SrvMsg>>>>,
+    }
+
+    struct LoopHandler {
+        scripts: Arc<HashMap<String, Seq>>,
+        channels: Arc<Mutex<HashMap<ChannelId, Channel<SrvMsg>>>>,
+    }
+
+    impl server::Handler for LoopHandler {
+        type Error = russh::Error;
+
+        async fn auth_publickey(
+            &mut self,
+            _user: &str,
+            _key: VerifiedPublicKey<'_>,
+        ) -> Result<Auth, Self::Error> {
+            Ok(Auth::Accept)
+        }
+
+        async fn channel_open_session(
+            &mut self,
+            channel: Channel<SrvMsg>,
+            reply: ChannelOpenHandle,
+            _session: &mut SrvSession,
+        ) -> Result<(), Self::Error> {
+            self.channels
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .insert(channel.id(), channel);
+            reply.accept().await;
+            Ok(())
+        }
+
+        async fn subsystem_request(
+            &mut self,
+            channel_id: ChannelId,
+            name: &str,
+            session: &mut SrvSession,
+        ) -> Result<(), Self::Error> {
+            if name != "sftp" {
+                return session.channel_failure(channel_id);
+            }
+            session.channel_success(channel_id)?;
+            if let Some(ch) = self
+                .channels
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .remove(&channel_id)
+            {
+                tokio::spawn(async move {
+                    russh_sftp::server::run(ch.into_stream(), MinimalSftp).await;
+                });
+            }
+            Ok(())
+        }
+
+        async fn exec_request(
+            &mut self,
+            channel_id: ChannelId,
+            data: &[u8],
+            session: &mut SrvSession,
+        ) -> Result<(), Self::Error> {
+            let cmd = String::from_utf8_lossy(data).into_owned();
+            let mut guard = self.channels.lock().unwrap_or_else(|p| p.into_inner());
+            let Some(ch) = guard.remove(&channel_id) else {
+                return session.channel_failure(channel_id);
+            };
+            drop(guard);
+            match self.scripts.get(&cmd) {
+                Some(Seq::Refuse) => session.channel_failure(channel_id),
+                Some(seq) => {
+                    session.channel_success(channel_id)?;
+                    let seq = seq.clone();
+                    tokio::spawn(async move {
+                        run_seq(ch, seq).await;
+                    });
+                    Ok(())
+                }
+                None => session.channel_failure(channel_id),
+            }
+        }
+    }
+
+    impl server::Server for LoopServer {
+        type Handler = LoopHandler;
+        fn new_client(&mut self, _addr: Option<std::net::SocketAddr>) -> LoopHandler {
+            LoopHandler {
+                scripts: self.scripts.clone(),
+                channels: self.channels.clone(),
+            }
+        }
+    }
+
+    async fn loop_setup(scripts: HashMap<String, Seq>) -> (u16, PathBuf, PathBuf) {
+        use russh::keys::ssh_key::private::Ed25519Keypair;
+        use russh::keys::PrivateKey;
+        let host_key = PrivateKey::from(Ed25519Keypair::from_seed(&[1u8; 32]));
+        let client_key = PrivateKey::from(Ed25519Keypair::from_seed(&[2u8; 32]));
+        let dir = std::env::temp_dir().join(format!(
+            "m3-exec-loop-{}",
+            crate::browser::transfer::new_stage_tag()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let key_path = dir.join("id_ed25519");
+        client_key
+            .write_openssh_file(&key_path, russh::keys::ssh_key::LineEnding::LF)
+            .unwrap();
+        let pin = host_key
+            .public_key()
+            .to_openssh()
+            .unwrap()
+            .trim()
+            .to_string();
+        std::fs::write(
+            dir.join("pins.openssh.json"),
+            serde_json::to_string(&serde_json::json!({ "127.0.0.1": pin })).unwrap(),
+        )
+        .unwrap();
+        let mut config = server::Config::default();
+        config.keys.push(host_key);
+        config.inactivity_timeout = None;
+        let config = Arc::new(config);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let mut server = LoopServer {
+            scripts: Arc::new(scripts),
+            channels: Arc::new(Mutex::new(HashMap::new())),
+        };
+        tokio::spawn(async move {
+            if let Ok((socket, _)) = listener.accept().await {
+                let handler = server.new_client(socket.peer_addr().ok());
+                let _ = server::run_stream(config, socket, handler).await;
+            }
+        });
+        (port, key_path, dir)
+    }
+
+    async fn connect_loop(port: u16, key: PathBuf, dir: PathBuf) -> RusshTransport {
+        connect(ConnectParams {
+            host: "127.0.0.1".into(),
+            port,
+            user: "u".into(),
+            flavor: ServerFlavor::Openssh,
+            trust: Arc::new(TrustStore::new(&dir)),
+            tailscale_host_keys: Vec::new(),
+            key_files: vec![key],
+        })
+        .await
+        .unwrap()
+    }
+
+    /// Production consumption pattern (win_agent::capture / agent flows):
+    /// close stdin, read stdout to EOF, THEN ask for the exit status.
+    async fn drain(ch: &mut dyn ExecChannel) -> Vec<u8> {
+        ch.close_stdin().await.unwrap();
+        let mut out = Vec::new();
+        loop {
+            let mut b = [0u8; 1024];
+            let n = ch.read(&mut b).await.unwrap();
+            if n == 0 {
+                break;
+            }
+            out.extend_from_slice(&b[..n]);
+        }
+        out
+    }
+
+    fn one(script: &str, seq: Seq) -> HashMap<String, Seq> {
+        HashMap::from([(script.to_string(), seq)])
+    }
+
+    #[tokio::test]
+    async fn exec_status_after_stdout_eof_is_returned_zero() {
+        let (port, key, dir) = loop_setup(one("s", Seq::EofThenStatus(0))).await;
+        let t = connect_loop(port, key, dir.clone()).await;
+        let mut ch = t.open_exec("s").await.unwrap();
+        assert_eq!(drain(ch.as_mut()).await, b"out");
+        assert_eq!(
+            ch.wait_exit(Duration::from_secs(10)).await,
+            Some(0),
+            "status delivered after stdout EOF must be observed exactly"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn exec_status_after_stdout_eof_is_returned_nonzero() {
+        let (port, key, dir) = loop_setup(one("s", Seq::EofThenStatus(7))).await;
+        let t = connect_loop(port, key, dir.clone()).await;
+        let mut ch = t.open_exec("s").await.unwrap();
+        assert_eq!(drain(ch.as_mut()).await, b"out");
+        assert_eq!(
+            ch.wait_exit(Duration::from_secs(10)).await,
+            Some(7),
+            "nonzero status delivered after stdout EOF must be observed exactly"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn exec_status_before_eof_still_observed() {
+        let (port, key, dir) = loop_setup(one("s", Seq::StatusBeforeEof(3))).await;
+        let t = connect_loop(port, key, dir.clone()).await;
+        let mut ch = t.open_exec("s").await.unwrap();
+        assert_eq!(drain(ch.as_mut()).await, b"out");
+        assert_eq!(ch.wait_exit(Duration::from_secs(10)).await, Some(3));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn exec_eof_close_without_status_stays_none_without_busy_loop() {
+        let (port, key, dir) = loop_setup(one("s", Seq::EofCloseNoStatus)).await;
+        let t = connect_loop(port, key, dir.clone()).await;
+        let mut ch = t.open_exec("s").await.unwrap();
+        assert_eq!(drain(ch.as_mut()).await, b"out");
+        let start = std::time::Instant::now();
+        assert_eq!(ch.wait_exit(Duration::from_secs(10)).await, None);
+        assert_eq!(ch.wait_exit(Duration::from_secs(10)).await, None);
+        assert!(
+            start.elapsed() < Duration::from_secs(5),
+            "exhausted channel must not be polled in a busy loop"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn exec_silent_channel_wait_is_bounded_unknown() {
+        let (port, key, dir) = loop_setup(one("s", Seq::Silent)).await;
+        let t = connect_loop(port, key, dir.clone()).await;
+        let mut ch = t.open_exec("s").await.unwrap();
+        ch.close_stdin().await.unwrap();
+        let start = std::time::Instant::now();
+        assert_eq!(ch.wait_exit(Duration::from_millis(300)).await, None);
+        assert!(start.elapsed() >= Duration::from_millis(250));
+        assert!(start.elapsed() < Duration::from_secs(5));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn exec_stderr_preserved_and_status_after_eof_observed() {
+        let (port, key, dir) = loop_setup(one("s", Seq::StderrThenStatus(2))).await;
+        let t = connect_loop(port, key, dir.clone()).await;
+        let mut ch = t.open_exec("s").await.unwrap();
+        assert_eq!(drain(ch.as_mut()).await, b"out");
+        assert_eq!(
+            ch.wait_exit(Duration::from_secs(10)).await,
+            Some(2),
+            "stderr followed by status after EOF must still report the status"
+        );
+        assert_eq!(ch.stderr_tail(), "err");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn exec_refusal_is_typed_refusal() {
+        let (port, key, dir) = loop_setup(one("s", Seq::Refuse)).await;
+        let t = connect_loop(port, key, dir.clone()).await;
+        let mut ch = t.open_exec("s").await.unwrap();
+        let mut b = [0u8; 64];
+        let err = ch.read(&mut b).await.unwrap_err();
+        assert_eq!(err.kind, crate::browser::ErrorKind::Unsupported);
+        assert!(err.message.contains("refused the remote exec request"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }
