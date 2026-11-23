@@ -1022,12 +1022,15 @@ struct SshExecChannel {
     stdout: std::collections::VecDeque<u8>,
     stderr: Arc<Mutex<Vec<u8>>>,
     exit: Option<u32>,
-    /// Read-side EOF: no further stdout can arrive on this channel. This is
-    /// NOT channel completion — RFC 4254 does not require exit-status to
-    /// precede EOF/Close, and real servers deliver EOF first (observed live:
-    /// Windows OpenSSH 9.5 on both M3 peers, 2026-11-23; reproduced
-    /// deterministically in `exec_status_loopback` below), so a status that
-    /// follows EOF must still be collected.
+    /// Read-side EOF: no further stdout can arrive on this channel. RFC
+    /// 4254 §5.3 leaves the channel OPEN after EOF — a process status may
+    /// still be delivered afterwards — so EOF must not end the search for
+    /// it. Only the channel's completion (Close per §6.10, or stream
+    /// exhaustion) is terminal for `wait_exit`. The live M3-peer symptom
+    /// (2026-11-23: correct stdout, no observed status) had its wire
+    /// ordering UNMEASURED; the production-seam loopback tests in
+    /// `exec_status_loopback` are what establish the client-side
+    /// EOF-before-status defect.
     stdout_eof: bool,
     /// Channel completion: Close received, or the channel's message stream
     /// is exhausted. Only this ends the search for an exit status.
@@ -1466,11 +1469,14 @@ Wdlj8alBZoITtFBHPGIPvHqqAjV8fNbDomLxImXrVYxsgRa3DssZ
 /// the PRODUCTION `connect()` (auth + SFTP subsystem) and the production
 /// `open_exec()` adapter are driven exactly as callers drive them
 /// (write/EOF, read to stdout EOF, then `wait_exit`). This reproduces the
-/// live-peer symptom deterministically: Windows OpenSSH 9.5 on both M3
-/// peers returned correct stdout but no observable exit status, because the
-/// adapter treated stdout-side EOF as terminal while RFC 4254 does not
-/// require exit-status to precede EOF/Close — a status arriving after EOF
-/// was never pumped.
+/// client-side defect deterministically: the adapter treated stdout-side
+/// EOF as terminal, so an ExitStatus delivered after EOF was never pumped.
+/// Attribution note: the archived live-peer probes observed correct stdout
+/// with NO exit status — they did not trace message order, and the peers'
+/// actual wire ordering remains unmeasured. The loopback proves the
+/// EOF-before-status mechanism is a real client failure mode (and the
+/// repaired client's handling of both orderings); it does not measure what
+/// either peer's sshd sent.
 #[cfg(test)]
 mod exec_status_loopback {
     use super::*;
