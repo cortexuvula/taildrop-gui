@@ -5196,7 +5196,7 @@ dependencies = [
 
 [[package]]
 name = "taildrop-gui"
-version = "0.17.0"
+version = "0.18.0"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
